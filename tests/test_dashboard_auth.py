@@ -327,16 +327,49 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('<title>牛牛大作手</title>', body)
         self.assertNotIn('<title>牛牛大作手 · 设置</title>', body)
         self.assertNotIn('<title>牛牛大作手 · 管理</title>', body)
-        self.assertIn('推文监控/美股买入评级模型', body)
+        self.assertIn('开启牛牛美股', body)
+        self.assertIn("name='env__DASHBOARD_US_FEATURES_ENABLED' data-feature-toggle='us'", body)
+        us_toggle_start = body.index("name='env__DASHBOARD_US_FEATURES_ENABLED' data-feature-toggle='us'")
+        us_toggle_end = body.index('</select>', us_toggle_start)
+        us_toggle_html = body[us_toggle_start:us_toggle_end]
+        self.assertNotIn("value=''", us_toggle_html)
+        self.assertIn("value='1'", us_toggle_html)
+        self.assertIn("value='0'", us_toggle_html)
+        self.assertIn("data-feature-gated='us'", body)
+        self.assertIn('[hidden]{display:none!important}', body)
+        self.assertIn("document.addEventListener('input', handleUsFeatureToggle);", body)
+        self.assertIn('Grok 模型', body)
+        self.assertIn('推文监控作者', body)
+        self.assertIn('推文监控间隔', body)
+        self.assertIn('美股买入评级时间', body)
+        self.assertLess(body.index('开启牛牛美股'), body.index('消息面预检模型'))
+        self.assertLess(body.index('Grok 模型'), body.index('消息面预检模型'))
+        self.assertLess(body.index('推文监控作者'), body.index('消息面预检模型'))
+        self.assertLess(body.index('美股买入评级时间'), body.index('消息面预检模型'))
+        self.assertNotIn('推文监控/美股买入评级模型', body)
+        self.assertNotIn('<h2>推文监控作者</h2>', body)
+        self.assertNotIn('<h2>推文监控周期</h2>', body)
+        self.assertNotIn('<h2>美股买入评级周期</h2>', body)
         self.assertIn('买卖决策模型', body)
         self.assertIn('选股及买卖决策时间点', body)
         self.assertIn('盘面监控生产时间点', body)
-        self.assertIn('推文监控周期', body)
-        self.assertIn('美股买入评级周期', body)
         self.assertIn('指数行情更新周期', body)
         self.assertIn("class='settings-group'", body)
         self.assertIn("class='setting-row'", body)
         self.assertIn("class='settings-actions'", body)
+        self.assertIn("data-env-save-status role='status' aria-live='polite'", body)
+        self.assertIn("data-env-save-button type='submit'", body)
+        self.assertIn("fetch('/api/admin/config/env'", body)
+        self.assertIn("正在保存业务配置", body)
+        self.assertIn("配置未变化，无需重新应用", body)
+        self.assertIn('.save-button:active,.save-button.pressed', body)
+        self.assertIn("document.addEventListener('pointerdown'", body)
+        self.assertIn("button.classList.add('pressed')", body)
+        self.assertIn('function envFormSnapshot(form)', body)
+        self.assertIn('function resetEnvSaveIfDirty(form)', body)
+        self.assertIn('markEnvFormSaved(form);', body)
+        self.assertIn('有未保存修改', body)
+        self.assertNotIn("setEnvSaveFeedback(form, '', ''); }, 3800", body)
         self.assertNotIn('<table class=', body)
         self.assertNotIn("<div class='config-name'>", body)
         self.assertNotIn('<th>生效</th>', body)
@@ -362,6 +395,36 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('新增配置项', body)
         self.assertNotIn('DASHBOARD_HOME', body)
         self.assertNotIn('LaunchAgent', body)
+
+    def test_home_page_uses_us_feature_flag_for_tabs_without_deleting_data(self):
+        original_auth_enabled = dashboard.AUTH_ENABLED
+        try:
+            dashboard.AUTH_ENABLED = False
+            dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
+            disabled = FakeHandler(path='/?category=x_monitor')
+            disabled.do_GET()
+            disabled_body = disabled.wfile.getvalue().decode('utf-8')
+
+            dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=1\n', encoding='utf-8')
+            enabled = FakeHandler(path='/?category=x_monitor')
+            enabled.do_GET()
+            enabled_body = enabled.wfile.getvalue().decode('utf-8')
+        finally:
+            dashboard.AUTH_ENABLED = original_auth_enabled
+
+        self.assertEqual(disabled.status, 200)
+        self.assertIn('const US_FEATURES_ENABLED = false;', disabled_body)
+        self.assertIn("const US_FEATURE_CATEGORIES = new Set(['x_monitor', 'us_ratings']);", disabled_body)
+        self.assertIn('activeCategory = normalizeActiveCategory(activeCategory);', disabled_body)
+        self.assertEqual(enabled.status, 200)
+        self.assertIn('const US_FEATURES_ENABLED = true;', enabled_body)
+
+    def test_us_feature_flag_reads_dashboard_env_without_touching_records(self):
+        dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
+        self.assertFalse(dashboard.us_features_enabled())
+
+        dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=yes\n', encoding='utf-8')
+        self.assertTrue(dashboard.us_features_enabled())
 
     def test_admin_config_restores_x_watchlist_accounts_from_state(self):
         dashboard.CRON_STATE_DIR.mkdir(parents=True)
@@ -404,7 +467,11 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
             dashboard.B1_SCHEDULE_ENABLED = False
             updates = {
+                'DASHBOARD_US_FEATURES_ENABLED': '1',
                 'DASHBOARD_GROK_MODEL': 'grok-new',
+                'DASHBOARD_NEWS_MODEL': 'search-model',
+                'DASHBOARD_NEWS_BASE_URL': 'https://news.example/v1',
+                'DASHBOARD_NEWS_API_KEY': 'news-secret',
                 'DASHBOARD_B1_SCHEDULE_TIMES': '09:25, 10:00, 14:50',
                 'DASHBOARD_US_RATING_CRON': '10:30',
                 'DASHBOARD_MARKET_AUCTION_CRON': '09:26',
@@ -428,7 +495,11 @@ class DashboardAuthTests(unittest.TestCase):
                 else:
                     dashboard.os.environ[name] = value
 
+        self.assertEqual(parsed['DASHBOARD_US_FEATURES_ENABLED'], '1')
         self.assertEqual(parsed['DASHBOARD_GROK_MODEL'], 'grok-new')
+        self.assertEqual(parsed['DASHBOARD_NEWS_MODEL'], 'search-model')
+        self.assertEqual(parsed['DASHBOARD_NEWS_BASE_URL'], 'https://news.example/v1')
+        self.assertEqual(parsed['DASHBOARD_NEWS_API_KEY'], 'news-secret')
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
@@ -456,7 +527,7 @@ class DashboardAuthTests(unittest.TestCase):
                 '    api_key: provider-secret\n',
                 encoding='utf-8',
             )
-            for name in ['DASHBOARD_GROK_BASE_URL', 'DASHBOARD_DECISION_BASE_URL']:
+            for name in ['DASHBOARD_GROK_BASE_URL', 'DASHBOARD_DECISION_BASE_URL', 'DASHBOARD_NEWS_BASE_URL']:
                 dashboard.os.environ.pop(name, None)
             payload = dashboard.build_admin_config_payload()
         finally:
@@ -474,6 +545,10 @@ class DashboardAuthTests(unittest.TestCase):
             self.assertEqual(item['default'], '')
             self.assertEqual(item['file_value'], '')
             self.assertEqual(item['effective'], 'https://crossdesk.example/v1')
+        news_item = by_name['DASHBOARD_NEWS_BASE_URL']
+        self.assertEqual(news_item['default'], '')
+        self.assertEqual(news_item['file_value'], '')
+        self.assertEqual(news_item['effective'], '')
 
     def test_env_config_write_preserves_blank_secret_and_quotes_values(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE
@@ -576,7 +651,11 @@ class DashboardAuthTests(unittest.TestCase):
             )
             token = dashboard.get_or_create_admin_token()
             body = urllib.parse.urlencode({
+                'env__DASHBOARD_US_FEATURES_ENABLED': '1',
                 'env__DASHBOARD_GROK_MODEL': 'grok-test',
+                'env__DASHBOARD_NEWS_MODEL': 'search-model',
+                'env__DASHBOARD_NEWS_BASE_URL': 'https://news.example/v1',
+                'env__DASHBOARD_NEWS_API_KEY': 'news-secret',
                 'env__DASHBOARD_B1_SCHEDULE_TIMES': ['', '09:25', '10:00', '', '14:50'],
                 'env__DASHBOARD_INDICES_TTL_SECONDS': '20',
                 'env__DASHBOARD_MARKET_AUCTION_CRON': '09:26',
@@ -622,7 +701,11 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertTrue(response['runtime']['ok'])
         self.assertIn('b1_schedule_times', response['runtime']['applied'])
         self.assertIn('indices_ttl', response['runtime']['applied'])
+        self.assertEqual(parsed['DASHBOARD_US_FEATURES_ENABLED'], '1')
         self.assertEqual(parsed['DASHBOARD_GROK_MODEL'], 'grok-test')
+        self.assertEqual(parsed['DASHBOARD_NEWS_MODEL'], 'search-model')
+        self.assertEqual(parsed['DASHBOARD_NEWS_BASE_URL'], 'https://news.example/v1')
+        self.assertEqual(parsed['DASHBOARD_NEWS_API_KEY'], 'news-secret')
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
         self.assertEqual(parsed['DASHBOARD_INDICES_TTL_SECONDS'], '20')
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')

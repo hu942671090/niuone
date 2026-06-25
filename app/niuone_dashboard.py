@@ -55,6 +55,8 @@ ADMIN_PASSWORD_COOKIE_NAME = "dashboard_admin_session"
 VISITOR_COOKIE_NAME = "niuone_visitor_id"
 ACTION_HEADER_NAME = "X-NiuOne-Action"
 ACTION_HEADER_VALUES = {"1", "true", "yes", "on"}
+TRUTHY_VALUES = {"1", "true", "yes", "on"}
+US_FEATURE_CATEGORIES = {"x_monitor", "us_ratings"}
 NIUONE_LAUNCHD_LABELS = (
     "ai.niuone.cron-scheduler",
     "ai.niuone.x-watchlist",
@@ -195,24 +197,28 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_DECISION_MAX_TOKENS", "label": "决策最大输出长度", "group": "买卖决策模型", "kind": "int", "default": "6000", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_TIMEOUT", "label": "决策请求超时", "group": "买卖决策模型", "kind": "int", "default": "180", "effect": "next_run"},
 
-    {"name": "US_RATING_BASE_URL", "label": "美股评级 API Base URL", "group": "上游模型覆盖", "kind": "text", "default": "", "effect": "next_run"},
-    {"name": "US_RATING_API_KEY", "label": "美股评级 API Key", "group": "上游模型覆盖", "kind": "secret", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_US_FEATURES_ENABLED", "label": "开启牛牛美股", "group": "牛牛美股", "kind": "bool", "default": "0", "effect": "next_run"},
+    {"name": "US_RATING_BASE_URL", "label": "美股评级 API Base URL", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "US_RATING_API_KEY", "label": "美股评级 API Key", "group": "牛牛美股", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "CROSSDESK_BASE_URL", "label": "Crossdesk Base URL", "group": "上游模型覆盖", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "CROSSDESK_API_KEY", "label": "Crossdesk API Key", "group": "上游模型覆盖", "kind": "secret", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_GROK_MODEL", "label": "Grok 模型", "group": "推文监控/美股买入评级模型", "kind": "text", "default": "grok-4.20-multi-agent-xhigh", "effect": "next_run"},
-    {"name": "DASHBOARD_GROK_BASE_URL", "label": "Grok API 地址", "group": "推文监控/美股买入评级模型", "kind": "text", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_GROK_API_KEY", "label": "Grok API 密钥", "group": "推文监控/美股买入评级模型", "kind": "secret", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_GROK_MODEL", "label": "Grok 模型", "group": "牛牛美股", "kind": "text", "default": "grok-4.20-multi-agent-xhigh", "effect": "next_run"},
+    {"name": "DASHBOARD_GROK_BASE_URL", "label": "Grok API 地址", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_GROK_API_KEY", "label": "Grok API 密钥", "group": "牛牛美股", "kind": "secret", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_NEWS_MODEL", "label": "消息面预检模型", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_NEWS_BASE_URL", "label": "消息面预检 API 地址", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_NEWS_API_KEY", "label": "消息面预检 API 密钥", "group": "消息面预检模型", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_MODEL", "label": "买卖决策模型", "group": "买卖决策模型", "kind": "text", "default": "deepseek-v4-pro", "effect": "next_run"},
-    {"name": "DASHBOARD_DECISION_BASE_URL", "label": "DeepSeek API 地址", "group": "买卖决策模型", "kind": "text", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_DECISION_API_KEY", "label": "DeepSeek API 密钥", "group": "买卖决策模型", "kind": "secret", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_DECISION_BASE_URL", "label": "买卖决策 API 地址", "group": "买卖决策模型", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_DECISION_API_KEY", "label": "买卖决策 API 密钥", "group": "买卖决策模型", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_AUCTION_CRON", "label": "盘前竞价监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "25 9 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_MIDDAY_CRON", "label": "午盘监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "40 11 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_CLOSE_CRON", "label": "盘后监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "10 15 * * 1-5", "effect": "next_run"},
-    {"name": "X_WATCHLIST_ACCOUNTS", "label": "推文监控作者", "group": "推文监控作者", "kind": "handle_list", "default": "", "effect": "next_run"},
-    {"name": "X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "label": "推文监控间隔", "group": "推文监控周期", "kind": "int", "default": "1200", "effect": "next_run"},
-    {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "美股买入评级周期", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
-    {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "美股买入评级周期", "kind": "int", "default": "240", "effect": "next_run"},
-    {"name": "US_RATING_REQUEST_TIMEOUT_SECONDS", "label": "美股评级单次请求超时秒数", "group": "美股买入评级周期", "kind": "int", "default": "120", "effect": "next_run"},
+    {"name": "X_WATCHLIST_ACCOUNTS", "label": "推文监控作者", "group": "牛牛美股", "kind": "handle_list", "default": "", "effect": "next_run"},
+    {"name": "X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "label": "推文监控间隔", "group": "牛牛美股", "kind": "int", "default": "1200", "effect": "next_run"},
+    {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "牛牛美股", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
+    {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "牛牛美股", "kind": "int", "default": "240", "effect": "next_run"},
+    {"name": "US_RATING_REQUEST_TIMEOUT_SECONDS", "label": "美股评级单次请求超时秒数", "group": "牛牛美股", "kind": "int", "default": "120", "effect": "next_run"},
     {"name": "DASHBOARD_INDICES_TTL_SECONDS", "label": "指数行情更新间隔", "group": "指数行情更新周期", "kind": "int", "default": "15", "effect": "runtime"},
 
     {"name": "X_WATCHLIST_STRICT_CONTEXT_HOLD", "label": "X 上下文缺失时暂缓发送", "group": "X 监控", "kind": "bool", "default": "0", "effect": "next_run"},
@@ -235,9 +241,18 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
 ]
 ENV_CONFIG_BY_NAME = {item["name"]: item for item in ENV_CONFIG_SCHEMA}
 ADMIN_VISIBLE_ENV_NAMES = [
+    "DASHBOARD_US_FEATURES_ENABLED",
     "DASHBOARD_GROK_MODEL",
     "DASHBOARD_GROK_BASE_URL",
     "DASHBOARD_GROK_API_KEY",
+    "X_WATCHLIST_ACCOUNTS",
+    "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
+    "DASHBOARD_US_RATING_CRON",
+    "US_RATING_DEADLINE_SECONDS",
+    "US_RATING_REQUEST_TIMEOUT_SECONDS",
+    "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_BASE_URL",
+    "DASHBOARD_NEWS_API_KEY",
     "DASHBOARD_DECISION_MODEL",
     "DASHBOARD_DECISION_BASE_URL",
     "DASHBOARD_DECISION_API_KEY",
@@ -247,19 +262,14 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
     "DASHBOARD_MARKET_CLOSE_CRON",
-    "X_WATCHLIST_ACCOUNTS",
-    "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
-    "DASHBOARD_US_RATING_CRON",
-    "US_RATING_DEADLINE_SECONDS",
-    "US_RATING_REQUEST_TIMEOUT_SECONDS",
     "DASHBOARD_CRON_MAX_ATTEMPTS",
     "DASHBOARD_CRON_RETRY_DELAY_SECONDS",
     "DASHBOARD_INDICES_TTL_SECONDS",
 ]
 TRADER_RUNTIME_ENV_NAMES = {
-    "DASHBOARD_GROK_MODEL",
-    "DASHBOARD_GROK_BASE_URL",
-    "DASHBOARD_GROK_API_KEY",
+    "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_BASE_URL",
+    "DASHBOARD_NEWS_API_KEY",
     "DASHBOARD_DECISION_MODEL",
     "DASHBOARD_DECISION_BASE_URL",
     "DASHBOARD_DECISION_API_KEY",
@@ -267,13 +277,11 @@ TRADER_RUNTIME_ENV_NAMES = {
     "DASHBOARD_DECISION_TIMEOUT",
 }
 ENV_GROUP_ORDER = [
-    "推文监控/美股买入评级模型",
+    "牛牛美股",
+    "消息面预检模型",
     "买卖决策模型",
     "选股及买卖决策时间点",
     "盘面监控生产时间点",
-    "推文监控作者",
-    "推文监控周期",
-    "美股买入评级周期",
     "指数行情更新周期",
     "基础路径",
     "访问控制",
@@ -1400,6 +1408,12 @@ def parse_env_file(path: Path | None = None) -> dict[str, str]:
     return values
 
 
+def us_features_enabled(env_values: dict[str, str] | None = None) -> bool:
+    values = env_values if env_values is not None else parse_env_file()
+    raw = values.get("DASHBOARD_US_FEATURES_ENABLED") or os.environ.get("DASHBOARD_US_FEATURES_ENABLED") or "0"
+    return str(raw).strip().lower() in TRUTHY_VALUES
+
+
 def quote_env_value(value: str) -> str:
     value = str(value or "")
     if value and re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]+", value):
@@ -1575,14 +1589,27 @@ CRON_TIME_CONFIGS = {
     "DASHBOARD_US_RATING_CRON": {"day_label": "每天"},
 }
 ADMIN_GROUP_NOTES = {
-    "推文监控/美股买入评级模型": "推荐使用 grok；推文监控和美股买入评级共用这组模型配置。",
-    "买卖决策模型": "推荐使用 deepseek-v4-pro；用于选股结果后的买卖决策。",
+    "牛牛美股": "集中管理 X/推文监控与美股买入评级。开启后显示并启用相关设置；关闭时隐藏相关设置，后台定时任务会跳过这些功能。Grok 为推荐模型。",
+    "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。留空则跳过。",
+    "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。",
     "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；盘面监控在 A 股交易日触发。",
-    "推文监控作者": "填写 X/Twitter handle，不需要 @；如果输入 @ 会在保存时自动去掉。",
-    "推文监控周期": "单位为秒，保存后从下一轮监控开始使用。",
-    "美股买入评级周期": "直接填写北京时间 HH:MM；默认每天触发。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
+}
+US_FEATURE_GATED_GROUPS = {
+    "X 监控",
+}
+US_FEATURE_GATED_NAMES = {
+    "US_RATING_BASE_URL",
+    "US_RATING_API_KEY",
+    "DASHBOARD_GROK_MODEL",
+    "DASHBOARD_GROK_BASE_URL",
+    "DASHBOARD_GROK_API_KEY",
+    "X_WATCHLIST_ACCOUNTS",
+    "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
+    "DASHBOARD_US_RATING_CRON",
+    "US_RATING_DEADLINE_SECONDS",
+    "US_RATING_REQUEST_TIMEOUT_SECONDS",
 }
 
 
@@ -1953,13 +1980,134 @@ ADMIN_HTML = r"""<!doctype html>
 <title>牛牛大作手</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
 <style>
-:root{color-scheme:dark;--bg:#07090d;--surface:#10151b;--surface2:#151b23;--line:#26313d;--line2:#334155;--text:#f3f6fb;--muted:#94a3b8;--soft:#cbd5e1;--accent:#2dd4bf;--blue:#60a5fa;--red:#fb7185;--green:#34d399;--yellow:#fbbf24}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(180deg,#0b1016 0%,var(--bg) 48%,#050608 100%);color:var(--text);min-height:100vh}.admin-header{border-bottom:1px solid rgba(148,163,184,.16);background:rgba(7,9,13,.88);backdrop-filter:blur(16px);padding:22px clamp(16px,4vw,42px)}.admin-header-inner{max-width:1180px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.eyebrow{font-size:12px;font-weight:850;color:var(--accent);letter-spacing:.04em;margin-bottom:6px}h1{margin:0;font-size:30px;letter-spacing:0}h2{margin:0;font-size:18px;letter-spacing:0}p{margin:0}.muted{color:var(--muted)}.toplink{color:#dbeafe;text-decoration:none;border:1px solid rgba(148,163,184,.20);background:rgba(15,23,42,.62);border-radius:8px;padding:9px 12px;font-weight:850}.toplink:hover{border-color:rgba(96,165,250,.54);background:rgba(30,41,59,.72)}.admin-main{width:min(1180px,100%);margin:0 auto;padding:20px clamp(14px,4vw,42px) 34px;display:grid;gap:16px}.settings-form{display:grid;gap:14px}.settings-group{border:1px solid rgba(148,163,184,.16);border-radius:8px;background:rgba(16,21,27,.88);box-shadow:0 18px 56px rgba(0,0,0,.22);overflow:hidden}.settings-group-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid rgba(148,163,184,.12);background:rgba(21,27,35,.72)}.settings-group-note{color:var(--muted);font-size:13px;line-height:1.5;margin-top:5px}.settings-count{font-size:12px;color:#a7f3d0;border:1px solid rgba(45,212,191,.24);background:rgba(20,184,166,.10);border-radius:999px;padding:3px 8px;white-space:nowrap}.settings-list{display:grid}.setting-row{display:grid;grid-template-columns:minmax(170px,.72fr) minmax(250px,1fr) minmax(220px,.84fr);gap:16px;align-items:start;padding:16px 18px;border-top:1px solid rgba(148,163,184,.10)}.setting-row:first-child{border-top:0}.setting-copy{display:grid;gap:4px;min-width:0}.config-label{font-weight:850;color:#e5edf8;line-height:1.35}.setting-editor{min-width:0}.setting-editor input,.setting-editor select{width:100%;min-width:0}.setting-state{display:grid;gap:8px;min-width:0}.setting-state-item{display:grid;gap:3px}.setting-state-label{font-size:11px;color:#7b8aa0;font-weight:850}.config-meta{font-size:12px;color:#b6c2d2;max-width:100%;overflow-wrap:anywhere;line-height:1.45}.config-empty{color:#64748b}input,select,textarea,button{border:1px solid var(--line);background:#0b0f15;color:var(--text);border-radius:8px;padding:10px 12px;font:inherit;min-width:0}input:focus,select:focus,textarea:focus{outline:2px solid rgba(96,165,250,.70);outline-offset:1px;border-color:rgba(96,165,250,.62)}textarea{width:100%;min-height:460px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;resize:vertical}button{cursor:pointer;font-weight:850;background:linear-gradient(135deg,rgba(20,184,166,.92),rgba(96,165,250,.76));border:0;color:#061017}.save-button{min-height:42px;padding:10px 16px;justify-self:end}.settings-actions{position:sticky;bottom:14px;z-index:3;display:flex;justify-content:flex-end;padding:10px;border:1px solid rgba(148,163,184,.18);border-radius:8px;background:rgba(8,11,16,.86);backdrop-filter:blur(14px);box-shadow:0 18px 54px rgba(0,0,0,.30)}.time-list-control{display:grid;gap:8px}.time-list-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:6px}.time-list-item{display:grid;grid-template-columns:minmax(92px,1fr) 34px;gap:4px;align-items:center}.time-list-item input{min-width:0}.time-list-add,.time-list-remove{display:inline-grid;place-items:center;padding:0;border-radius:8px;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.78);color:#dbeafe}.time-list-add{width:38px;height:38px;justify-self:start}.time-list-remove{width:34px;height:38px;color:#fecdd3}.okmsg{border:1px solid rgba(52,211,153,.28);background:rgba(6,78,59,.20);color:#bbf7d0;border-radius:8px;padding:11px 13px}.errmsg{border:1px solid rgba(251,113,133,.34);background:rgba(127,29,29,.22);color:#fecdd3;border-radius:8px;padding:11px 13px}@media(max-width:940px){.setting-row{grid-template-columns:1fr;gap:10px}.setting-state{grid-template-columns:repeat(2,minmax(0,1fr))}.save-button{width:100%}.settings-actions{position:static}}@media(max-width:620px){.admin-header{padding:18px 14px}.admin-main{padding:16px 12px 26px}.settings-group-head,.setting-row{padding:14px}.setting-state{grid-template-columns:1fr}.time-list-grid{grid-template-columns:1fr}.toplink{width:100%;text-align:center}}</style>
+:root{color-scheme:dark;--bg:#07090d;--surface:#10151b;--surface2:#151b23;--line:#26313d;--line2:#334155;--text:#f3f6fb;--muted:#94a3b8;--soft:#cbd5e1;--accent:#2dd4bf;--blue:#60a5fa;--red:#fb7185;--green:#34d399;--yellow:#fbbf24}*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(180deg,#0b1016 0%,var(--bg) 48%,#050608 100%);color:var(--text);min-height:100vh}.admin-header{border-bottom:1px solid rgba(148,163,184,.16);background:rgba(7,9,13,.88);backdrop-filter:blur(16px);padding:22px clamp(16px,4vw,42px)}.admin-header-inner{max-width:1180px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.eyebrow{font-size:12px;font-weight:850;color:var(--accent);letter-spacing:.04em;margin-bottom:6px}h1{margin:0;font-size:30px;letter-spacing:0}h2{margin:0;font-size:18px;letter-spacing:0}p{margin:0}.muted{color:var(--muted)}.toplink{color:#dbeafe;text-decoration:none;border:1px solid rgba(148,163,184,.20);background:rgba(15,23,42,.62);border-radius:8px;padding:9px 12px;font-weight:850}.toplink:hover{border-color:rgba(96,165,250,.54);background:rgba(30,41,59,.72)}.admin-main{width:min(1180px,100%);margin:0 auto;padding:20px clamp(14px,4vw,42px) 34px;display:grid;gap:16px}.settings-form{display:grid;gap:14px}.settings-group{border:1px solid rgba(148,163,184,.16);border-radius:8px;background:rgba(16,21,27,.88);box-shadow:0 18px 56px rgba(0,0,0,.22);overflow:hidden}.settings-group-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid rgba(148,163,184,.12);background:rgba(21,27,35,.72)}.settings-group-note{color:var(--muted);font-size:13px;line-height:1.5;margin-top:5px}.settings-count{font-size:12px;color:#a7f3d0;border:1px solid rgba(45,212,191,.24);background:rgba(20,184,166,.10);border-radius:999px;padding:3px 8px;white-space:nowrap}.settings-list{display:grid}.setting-row{display:grid;grid-template-columns:minmax(170px,.72fr) minmax(250px,1fr) minmax(220px,.84fr);gap:16px;align-items:start;padding:16px 18px;border-top:1px solid rgba(148,163,184,.10)}.setting-row:first-child{border-top:0}.setting-copy{display:grid;gap:4px;min-width:0}.config-label{font-weight:850;color:#e5edf8;line-height:1.35}.setting-editor{min-width:0}.setting-editor input,.setting-editor select{width:100%;min-width:0}.setting-state{display:grid;gap:8px;min-width:0}.setting-state-item{display:grid;gap:3px}.setting-state-label{font-size:11px;color:#7b8aa0;font-weight:850}.config-meta{font-size:12px;color:#b6c2d2;max-width:100%;overflow-wrap:anywhere;line-height:1.45}.config-empty{color:#64748b}input,select,textarea,button{border:1px solid var(--line);background:#0b0f15;color:var(--text);border-radius:8px;padding:10px 12px;font:inherit;min-width:0}input:focus,select:focus,textarea:focus{outline:2px solid rgba(96,165,250,.70);outline-offset:1px;border-color:rgba(96,165,250,.62)}textarea{width:100%;min-height:460px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;resize:vertical}button{cursor:pointer;font-weight:850;background:linear-gradient(135deg,rgba(20,184,166,.92),rgba(96,165,250,.76));border:0;color:#061017}.save-button{min-height:42px;padding:10px 16px;justify-self:end;transition:transform .12s ease,filter .12s ease,background .12s ease}.save-button:disabled{cursor:wait;filter:saturate(.65);opacity:.82}.save-button.saved{background:linear-gradient(135deg,rgba(52,211,153,.95),rgba(45,212,191,.78))}.save-button.error{background:linear-gradient(135deg,rgba(251,113,133,.95),rgba(248,113,113,.76));color:#fff}.settings-actions{position:sticky;bottom:14px;z-index:3;display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:10px;border:1px solid rgba(148,163,184,.18);border-radius:8px;background:rgba(8,11,16,.86);backdrop-filter:blur(14px);box-shadow:0 18px 54px rgba(0,0,0,.30)}.settings-save-status{min-height:20px;font-size:13px;line-height:1.4;color:var(--muted);text-align:right;overflow-wrap:anywhere}.settings-save-status.ok{color:#86efac}.settings-save-status.error{color:#fecdd3}.settings-save-status.busy{color:#bfdbfe}.time-list-control{display:grid;gap:8px}.time-list-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:6px}.time-list-item{display:grid;grid-template-columns:minmax(92px,1fr) 34px;gap:4px;align-items:center}.time-list-item input{min-width:0}.time-list-add,.time-list-remove{display:inline-grid;place-items:center;padding:0;border-radius:8px;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.78);color:#dbeafe}.time-list-add{width:38px;height:38px;justify-self:start}.time-list-remove{width:34px;height:38px;color:#fecdd3}.okmsg{border:1px solid rgba(52,211,153,.28);background:rgba(6,78,59,.20);color:#bbf7d0;border-radius:8px;padding:11px 13px}.errmsg{border:1px solid rgba(251,113,133,.34);background:rgba(127,29,29,.22);color:#fecdd3;border-radius:8px;padding:11px 13px}@media(max-width:940px){.setting-row{grid-template-columns:1fr;gap:10px}.setting-state{grid-template-columns:repeat(2,minmax(0,1fr))}.save-button{width:100%}.settings-actions{position:static;align-items:stretch;flex-direction:column}.settings-save-status{text-align:left}}@media(max-width:620px){.admin-header{padding:18px 14px}.admin-main{padding:16px 12px 26px}.settings-group-head,.setting-row{padding:14px}.setting-state{grid-template-columns:1fr}.time-list-grid{grid-template-columns:1fr}.toplink{width:100%;text-align:center}}</style>
+<style>
+.save-button{box-shadow:0 10px 20px rgba(0,0,0,.22),0 1px 0 rgba(255,255,255,.20) inset;transition:transform .08s ease,filter .08s ease,background .12s ease,box-shadow .08s ease}
+.save-button:hover:not(:disabled){filter:brightness(1.05);transform:translateY(-1px)}
+.save-button:active,.save-button.pressed{transform:translateY(2px) scale(.985);filter:brightness(.88);box-shadow:0 3px 8px rgba(0,0,0,.28),0 2px 8px rgba(0,0,0,.30) inset}
+</style>
 </head><body><header class="admin-header"><div class="admin-header-inner"><div><div class="eyebrow">牛牛大作手</div><h1>设置</h1></div><a class="toplink" href="/">返回首页</a></div></header>
 <main class="admin-main">
 __NOTICE__
 __ENV_CONFIG__
 </main>
 <script>
+function syncUsFeatureSettings() {
+  var toggle = document.querySelector('[data-feature-toggle="us"]');
+  var enabled = toggle && toggle.value === '1';
+  document.querySelectorAll('[data-feature-gated="us"]').forEach(function(section) {
+    section.hidden = !enabled;
+    section.setAttribute('aria-hidden', enabled ? 'false' : 'true');
+  });
+}
+document.addEventListener('DOMContentLoaded', syncUsFeatureSettings);
+syncUsFeatureSettings();
+function handleUsFeatureToggle(event) {
+  var target = event.target;
+  if (target && target.matches && target.matches('[data-feature-toggle="us"]')) {
+    syncUsFeatureSettings();
+  }
+}
+document.addEventListener('input', handleUsFeatureToggle);
+document.addEventListener('change', handleUsFeatureToggle);
+function pulseSaveButton(button) {
+  if (!button) return;
+  button.classList.add('pressed');
+  window.setTimeout(function() { button.classList.remove('pressed'); }, 180);
+}
+document.addEventListener('pointerdown', function(event) {
+  var target = event.target;
+  if (!target || !target.closest) return;
+  var button = target.closest('[data-env-save-button]');
+  if (button && !button.disabled) pulseSaveButton(button);
+});
+function envFormSnapshot(form) {
+  if (!form || !window.FormData || !window.URLSearchParams) return '';
+  return new URLSearchParams(new FormData(form)).toString();
+}
+function markEnvFormSaved(form) {
+  if (!form) return;
+  form.dataset.savedSnapshot = envFormSnapshot(form);
+  form.dataset.savedState = '1';
+}
+function resetEnvSaveIfDirty(form) {
+  if (!form || form.id !== 'env-config-form' || form.dataset.savedState !== '1') return;
+  var currentSnapshot = envFormSnapshot(form);
+  if (!currentSnapshot || currentSnapshot === form.dataset.savedSnapshot) return;
+  form.dataset.savedState = '0';
+  setEnvSaveFeedback(form, '', '有未保存修改');
+}
+function setEnvSaveFeedback(form, state, message) {
+  var button = form ? form.querySelector('[data-env-save-button]') : null;
+  var status = form ? form.querySelector('[data-env-save-status]') : null;
+  if (status) {
+    status.textContent = message || '';
+    status.className = 'settings-save-status' + (state ? ' ' + state : '');
+  }
+  if (!button) return;
+  if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent || '保存业务配置';
+  button.classList.remove('saved', 'error');
+  if (state === 'busy') {
+    button.disabled = true;
+    button.textContent = '保存中...';
+  } else if (state === 'ok') {
+    button.disabled = false;
+    button.classList.add('saved');
+    button.textContent = '已保存';
+    markEnvFormSaved(form);
+  } else if (state === 'error') {
+    button.disabled = false;
+    button.classList.add('error');
+    button.textContent = '保存失败';
+  } else {
+    button.disabled = false;
+    button.textContent = button.dataset.defaultText || '保存业务配置';
+  }
+}
+document.addEventListener('input', function(event) {
+  var target = event.target;
+  var form = target && target.closest ? target.closest('#env-config-form') : null;
+  resetEnvSaveIfDirty(form);
+});
+document.addEventListener('change', function(event) {
+  var target = event.target;
+  var form = target && target.closest ? target.closest('#env-config-form') : null;
+  resetEnvSaveIfDirty(form);
+});
+function businessSaveMessage(payload) {
+  if (!payload || payload.ok === false) return '保存失败';
+  if (!payload.changed) return '配置未变化，无需重新应用';
+  var count = Number(payload.changed_count || 0);
+  var applied = ((payload.runtime && payload.runtime.applied) || []).filter(function(item) { return item !== 'env'; });
+  var message = '已保存 ' + count + ' 项';
+  if (applied.length) message += '，已热应用：' + applied.join('、');
+  return message;
+}
+document.addEventListener('submit', function(event) {
+  var form = event.target;
+  if (!form || form.id !== 'env-config-form') return;
+  if (!window.fetch || !window.FormData || !window.URLSearchParams) return;
+  event.preventDefault();
+  setEnvSaveFeedback(form, 'busy', '正在保存业务配置...');
+  fetch('/api/admin/config/env', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'Accept': 'application/json'},
+    body: new URLSearchParams(new FormData(form))
+  }).then(function(response) {
+    return response.json().catch(function() { return null; }).then(function(payload) {
+      if (!response.ok || !payload || payload.ok === false) {
+        throw new Error((payload && payload.error) || '保存失败，请确认登录状态后重试');
+      }
+      return payload;
+    });
+  }).then(function(payload) {
+    syncUsFeatureSettings();
+    setEnvSaveFeedback(form, 'ok', businessSaveMessage(payload));
+  }).catch(function(error) {
+    setEnvSaveFeedback(form, 'error', error && error.message ? error.message : '保存失败，请稍后重试');
+  });
+});
 document.addEventListener('click', function(event) {
   var target = event.target;
   if (!target || !target.closest) return;
@@ -1989,13 +2137,16 @@ document.addEventListener('click', function(event) {
     item.appendChild(input);
     item.appendChild(removeButton);
     items.appendChild(item);
+    resetEnvSaveIfDirty(control.closest('form'));
     input.focus();
     return;
   }
   var removeButton = target.closest('[data-time-list-remove]');
   if (removeButton) {
     var item = removeButton.closest('.time-list-item');
+    var form = removeButton.closest('form');
     if (item) item.remove();
+    resetEnvSaveIfDirty(form);
   }
 });
 </script>
@@ -2478,6 +2629,7 @@ let practiceBenchmarksData = {items: []};
 let benchmarkOverlay = {sh000001: true, sh000300: true, sz399006: true, sh000688: true};
 const initialParams = new URLSearchParams(location.search);
 let activeCategory = initialParams.get('category') || 'b1_screen';
+const US_FEATURES_ENABLED = __US_FEATURES_ENABLED__;
 let indicesViewMode = initialParams.get('panel') === 'market' ? 'market' : 'index';
 const X_MONITOR_PAGE_SIZE = 10;
 let usRatingDayIndex = 0;
@@ -2521,7 +2673,18 @@ const fmtDurationSeconds = s => {
 const upCls = v => v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
 const CATEGORY_ORDER = ['indices', 'b1_screen', 'x_monitor', 'market_monitor', 'us_ratings'];
 const CATEGORY_LABELS = {all:'全部', indices:'指数行情', b1_screen:'牛牛实战', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
+const US_FEATURE_CATEGORIES = new Set(['x_monitor', 'us_ratings']);
 const MESSAGE_CATEGORIES = ['x_monitor', 'market_monitor', 'us_ratings'];
+function categoryAvailable(category) {
+  return !US_FEATURE_CATEGORIES.has(category) || US_FEATURES_ENABLED;
+}
+function visibleCategoryOrder() {
+  return CATEGORY_ORDER.filter(categoryAvailable);
+}
+function normalizeActiveCategory(category) {
+  return visibleCategoryOrder().includes(category) ? category : 'b1_screen';
+}
+activeCategory = normalizeActiveCategory(activeCategory);
 const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v3';
 const DATA_CACHE_TTL_MS = 30000;
 const AUTO_REFRESH_TICK_MS = 15000;
@@ -2837,14 +3000,14 @@ async function loadB1Screen() {
   } catch(e) { console.error('b1 screen load error', e); }
 }
 function renderTabs() {
-  $('categoryTabs').innerHTML = CATEGORY_ORDER.map(key => {
+  $('categoryTabs').innerHTML = visibleCategoryOrder().map(key => {
     const count = (key === 'indices' || key === 'b1_screen') ? '' : ` · ${data.categories?.[key]?.count || 0}`;
     return `<a class="tab ${activeCategory === key ? 'active' : ''}" data-category="${key}" href="/?category=${encodeURIComponent(key)}">${CATEGORY_LABELS[key]}${count}</a>`;
   }).join('');
   document.querySelectorAll('.tab[data-category]').forEach(tab => tab.onclick = (event) => {
     event.preventDefault();
     const nextCategory = tab.dataset.category;
-    if (!nextCategory || nextCategory === activeCategory) return;
+    if (!nextCategory || !categoryAvailable(nextCategory) || nextCategory === activeCategory) return;
     activeCategory = nextCategory;
     usRatingDayIndex = 0;
     ratingExpandedRowId = '';
@@ -3499,7 +3662,7 @@ function renderPracticePanel() {
     </div>
     <div class="${stockCardsClass}">${stockCards}</div>
     ${renderStrategyPerformance(p.strategy_performance, p)}
-    <div style="margin-top:10px;color:#94a3b8;font-size:12px">${esc(p.trade_rule_note||'A股模拟：100股整数倍、T+1；09:15-09:25只作开盘集合竞价观察，09:25-09:30不模拟成交。')}｜模型：${esc(p.decision_model || 'deepseek-v4-flash-free')}${quoteNote}</div>
+    <div style="margin-top:10px;color:#94a3b8;font-size:12px">${esc(p.trade_rule_note||'A股模拟：100股整数倍、T+1；09:15-09:25只作开盘集合竞价观察，09:25-09:30不模拟成交。')}｜模型：${esc(p.decision_model || 'deepseek-v4-pro')}${quoteNote}</div>
     <div style="margin-top:8px">${decisions}</div>
     ${p.last_error ? `<div class="empty" style="color:#f87171;margin-top:10px">模型/交易错误：${esc(p.last_error)}</div>` : ''}
   </section>`;
@@ -4927,9 +5090,14 @@ def render_env_input(item: dict[str, Any]) -> str:
         )
     if kind == "bool":
         current = normalize_env_update(name, value, "bool") if value != "" else ""
+        toggle_attr = ""
+        default_option = f"<option value='' {'selected' if current == '' else ''}>默认</option>"
+        if name == "DASHBOARD_US_FEATURES_ENABLED":
+            toggle_attr = " data-feature-toggle='us'"
+            default_option = ""
         return (
-            f"<select name='env__{escaped_name}'>"
-            f"<option value='' {'selected' if current == '' else ''}>默认</option>"
+            f"<select name='env__{escaped_name}'{toggle_attr}>"
+            f"{default_option}"
             f"<option value='1' {'selected' if current == '1' else ''}>启用</option>"
             f"<option value='0' {'selected' if current == '0' else ''}>停用</option>"
             f"</select>"
@@ -4987,9 +5155,12 @@ def render_env_input(item: dict[str, Any]) -> str:
 
 
 def render_env_config_table(payload: dict[str, Any]) -> str:
+    us_feature_enabled = False
     groups: list[dict[str, Any]] = []
     current_group: dict[str, Any] | None = None
     for item in payload["items"]:
+        if item.get("name") == "DASHBOARD_US_FEATURES_ENABLED":
+            us_feature_enabled = str(item.get("effective") or item.get("file_value") or "").strip().lower() in {"1", "true", "yes", "on"}
         group = str(item.get("group") or "其他")
         if current_group is None or current_group["name"] != group:
             current_group = {"name": group, "items": []}
@@ -5009,8 +5180,15 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
             default = str(item.get("default") or "")
             current_html = html.escape(current) if current else "<span class='config-empty'>未设置</span>"
             default_html = html.escape(default) if default else "<span class='config-empty'>未设置</span>"
+            row_attrs = "class='setting-row'"
+            if name in US_FEATURE_GATED_NAMES:
+                row_attrs += " data-feature-gated='us'"
+                if not us_feature_enabled:
+                    row_attrs += " hidden aria-hidden='true'"
+                else:
+                    row_attrs += " aria-hidden='false'"
             rows.append(
-                "<div class='setting-row'>"
+                f"<div {row_attrs}>"
                 f"<div class='setting-copy'><div class='config-label'>{html.escape(label)}</div></div>"
                 f"<div class='setting-editor'>{render_env_input(item)}</div>"
                 "<div class='setting-state'>"
@@ -5019,8 +5197,17 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
                 "</div>"
                 "</div>"
             )
+        gated_attrs = ""
+        if group_name in US_FEATURE_GATED_GROUPS:
+            gated_attrs = " data-feature-gated='us'"
+            if not us_feature_enabled:
+                gated_attrs += " hidden aria-hidden='true'"
+            else:
+                gated_attrs += " aria-hidden='false'"
         sections.append(
-            "<section class='settings-group'>"
+            "<section class='settings-group'"
+            + gated_attrs
+            + ">"
             "<div class='settings-group-head'>"
             f"<div><h2>{html.escape(group_name)}</h2>{note_html}</div>"
             f"<span class='settings-count'>{len(group['items'])} 项</span>"
@@ -5034,7 +5221,10 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
     return (
         "<form id='env-config-form' class='settings-form' method='post' action='/admin/config/env'>"
         + "".join(sections)
-        + "<div class='settings-actions'><button class='save-button' type='submit'>保存业务配置</button></div>"
+        + "<div class='settings-actions'>"
+        "<div class='settings-save-status' data-env-save-status role='status' aria-live='polite'></div>"
+        "<button class='save-button' data-env-save-button type='submit'>保存业务配置</button>"
+        "</div>"
         "</form>"
     )
 
@@ -5403,6 +5593,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             page = INDEX_HTML.replace("__VISIT_COUNT__", f"{visit_stats['visits']:,}")
             page = page.replace("__UNIQUE_VISIT_COUNT__", f"{visit_stats['unique']:,}")
+            page = page.replace("__US_FEATURES_ENABLED__", "true" if us_features_enabled() else "false")
             self.write_response(page.encode("utf-8"))
             return
         if parsed.path.startswith("/api/"):

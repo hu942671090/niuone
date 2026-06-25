@@ -93,6 +93,18 @@ def read_int_setting(env_values: dict[str, str], name: str, default: int, *, min
     return max(min_value, min(max_value, value))
 
 
+def us_features_enabled(env_values: dict[str, str] | None = None) -> bool:
+    values = env_values if env_values is not None else parse_env_file()
+    raw = values.get("DASHBOARD_US_FEATURES_ENABLED") or os.environ.get("DASHBOARD_US_FEATURES_ENABLED") or "0"
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def job_enabled(job: Job, env_values: dict[str, str]) -> bool:
+    if job.env_name == "DASHBOARD_US_RATING_CRON":
+        return us_features_enabled(env_values)
+    return True
+
+
 def retry_settings(job: Job, env_values: dict[str, str] | None = None) -> tuple[int, int]:
     values = env_values if env_values is not None else parse_env_file()
     max_attempts = read_int_setting(values, "DASHBOARD_CRON_MAX_ATTEMPTS", 2, min_value=1, max_value=5)
@@ -273,6 +285,8 @@ def main() -> None:
             env_values = parse_env_file()
             now = datetime.now(CN_TZ).replace(second=0, microsecond=0)
             for job in JOBS:
+                if not job_enabled(job, env_values):
+                    continue
                 expr = normalize_job_expr(job, env_values.get(job.env_name) or os.environ.get(job.env_name) or job.default_expr)
                 try:
                     due = cron_matches(expr, now)

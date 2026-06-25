@@ -82,6 +82,17 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         self.assertEqual(delay, 0)
 
+    def test_us_feature_gate_controls_us_rating_job(self):
+        scheduler = load_scheduler_module()
+        us_job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_US_RATING_CRON")
+        cn_job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_MARKET_AUCTION_CRON")
+
+        self.assertFalse(scheduler.us_features_enabled({}))
+        self.assertFalse(scheduler.job_enabled(us_job, {}))
+        self.assertTrue(scheduler.job_enabled(us_job, {"DASHBOARD_US_FEATURES_ENABLED": "1"}))
+        self.assertTrue(scheduler.job_enabled(us_job, {"DASHBOARD_US_FEATURES_ENABLED": "true"}))
+        self.assertTrue(scheduler.job_enabled(cn_job, {}))
+
 
 if __name__ == "__main__":
     unittest.main()

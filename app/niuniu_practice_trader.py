@@ -8,7 +8,7 @@ Rules implemented:
 - T+1: shares bought today cannot be sold today
 - No shorting, no negative cash
 - Only book simulated fills during A-share executable windows on weekdays
-- Model decision provider: Crossdesk.ccwu.cc / deepseek-v4-flash, OpenAI-compatible
+- Model decision provider: OpenAI-compatible chat/completions service; DeepSeek is the default recommendation
 """
 from __future__ import annotations
 
@@ -50,9 +50,9 @@ DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
 
 def load_dashboard_env() -> None:
     allowed = {
-        "DASHBOARD_GROK_MODEL",
-        "DASHBOARD_GROK_BASE_URL",
-        "DASHBOARD_GROK_API_KEY",
+        "DASHBOARD_NEWS_MODEL",
+        "DASHBOARD_NEWS_BASE_URL",
+        "DASHBOARD_NEWS_API_KEY",
         "DASHBOARD_DECISION_MODEL",
         "DASHBOARD_DECISION_BASE_URL",
         "DASHBOARD_DECISION_API_KEY",
@@ -2532,7 +2532,24 @@ def api_call_with_retry(base_url: str, api_key: str, payload: dict, max_retries:
     raise last_err
 
 
-GROK_MODEL = os.environ.get("DASHBOARD_GROK_MODEL") or "grok-4.20-multi-agent-xhigh"
+def load_news_precheck_config() -> tuple[str, str, str] | None:
+    base_url = os.environ.get("DASHBOARD_NEWS_BASE_URL", "").strip()
+    api_key = os.environ.get("DASHBOARD_NEWS_API_KEY", "").strip()
+    model = os.environ.get("DASHBOARD_NEWS_MODEL", "").strip()
+    if not any((base_url, api_key, model)):
+        return None
+    missing = [
+        label
+        for label, value in (
+            ("DASHBOARD_NEWS_BASE_URL", base_url),
+            ("DASHBOARD_NEWS_API_KEY", api_key),
+            ("DASHBOARD_NEWS_MODEL", model),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError("消息面预检配置不完整：" + "、".join(missing))
+    return base_url.rstrip("/"), api_key, model
 
 
 def compact_portfolio_for_decision(portfolio: dict[str, Any]) -> dict[str, Any]:
@@ -2588,15 +2605,19 @@ def compact_portfolio_for_decision(portfolio: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def check_candidate_news_grok(candidates: list[dict[str, Any]]) -> str:
-    """用 Grok 实时搜索 top5 候选股的最新消息面，返回结构化摘要。
+def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
+    """用独立实时检索模型搜索 top5 候选股的最新消息面，返回结构化摘要。
     
     Returns: 格式化的消息面文本，供决策 prompt 使用。
     """
     if not candidates:
         return ""
+
+    news_config = load_news_precheck_config()
+    if news_config is None:
+        return ""
+    base_url, api_key, model = news_config
     
-    base_url, api_key = load_crossdesk_config("DASHBOARD_GROK_BASE_URL", "DASHBOARD_GROK_API_KEY")
     stock_list = "、".join(f"{c.get('code','')} {c.get('name','')}" for c in candidates[:5])
     
     prompt = f"""搜索以下A股最近3天的重大消息（利好/利空/中性），每只一句话：
@@ -2605,23 +2626,23 @@ def check_candidate_news_grok(candidates: list[dict[str, Any]]) -> str:
 格式：
 - 代码 名称：一句话总结（利好/利空/中性）
 只输出有明确消息的股，无消息的省略。"""
-    
+
     payload = {
-        "model": GROK_MODEL,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": 600,
     }
     data = api_call_with_retry(base_url, api_key, payload, max_retries=2, timeout=45)
     content = data["choices"][0]["message"]["content"]
-    return f"【消息面预检（Grok实时搜索）】\n{content.strip()}"
+    return f"【消息面预检（实时搜索）】\n{content.strip()}"
 
 
-def call_deepseek_decision(candidates: list[dict[str, Any]], portfolio: dict[str, Any],
-                           trade_allowed: bool, trade_reason: str) -> dict[str, Any]:
-    # 根据 MODEL 选择 provider
+def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, Any],
+                        trade_allowed: bool, trade_reason: str) -> dict[str, Any]:
+    # Provider selection: most models use the configured OpenAI-compatible endpoint;
+    # this legacy alias keeps the OpenCode Zen free-model path working.
     if MODEL == "deepseek-v4-flash-free":
-        # 使用 OpenCode Zen
         base_url = "https://opencode.ai/zen/v1"
         if yaml is None:
             raise RuntimeError("PyYAML is required")
@@ -2638,12 +2659,12 @@ def call_deepseek_decision(candidates: list[dict[str, Any]], portfolio: dict[str
     if market_sent.get("sentiment") == "cold":
         sentiment_note = f"⚠️市场情绪偏冷({market_sent.get('detail','')})，建议仓位减半"
     
-    # === Grok 实时消息面预检（top5候选） ===
+    # === 实时消息面预检（top5候选） ===
     news_context = ""
     try:
         top5 = candidates[:5]
         if top5:
-            news_context = check_candidate_news_grok(top5)
+            news_context = check_candidate_news_precheck(top5)
     except Exception as e:
         news_context = f"（消息面预检失败: {e}）"
     
@@ -3175,7 +3196,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
                 f"计划{schedule_slot[-5:]}选股属于上午连续竞价时段；当前{trade_reason}。"
                 f"请正常生成买卖策略，系统会在{deferred_due_at[-8:-3]}开盘后复核并成交。"
             )
-            decision = call_deepseek_decision(candidates, portfolio, True, model_trade_reason)
+            decision = call_model_decision(candidates, portfolio, True, model_trade_reason)
             execution_allowed, execution_reason = is_a_share_execution_time()
             if execution_allowed:
                 trade_allowed = True
@@ -3212,7 +3233,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
             decision = {"summary": f"{trade_reason}，本轮只记录候选，不执行买卖", "actions": [], "model": MODEL, "provider": PROVIDER_DISPLAY_NAME}
             executed = []
         else:
-            decision = call_deepseek_decision(candidates, portfolio, trade_allowed, trade_reason)
+            decision = call_model_decision(candidates, portfolio, trade_allowed, trade_reason)
             execution_allowed, execution_reason = is_a_share_execution_time()
             if not execution_allowed:
                 decision["decision_trade_reason"] = trade_reason

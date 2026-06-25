@@ -86,6 +86,11 @@ def runtime_env() -> dict[str, str]:
     return env
 
 
+def us_features_enabled(env: dict[str, str] | None = None) -> bool:
+    source = env if env is not None else runtime_env()
+    return str(source.get("DASHBOARD_US_FEATURES_ENABLED") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def current_interval_seconds() -> int:
     env = runtime_env()
     return max(1, env_int("X_WATCHLIST_DAEMON_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, env))
@@ -93,6 +98,9 @@ def current_interval_seconds() -> int:
 
 def run_once() -> None:
     env = runtime_env()
+    if not us_features_enabled(env):
+        log("skip inner: DASHBOARD_US_FEATURES_ENABLED is disabled")
+        return
     env.setdefault("NIUONE_ROOT", str(PROJECT_ROOT))
     env.setdefault("DASHBOARD_HOME", str(DASHBOARD_HOME))
     env.setdefault("DASHBOARD_CONFIG", str(DASHBOARD_HOME / "config.yaml"))
