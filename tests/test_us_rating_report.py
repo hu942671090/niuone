@@ -83,6 +83,43 @@ print(json.dumps({{
             self.assertEqual(data['record_source_type'], 'us_ratings')
             self.assertTrue(data['record_contains_sample'])
 
+    def test_failure_does_not_create_dashboard_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            code = f"""
+import importlib.util, json, sys
+from pathlib import Path
+sys.path.insert(0, {str(SRC)!r})
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+def fail_generate_report(test_mode=False):
+    raise RuntimeError('boom')
+m.generate_report = fail_generate_report
+sys.argv = ['us_rating_report.py', '--archive-only']
+try:
+    m.main()
+except SystemExit as exc:
+    code = int(exc.code or 0)
+else:
+    code = 0
+import push_history
+data = push_history.query_messages(category='us_ratings', limit=5)
+out_dir = Path({str(Path(tmp) / 'cron' / 'output' / 'fd0b807138f4')!r})
+print(json.dumps({{
+  'code': code,
+  'record_count': len(data['records']),
+  'archive_count': len(list(out_dir.glob('*.md'))) if out_dir.exists() else 0,
+}}, ensure_ascii=False))
+"""
+            proc = subprocess.run([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            data = json.loads(proc.stdout)
+            self.assertEqual(data['code'], 1)
+            self.assertEqual(data['record_count'], 0)
+            self.assertEqual(data['archive_count'], 0)
+            self.assertIn('ERROR: RuntimeError: boom', proc.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

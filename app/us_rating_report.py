@@ -248,19 +248,6 @@ def clean_report_content(content: str) -> str:
     return content
 
 
-def build_status_report(reason: str, *, now: datetime | None = None) -> str:
-    if now is None:
-        now = datetime.now(timezone.utc)
-    date_str = now.astimezone(CN_TZ).strftime("%Y年%m月%d日")
-    reason = (reason or "上游未返回可归档内容").strip()
-    return (
-        f"牛牛大王，美股机构买入评级日报（{date_str}）\n\n"
-        "今天的美股机构买入评级日报没有成功生成。\n\n"
-        f"原因：{reason}\n\n"
-        "处理状态：已写入 dashboard 失败记录，cron 会标记为失败，避免页面继续显示旧日报并误判为已更新。"
-    )
-
-
 def generate_report(test_mode: bool = False) -> str:
     base_url, api_key = _get_crossdesk_credentials()
     if not base_url or not api_key:
@@ -351,38 +338,17 @@ def main():
         content = generate_report(test_mode=test_mode)
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
-        if test_mode:
-            print(f"ERROR: {reason}", file=sys.stderr)
-            sys.exit(1)
-        now = datetime.now(timezone.utc)
-        status_content = build_status_report(reason, now=now)
-        archive_path = persist_report(status_content, now=now, no_archive=no_archive, no_db=no_db)
-        if archive_path:
-            print(f"archived: {archive_path}", file=sys.stderr)
         print(f"ERROR: {reason}", file=sys.stderr)
-        if archive_only:
-            sys.exit(1)
-        print(status_content)
         sys.exit(1)
 
     if not content:
         reason = "API returned empty content"
-        if test_mode:
-            print(f"ERROR: {reason}", file=sys.stderr)
-            sys.exit(1)
-        now = datetime.now(timezone.utc)
-        content = build_status_report(reason, now=now)
-        archive_path = persist_report(content, now=now, no_archive=no_archive, no_db=no_db)
-        if archive_path:
-            print(f"archived: {archive_path}", file=sys.stderr)
         print(f"ERROR: {reason}", file=sys.stderr)
-        if archive_only:
-            sys.exit(1)
-        print(content)
         sys.exit(1)
 
     if content.strip() == "[SILENT]":
-        content = build_status_report("上游检索结果为 [SILENT]，未发现足够可靠的新增买入评级。")
+        print("ERROR: API returned [SILENT] instead of a report", file=sys.stderr)
+        sys.exit(1)
 
     archive_path = None
     if not test_mode:
