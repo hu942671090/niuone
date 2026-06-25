@@ -52,13 +52,37 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 print(json.dumps({{
   'accounts': m.ACCOUNTS,
-  'parsed_default_len': len(m.parse_watchlist_accounts('')),
+  'parsed_empty_len': len(m.parse_watchlist_accounts('')),
 }}, ensure_ascii=False))
 """
             out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
             data = json.loads(out)
             self.assertEqual(data['accounts'], ['foo', 'bar'])
-            self.assertGreater(data['parsed_default_len'], 1)
+            self.assertEqual(data['parsed_empty_len'], 0)
+
+    def test_empty_accounts_skip_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env.pop('X_WATCHLIST_ACCOUNTS', None)
+            code = f"""
+import importlib.util, json, sys
+sys.path.insert(0, {str(SRC)!r})
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+accounts = m.call_grok('', '', {{}})
+print(json.dumps({{
+  'configured_accounts': m.ACCOUNTS,
+  'returned_accounts': accounts,
+  'last_issue': getattr(m.call_grok, 'last_issue', ''),
+}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            self.assertEqual(data['configured_accounts'], [])
+            self.assertEqual(data['returned_accounts'], [])
+            self.assertEqual(data['last_issue'], 'watchlist_accounts_empty')
 
     def test_send_ready_items_archives_to_dashboard_only(self):
         with tempfile.TemporaryDirectory() as tmp:

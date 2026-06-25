@@ -59,22 +59,7 @@ try:
 except Exception:
     yaml = None
 
-DEFAULT_ACCOUNTS = (
-    "wallstreet0name",
-    "hoyooyoo",
-    "freearkshaw",
-    "aleabitoreddit",
-    "ululazmi27",
-    "xiaomustock",
-    "johnsonz91127",
-    "oldk_gillis",
-    "dmjk001",
-)
-
-
 def parse_watchlist_accounts(value: str | None) -> list[str]:
-    if not value:
-        return list(DEFAULT_ACCOUNTS)
     accounts: list[str] = []
     seen: set[str] = set()
     for raw in re.split(r"[,，;\s]+", str(value or "")):
@@ -86,7 +71,7 @@ def parse_watchlist_accounts(value: str | None) -> list[str]:
         if handle not in seen:
             seen.add(handle)
             accounts.append(handle)
-    return accounts or list(DEFAULT_ACCOUNTS)
+    return accounts
 
 
 ACCOUNTS = parse_watchlist_accounts(os.environ.get("X_WATCHLIST_ACCOUNTS"))
@@ -774,6 +759,10 @@ def call_grok_batch(base_url, api_key, account_handles, latest_by_handle, timeou
 def call_grok(base_url, api_key, latest_by_handle):
     # Single-account prompts are the most reliable with the current Grok gateway.
     # Run several in parallel so every cron tick still covers the full watchlist.
+    call_grok.last_issue = ""
+    if not ACCOUNTS:
+        call_grok.last_issue = "watchlist_accounts_empty"
+        return []
     deadline = time.monotonic() + int(os.environ.get("X_WATCHLIST_DEADLINE_SECONDS", str(TOTAL_DEADLINE_SECONDS)))
     all_accounts = []
     temporary_errors = []
@@ -815,7 +804,6 @@ def call_grok(base_url, api_key, latest_by_handle):
         # caused user-visible script timeout alerts.
         executor.shutdown(wait=False, cancel_futures=True)
 
-    call_grok.last_issue = ""
     if temporary_errors and not all_accounts:
         call_grok.last_issue = "; ".join(temporary_errors[-5:])[:700]
     elif temporary_errors:

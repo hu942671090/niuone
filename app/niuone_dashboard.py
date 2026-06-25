@@ -147,19 +147,6 @@ SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|credential|(?:^|[_-])token(?:$|[_-]))",
     re.I,
 )
-DEFAULT_X_WATCHLIST_ACCOUNTS = (
-    "wallstreet0name",
-    "hoyooyoo",
-    "freearkshaw",
-    "aleabitoreddit",
-    "ululazmi27",
-    "xiaomustock",
-    "johnsonz91127",
-    "oldk_gillis",
-    "dmjk001",
-)
-DEFAULT_X_WATCHLIST_ACCOUNTS_TEXT = ",".join(DEFAULT_X_WATCHLIST_ACCOUNTS)
-
 ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_HOME", "label": "运行数据目录", "group": "基础路径", "kind": "path", "default": str(LOCAL_DATA_DIR / "runtime"), "effect": "restart"},
     {"name": "DASHBOARD_HOST", "label": "监听地址", "group": "基础路径", "kind": "text", "default": "127.0.0.1", "effect": "restart"},
@@ -221,7 +208,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_MARKET_AUCTION_CRON", "label": "盘前竞价监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "25 9 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_MIDDAY_CRON", "label": "午盘监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "40 11 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_CLOSE_CRON", "label": "盘后监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "10 15 * * 1-5", "effect": "next_run"},
-    {"name": "X_WATCHLIST_ACCOUNTS", "label": "推文监控作者", "group": "推文监控作者", "kind": "handle_list", "default": DEFAULT_X_WATCHLIST_ACCOUNTS_TEXT, "effect": "next_run"},
+    {"name": "X_WATCHLIST_ACCOUNTS", "label": "推文监控作者", "group": "推文监控作者", "kind": "handle_list", "default": "", "effect": "next_run"},
     {"name": "X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "label": "推文监控间隔", "group": "推文监控周期", "kind": "int", "default": "1200", "effect": "next_run"},
     {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "美股买入评级周期", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
     {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "美股买入评级周期", "kind": "int", "default": "240", "effect": "next_run"},
