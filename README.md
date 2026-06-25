@@ -1,6 +1,5 @@
-# NiuOne · 牛牛大作手 Dashboard
+# NiuOne · 牛牛1号 Dashboard
 
-[![CI](https://github.com/kunkundi/niuone/actions/workflows/ci.yml/badge.svg)](https://github.com/kunkundi/niuone/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 NiuOne 是一个本地优先的市场信息与交易辅助 Dashboard。它把 A 股市场面板、策略筛选、模拟交易、X 关注列表监控、美股机构评级摘要和定时任务归档集中在同一个轻量 Python 服务中。
@@ -16,7 +15,6 @@ NiuOne 是一个本地优先的市场信息与交易辅助 Dashboard。它把 A 
 - **策略与模拟交易**：集成 B1 策略扫描、牛牛实战模拟账户、持仓和收益曲线展示。
 - **定时任务归档**：支持市场监控、美股机构评级日报、X 关注列表监控等任务输出。
 - **本地访问控制**：支持邀请码、管理员 token、限流和运行配置管理。
-- **CI 友好**：GitHub Actions 使用同一套 `scripts/validate.sh` 做语法、前端脚本和单元测试验证。
 
 ## 系统要求
 
@@ -24,7 +22,6 @@ NiuOne 是一个本地优先的市场信息与交易辅助 Dashboard。它把 A 
 |---|---|
 | Python 3.11+ | 运行 Dashboard、创建虚拟环境、执行任务脚本 |
 | Git | 克隆项目 |
-| Node.js 24+ | 仅开发验证时需要，用于检查内嵌 JavaScript |
 | PowerShell | Windows 一键启动需要，系统通常自带 Windows PowerShell |
 
 Python 依赖由一键启动脚本自动安装，当前核心依赖见 [requirements.txt](requirements.txt)。
@@ -88,74 +85,6 @@ cp dashboard.env.example .local-data/dashboard.env
 ```
 
 Dashboard 启动后，管理员可通过 `/admin` 管理运行配置、模型配置和邀请码。
-
-## 数据与隐私
-
-以下内容默认写入 `.local-data/`，不会提交到 Git：
-
-```text
-.local-data/
-├── dashboard.env
-├── .venv/
-├── runtime/
-│   ├── dashboard_admin_token.txt
-│   ├── dashboard_users.db
-│   ├── push_history.db
-│   ├── niuniu.db
-│   ├── config.yaml
-│   ├── cron/output/
-│   └── logs/
-└── backups/
-```
-
-提交前可用以下命令确认真实数据仍被忽略：
-
-```bash
-git status --ignored --short
-```
-
-## 开发验证
-
-```bash
-./scripts/validate.sh
-```
-
-验证内容包括：
-
-- Python 语法检查
-- Dashboard 内嵌 JavaScript 语法检查
-- Shell 启动脚本语法检查
-- PowerShell 脚本语法检查（环境存在 PowerShell 时）
-- `tests/` 单元测试
-
-临时启动一个隔离运行时：
-
-```bash
-DASHBOARD_HOME=/tmp/niuone-smoke DASHBOARD_AUTH_ENABLED=0 DASHBOARD_PORT=8877 ./scripts/run_standalone.sh
-```
-
-访问：
-
-```text
-http://127.0.0.1:8877/
-```
-
-## GitHub Actions
-
-CI 工作流位于 [.github/workflows/ci.yml](.github/workflows/ci.yml)，会在 `push`、`pull_request` 和手动触发时运行：
-
-```bash
-./scripts/validate.sh
-```
-
-GitHub-hosted runner 只用于验证代码，不保存 `.local-data/`，也不适合作为长期运行的 Dashboard 服务。长期运行建议使用本机、VPS、NAS、PaaS 或自建服务器。
-
-## 常用任务
-
-```bash
-# 生成美股机构买入评级日报，并写入 Dashboard 归档和消息库
-./scripts/run_us_rating_report.sh
-```
 
 ## 项目结构
 

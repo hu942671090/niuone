@@ -1919,12 +1919,12 @@ INDICES_HTML = None
 
 LOGIN_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>牛牛大作手 · 观看登录</title>
+<title>牛牛1号 · 观看登录</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
 <style>
 :root{color-scheme:dark;--bg:#06070a;--panel:#10131a;--line:#252b38;--text:#f2f4f8;--muted:#99a3b3;--accent:#7c5cff;--red:#fb7185;--green:#34d399}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 20% 0%,rgba(124,92,255,.30),transparent 34rem),var(--bg);color:var(--text);padding:20px}.box{width:min(440px,100%);border:1px solid var(--line);border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(16,19,26,.94),rgba(21,26,36,.88));box-shadow:0 28px 90px rgba(0,0,0,.36)}h1{margin:0 0 8px;font-size:30px;letter-spacing:-.04em}.sub{color:var(--muted);line-height:1.6;margin-bottom:22px}label{display:block;color:#cbd5e1;font-weight:800;font-size:13px;margin:14px 0 7px}input{width:100%;border:1px solid var(--line);background:#0b0e14;color:var(--text);border-radius:14px;padding:13px 14px;font:inherit;outline:none}input:focus{border-color:rgba(124,92,255,.75);box-shadow:0 0 0 4px rgba(124,92,255,.13)}button{width:100%;margin-top:18px;border:0;border-radius:14px;padding:13px 14px;font:inherit;font-weight:900;color:white;background:linear-gradient(135deg,var(--accent),#24c6dc);cursor:pointer}.error{border:1px solid rgba(251,113,133,.35);background:rgba(127,29,29,.25);color:#fecdd3;border-radius:14px;padding:10px 12px;margin-bottom:14px}.hint{font-size:12px;color:#64748b;margin-top:14px;line-height:1.5}.ok{color:var(--green)}</style>
 </head><body><form class="box" method="post" action="/login">
-<h1>🐮 牛牛大作手</h1><div class="sub">请输入牛牛大王发放的邀请码，激活本设备的观看权限。</div>
+<h1>🐮 牛牛1号</h1><div class="sub">请输入牛牛大王发放的邀请码，激活本设备的观看权限。</div>
 __ERROR__
 <label>邀请码</label><input name="code" autocomplete="one-time-code" placeholder="NN-XXXX-XXXX" required autofocus>
 <label>昵称（可选）</label><input name="nickname" autocomplete="nickname" placeholder="方便牛牛1号识别访问者">
@@ -1934,7 +1934,7 @@ __ERROR__
 
 ADMIN_PASSWORD_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>牛牛大作手 · 设置验证</title>
+<title>牛牛1号 · 设置验证</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
 <style>
 :root{color-scheme:dark;--bg:#06070a;--panel:#10131a;--line:#252b38;--text:#f2f4f8;--muted:#99a3b3;--accent:#7c5cff;--cyan:#24c6dc;--red:#fb7185}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 20% 0%,rgba(124,92,255,.28),transparent 34rem),var(--bg);color:var(--text);padding:20px}.box{width:min(420px,100%);border:1px solid var(--line);border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(16,19,26,.94),rgba(21,26,36,.88));box-shadow:0 28px 90px rgba(0,0,0,.36)}h1{margin:0 0 8px;font-size:28px;letter-spacing:0}.sub{color:var(--muted);line-height:1.6;margin-bottom:22px}label{display:block;color:#cbd5e1;font-weight:800;font-size:13px;margin:14px 0 7px}input{width:100%;border:1px solid var(--line);background:#0b0e14;color:var(--text);border-radius:14px;padding:13px 14px;font:inherit;outline:none}input:focus{border-color:rgba(124,92,255,.75);box-shadow:0 0 0 4px rgba(124,92,255,.13)}button{width:100%;margin-top:18px;border:0;border-radius:14px;padding:13px 14px;font:inherit;font-weight:900;color:white;background:linear-gradient(135deg,var(--accent),var(--cyan));cursor:pointer}.error{border:1px solid rgba(251,113,133,.35);background:rgba(127,29,29,.25);color:#fecdd3;border-radius:14px;padding:10px 12px;margin-bottom:14px}.hint{font-size:12px;color:#64748b;margin-top:14px;line-height:1.5}.toplink{display:inline-block;color:#9db2ff;text-decoration:none;margin-top:14px;font-weight:800}
@@ -1950,11 +1950,11 @@ __ERROR__
 
 ADMIN_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>牛牛大作手</title>
+<title>牛牛1号</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
 <style>
 :root{color-scheme:dark;--bg:#07090d;--surface:#10151b;--surface2:#151b23;--line:#26313d;--line2:#334155;--text:#f3f6fb;--muted:#94a3b8;--soft:#cbd5e1;--accent:#2dd4bf;--blue:#60a5fa;--red:#fb7185;--green:#34d399;--yellow:#fbbf24}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(180deg,#0b1016 0%,var(--bg) 48%,#050608 100%);color:var(--text);min-height:100vh}.admin-header{border-bottom:1px solid rgba(148,163,184,.16);background:rgba(7,9,13,.88);backdrop-filter:blur(16px);padding:22px clamp(16px,4vw,42px)}.admin-header-inner{max-width:1180px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.eyebrow{font-size:12px;font-weight:850;color:var(--accent);letter-spacing:.04em;margin-bottom:6px}h1{margin:0;font-size:30px;letter-spacing:0}h2{margin:0;font-size:18px;letter-spacing:0}p{margin:0}.muted{color:var(--muted)}.toplink{color:#dbeafe;text-decoration:none;border:1px solid rgba(148,163,184,.20);background:rgba(15,23,42,.62);border-radius:8px;padding:9px 12px;font-weight:850}.toplink:hover{border-color:rgba(96,165,250,.54);background:rgba(30,41,59,.72)}.admin-main{width:min(1180px,100%);margin:0 auto;padding:20px clamp(14px,4vw,42px) 34px;display:grid;gap:16px}.settings-form{display:grid;gap:14px}.settings-group{border:1px solid rgba(148,163,184,.16);border-radius:8px;background:rgba(16,21,27,.88);box-shadow:0 18px 56px rgba(0,0,0,.22);overflow:hidden}.settings-group-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid rgba(148,163,184,.12);background:rgba(21,27,35,.72)}.settings-group-note{color:var(--muted);font-size:13px;line-height:1.5;margin-top:5px}.settings-count{font-size:12px;color:#a7f3d0;border:1px solid rgba(45,212,191,.24);background:rgba(20,184,166,.10);border-radius:999px;padding:3px 8px;white-space:nowrap}.settings-list{display:grid}.setting-row{display:grid;grid-template-columns:minmax(170px,.72fr) minmax(250px,1fr) minmax(220px,.84fr);gap:16px;align-items:start;padding:16px 18px;border-top:1px solid rgba(148,163,184,.10)}.setting-row:first-child{border-top:0}.setting-copy{display:grid;gap:4px;min-width:0}.config-label{font-weight:850;color:#e5edf8;line-height:1.35}.setting-editor{min-width:0}.setting-editor input,.setting-editor select{width:100%;min-width:0}.setting-state{display:grid;gap:8px;min-width:0}.setting-state-item{display:grid;gap:3px}.setting-state-label{font-size:11px;color:#7b8aa0;font-weight:850}.config-meta{font-size:12px;color:#b6c2d2;max-width:100%;overflow-wrap:anywhere;line-height:1.45}.config-empty{color:#64748b}input,select,textarea,button{border:1px solid var(--line);background:#0b0f15;color:var(--text);border-radius:8px;padding:10px 12px;font:inherit;min-width:0}input:focus,select:focus,textarea:focus{outline:2px solid rgba(96,165,250,.70);outline-offset:1px;border-color:rgba(96,165,250,.62)}textarea{width:100%;min-height:460px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;resize:vertical}button{cursor:pointer;font-weight:850;background:linear-gradient(135deg,rgba(20,184,166,.92),rgba(96,165,250,.76));border:0;color:#061017}.save-button{min-height:42px;padding:10px 16px;justify-self:end}.settings-actions{position:sticky;bottom:14px;z-index:3;display:flex;justify-content:flex-end;padding:10px;border:1px solid rgba(148,163,184,.18);border-radius:8px;background:rgba(8,11,16,.86);backdrop-filter:blur(14px);box-shadow:0 18px 54px rgba(0,0,0,.30)}.time-list-control{display:grid;gap:8px}.time-list-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:6px}.time-list-item{display:grid;grid-template-columns:minmax(92px,1fr) 34px;gap:4px;align-items:center}.time-list-item input{min-width:0}.time-list-add,.time-list-remove{display:inline-grid;place-items:center;padding:0;border-radius:8px;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.78);color:#dbeafe}.time-list-add{width:38px;height:38px;justify-self:start}.time-list-remove{width:34px;height:38px;color:#fecdd3}.okmsg{border:1px solid rgba(52,211,153,.28);background:rgba(6,78,59,.20);color:#bbf7d0;border-radius:8px;padding:11px 13px}.errmsg{border:1px solid rgba(251,113,133,.34);background:rgba(127,29,29,.22);color:#fecdd3;border-radius:8px;padding:11px 13px}@media(max-width:940px){.setting-row{grid-template-columns:1fr;gap:10px}.setting-state{grid-template-columns:repeat(2,minmax(0,1fr))}.save-button{width:100%}.settings-actions{position:static}}@media(max-width:620px){.admin-header{padding:18px 14px}.admin-main{padding:16px 12px 26px}.settings-group-head,.setting-row{padding:14px}.setting-state{grid-template-columns:1fr}.time-list-grid{grid-template-columns:1fr}.toplink{width:100%;text-align:center}}</style>
-</head><body><header class="admin-header"><div class="admin-header-inner"><div><div class="eyebrow">牛牛大作手</div><h1>设置</h1></div><a class="toplink" href="/">返回 Dashboard</a></div></header>
+</head><body><header class="admin-header"><div class="admin-header-inner"><div><div class="eyebrow">牛牛1号</div><h1>设置</h1></div><a class="toplink" href="/">返回 Dashboard</a></div></header>
 <main class="admin-main">
 __NOTICE__
 __ENV_CONFIG__
@@ -2006,7 +2006,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>牛牛大作手</title>
+  <title>牛牛1号</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
   <style>
     :root { color-scheme: dark; --bg:#06070a; --panel:#10131a; --panel2:#151a24; --text:#f2f4f8; --muted:#99a3b3; --line:#252b38; --accent:#7c5cff; --green:#39d98a; --yellow:#ffd166; }
@@ -2450,7 +2450,7 @@ INDEX_HTML = r"""<!doctype html>
 </section>
 <header>
   <div class="header-row">
-    <h1>牛牛大作手</h1>
+    <h1>牛牛1号</h1>
     <div class="header-actions">
       <a class="settings-link" href="/admin" title="进入设置页" aria-label="进入设置页">设置</a>
       <div class="visit-pill" title="累计首页访问人次"><span>访问人次</span><b id="visitCount">__VISIT_COUNT__</b></div>
@@ -5767,7 +5767,7 @@ def main() -> None:
     server = ReusableThreadingHTTPServer((args.host, args.port), Handler)
     start_b1_scheduler()
     start_pending_decision_executor()
-    print(f"牛牛大作手：http://{args.host}:{args.port}")
+    print(f"牛牛1号：http://{args.host}:{args.port}")
     print(f"用户管理：admin token saved at {ADMIN_TOKEN_FILE}; open /admin?token=<token-from-file>")
     print(f"消息历史：{push_history.DB_PATH}")
     try:
