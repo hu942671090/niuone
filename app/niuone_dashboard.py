@@ -2540,57 +2540,68 @@ INDEX_HTML = r"""<!doctype html>
       .content { font-size:14px; }
     }
     /* ---- rating table styles ---- */
-    .rating-card { padding:0; overflow:visible; background:linear-gradient(180deg, rgba(17,24,39,.96), rgba(8,11,18,.96)); border-color:rgba(99,102,241,.22); width:fit-content; max-width:100%; }
-    .rating-table-wrap { margin:0; border:1px solid rgba(148,163,184,.16); border-radius:16px; overflow:hidden; background:rgba(2,6,23,.30); width:min(100%, 920px); max-width:100%; }
-    .rating-table-title { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:9px 12px; color:#c7d2fe; font-weight:800; font-size:13px; border-bottom:1px solid rgba(148,163,184,.12); background:rgba(99,102,241,.10); }
-    .rating-table-title small { color:#94a3b8; font-weight:500; font-size:11px; white-space:nowrap; }
-    .rating-table { width:100%; table-layout:auto; border-collapse:collapse; font-size:15px; }
-    .rating-table td,.rating-table th { padding:5px 9px; text-align:left; white-space:nowrap; border:none; line-height:1.2; }
-    .rating-table th { color:#8da0b8; font-size:13px; letter-spacing:.03em; font-weight:750; background:rgba(15,23,42,.45); }
-    .rating-table thead th:nth-child(1) { min-width:72px; }
-    .rating-table thead th:nth-child(2) { min-width:92px; }
-    .rating-table thead th:nth-child(3) { min-width:300px; }
-    .rating-table thead th:nth-child(4) { min-width:88px; }
-    .rating-action-inline { display:inline-block; color:#94a3b8; font-size:12px; line-height:1.1; font-weight:650; margin-right:6px; }
+    .rating-card { padding:0; overflow:visible; background:linear-gradient(180deg, rgba(17,24,39,.96), rgba(8,11,18,.96)); border-color:rgba(99,102,241,.22); width:100%; max-width:100%; }
+    .rating-table-wrap { margin:0; border:1px solid rgba(148,163,184,.16); border-radius:18px; overflow:hidden; background:rgba(2,6,23,.30); width:100%; max-width:100%; }
+    .rating-table-title { display:flex; justify-content:space-between; gap:14px; align-items:center; padding:14px 16px; color:#c7d2fe; font-weight:850; font-size:15px; border-bottom:1px solid rgba(148,163,184,.12); background:rgba(99,102,241,.10); }
+    .rating-table-title small { color:#94a3b8; font-weight:500; font-size:12px; white-space:nowrap; }
+    .rating-table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:16px; }
+    .rating-table td,.rating-table th { padding:12px 16px; text-align:left; white-space:nowrap; border:none; border-bottom:1px solid rgba(148,163,184,.10); line-height:1.35; }
+    .rating-table th { color:#8da0b8; font-size:13.5px; letter-spacing:.03em; font-weight:800; background:rgba(15,23,42,.45); }
+    .rating-table thead th:nth-child(1) { width:16%; min-width:108px; }
+    .rating-table thead th:nth-child(2) { width:18%; min-width:126px; }
+    .rating-table thead th:nth-child(3) { width:42%; min-width:300px; }
+    .rating-table thead th:nth-child(4) { width:24%; min-width:126px; }
+    .rating-table td:nth-child(3) { white-space:normal; }
+    .rating-action-inline { display:inline-block; color:#94a3b8; font-size:12.5px; line-height:1.35; font-weight:650; margin-left:8px; vertical-align:baseline; }
     .rating-table tr:last-child td { border-bottom:0; }
     .rating-table tbody tr.rating-data-row { cursor:pointer; transition:.14s ease; }
     .rating-table tbody tr.rating-data-row:hover { background:rgba(99,102,241,.12); }
-    .rating-table tbody tr.rating-data-row.expanded { background:rgba(99,102,241,.16); }
+    .rating-table tbody tr.rating-data-row.expanded { background:linear-gradient(90deg, rgba(67,56,202,.34), rgba(15,23,42,.68)); box-shadow:inset 4px 0 0 rgba(125,211,252,.92); }
     .rating-detail-row { display:none; }
     .rating-detail-row.open { display:table-row; }
-    .rating-detail-cell { padding:0 !important; background:linear-gradient(180deg, rgba(99,102,241,.10), rgba(2,6,23,.34)); border-bottom:1px solid rgba(148,163,184,.16) !important; }
-    .rating-inline-detail { padding:13px 14px 15px; display:grid; gap:10px; }
-    .rating-inline-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; color:#f8fafc; font-weight:850; }
-    .rating-inline-sub { color:#94a3b8; font-size:12px; font-weight:500; margin-top:2px; }
-    .rating-inline-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-    .inline-field { border:1px solid rgba(148,163,184,.12); border-radius:13px; padding:10px 11px; background:rgba(2,6,23,.36); }
-    .inline-label { color:#8da0b8; font-size:11px; font-weight:800; letter-spacing:.05em; margin-bottom:5px; }
-    .inline-value { color:#e5edf8; font-size:13.5px; line-height:1.7; white-space:pre-wrap; }
-    .rating-table .ticker { color:#f8fafc; font-weight:850; letter-spacing:.01em; }
-    .rating-table .price { color:#e0f2fe; font-weight:800; }
-    .rating-table .target { color:#d1fae5; font-weight:800; }
+    .rating-detail-cell { padding:0 !important; background:linear-gradient(180deg, rgba(8,13,34,.98), rgba(3,7,18,.98)); border-top:1px solid rgba(125,211,252,.24) !important; border-bottom:1px solid rgba(148,163,184,.18) !important; box-shadow:inset 0 1px 0 rgba(255,255,255,.035); }
+    .rating-inline-detail { padding:18px 18px 20px; display:grid; gap:14px; }
+    .rating-inline-grid { display:grid; grid-template-columns:repeat(12, minmax(0, 1fr)); gap:12px; align-items:stretch; }
+    .rating-inline-grid .inline-field { border:1px solid rgba(148,163,184,.12); border-radius:13px; padding:12px 13px; background:rgba(2,6,23,.36); }
+    .rating-inline-grid .inline-label { color:#8da0b8; font-size:11px; font-weight:800; letter-spacing:.05em; margin-bottom:5px; }
+    .rating-inline-grid .inline-value { color:#e5edf8; font-size:14px; line-height:1.7; white-space:pre-wrap; }
+    .rating-detail-company, .rating-detail-meta { grid-column:span 6; }
+    .rating-detail-reason, .rating-detail-risk { grid-column:span 6; }
+    .rating-table .ticker { color:#f8fafc; font-weight:900; font-size:17px; letter-spacing:.01em; }
+    .rating-table .price { color:#e0f2fe; font-weight:850; }
+    .rating-table .target { color:#d1fae5; font-weight:850; }
+    .rating-table .upside { font-weight:850; }
+    .rating-table .upside.pos { color:#fb7185; }
+    .rating-table .upside.neg { color:#34d399; }
     .rating-table .muted { color:#64748b; font-weight:500; }
     @media (max-width: 720px) {
-      .rating-card { width:100%; max-width:100%; }
+      .rating-card { width:100%; max-width:100%; background:transparent; border:0; box-shadow:none; }
       .rating-table-wrap { margin:0; width:100%; background:transparent; border:0; }
-      .rating-table-title { border:1px solid rgba(148,163,184,.14); border-radius:14px 14px 0 0; background:rgba(99,102,241,.12); }
-      .rating-table-title small { display:block; }
-      .rating-table { display:block; width:100%; }
+      .rating-table-title { padding:7px 9px; gap:8px; font-size:12px; border:1px solid rgba(148,163,184,.14); border-radius:12px 12px 0 0; background:rgba(99,102,241,.12); }
+      .rating-table-title small { display:block; font-size:10px; }
+      .rating-table { display:block; width:100%; font-size:13px; }
       .rating-table thead { display:none; }
-      .rating-table tbody { display:grid; width:100%; gap:7px; padding:7px 0 0; }
-      .rating-table tr.rating-data-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:6px 9px; padding:10px 11px; border:1px solid rgba(148,163,184,.14); border-radius:14px; background:linear-gradient(135deg, rgba(15,23,42,.72), rgba(30,41,59,.42)); box-shadow:0 6px 18px rgba(0,0,0,.16); }
-      .rating-table tr.rating-data-row.expanded { background:linear-gradient(135deg, rgba(99,102,241,.20), rgba(30,41,59,.48)); border-color:rgba(129,140,248,.36); }
+      .rating-table tbody { display:grid; width:100%; gap:6px; padding:6px 0 0; }
+      .rating-table tr.rating-data-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:5px 8px; padding:8px 9px; border:1px solid rgba(148,163,184,.14); border-radius:12px; background:linear-gradient(135deg, rgba(15,23,42,.72), rgba(30,41,59,.42)); box-shadow:0 4px 12px rgba(0,0,0,.14); }
+      .rating-table tr.rating-data-row.expanded { background:linear-gradient(135deg, rgba(67,56,202,.30), rgba(15,23,42,.70)); border-color:rgba(125,211,252,.36); box-shadow:inset 3px 0 0 rgba(125,211,252,.88), 0 4px 12px rgba(0,0,0,.14); }
       .rating-table th, .rating-table td { padding:0; white-space:normal; min-width:0; }
-      .rating-table td { display:flex; flex-direction:column; gap:4px; align-items:flex-start; overflow-wrap:anywhere; }
-      .rating-table td::before { content:attr(data-label); color:#8da0b8; font-size:11px; font-weight:800; letter-spacing:.05em; }
+      .rating-table td { display:flex; flex-direction:column; gap:2px; align-items:flex-start; overflow-wrap:anywhere; border-bottom:0; line-height:1.25; }
+      .rating-table td::before { content:attr(data-label); color:#8da0b8; font-size:10px; font-weight:800; letter-spacing:.05em; }
       .rating-table td:nth-child(1) { grid-column:1; grid-row:1; }
       .rating-table td:nth-child(2) { grid-column:2; grid-row:1; align-items:flex-end; }
       .rating-table td:nth-child(3) { grid-column:1 / -1; grid-row:2; }
       .rating-table td:nth-child(4) { grid-column:1 / -1; grid-row:3; align-items:flex-end; }
+      .rating-table .ticker { font-size:14px; }
+      .rating-table .price, .rating-table .target, .rating-table .upside { font-size:13px; }
+      .rating-action-inline { display:block; margin:2px 0 0; font-size:10.5px; line-height:1.25; }
       .rating-detail-row.open { display:block; }
-      .rating-detail-row.open .rating-detail-cell { display:block; width:100%; border-radius:14px; overflow:hidden; }
-      .rating-inline-grid { grid-template-columns:1fr; gap:8px; }
-      .rating-inline-detail { padding:11px 10px 12px; }
+      .rating-detail-row.open .rating-detail-cell { display:block; width:100%; border-radius:12px; overflow:hidden; }
+      .rating-inline-grid { grid-template-columns:1fr; gap:6px; }
+      .rating-detail-company, .rating-detail-meta, .rating-detail-reason, .rating-detail-risk { grid-column:auto; }
+      .rating-inline-detail { padding:9px 9px 10px; gap:7px; }
+      .rating-inline-grid .inline-field { padding:7px 8px; border-radius:10px; }
+      .rating-inline-grid .inline-label { font-size:10px; margin-bottom:3px; }
+      .rating-inline-grid .inline-value { font-size:12.5px; line-height:1.55; }
     }
   </style>
 </head>
@@ -4299,9 +4310,26 @@ function parseRatingReport(content) {
   if (!validItems.length) return null;
   return {title, summary, items: validItems};
 }
-function inlineField(label, value) {
+function inlineField(label, value, className = '') {
   if (!value) return '';
-  return `<div class="inline-field"><div class="inline-label">${esc(label)}</div><div class="inline-value">${renderMarkdown(value)}</div></div>`;
+  return `<div class="inline-field ${esc(className)}"><div class="inline-label">${esc(label)}</div><div class="inline-value">${renderMarkdown(value)}</div></div>`;
+}
+function ratingCompanyDetail(ticker, company, quote) {
+  const lines = [`股票代码：${ticker}`];
+  const companyName = cleanRatingValue(company);
+  const sector = cleanRatingValue(quote && quote.sector);
+  const industry = cleanRatingValue(quote && quote.industry);
+  if (companyName) lines.push(`公司：${companyName}`);
+  if (sector || industry) lines.push(`分类：${[sector, industry].filter(Boolean).join(' / ')}`);
+  return lines.join('\n');
+}
+function ratingMetaDetail(item) {
+  const lines = [];
+  const analyst = cleanRatingValue(item && item.analyst);
+  const type = cleanRatingValue(item && item.type);
+  if (analyst) lines.push(`机构 / 分析师：${analyst}`);
+  if (type) lines.push(`关注类型：${type}`);
+  return lines.join('\n');
 }
 function safeDomIdPart(value) {
   return String(value || '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'row';
@@ -4333,12 +4361,11 @@ function renderRatingPriceTable(report, reportTime, reportKey) {
     </tr>
     <tr id="rating-detail-${rowId}" class="rating-detail-row"><td class="rating-detail-cell" colspan="4">
       <div class="rating-inline-detail">
-        <div class="rating-inline-head"><div>${esc(ticker)}${company ? ' · ' + esc(company) : ''}<div class="rating-inline-sub">${esc(item.action || '')}</div></div><span class="muted">再次点击收起</span></div>
         <div class="rating-inline-grid">
-          ${inlineField('机构 / 分析师', item.analyst)}
-          ${inlineField('适合关注类型', item.type)}
-          ${inlineField('看多逻辑 / 催化剂', item.reason)}
-          ${inlineField('风险点', item.risk)}
+          ${inlineField('公司详情', ratingCompanyDetail(ticker, company, quote), 'rating-detail-company')}
+          ${inlineField('评级信息', ratingMetaDetail(item), 'rating-detail-meta')}
+          ${inlineField('看多逻辑 / 催化剂', item.reason, 'rating-detail-reason')}
+          ${inlineField('风险点', item.risk, 'rating-detail-risk')}
         </div>
       </div>
     </td></tr>`;
@@ -5899,7 +5926,86 @@ class Handler(BaseHTTPRequestHandler):
 
 
 SINA_US_QUOTE_URL = "https://hq.sinajs.cn/list="
+NASDAQ_COMPANY_PROFILE_URL = "https://api.nasdaq.com/api/company/{symbol}/company-profile"
 US_QUOTE_SYMBOL_MAP: dict[str, list[str]] = {}  # populated from config or known list
+US_SECTOR_LABELS = {
+    "Basic Materials": "基础材料",
+    "Communication Services": "通信服务",
+    "Communications": "通信服务",
+    "Consumer Cyclical": "可选消费",
+    "Consumer Defensive": "必需消费",
+    "Consumer Discretionary": "可选消费",
+    "Consumer Staples": "必需消费",
+    "Energy": "能源",
+    "Financial Services": "金融服务",
+    "Financials": "金融",
+    "Healthcare": "医疗保健",
+    "Health Care": "医疗保健",
+    "Industrials": "工业",
+    "Real Estate": "房地产",
+    "Technology": "科技",
+    "Utilities": "公用事业",
+}
+
+
+def localized_us_sector(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    label = US_SECTOR_LABELS.get(raw)
+    return f"{label}（{raw}）" if label else raw
+
+
+def fetch_us_company_profile(symbol: str) -> dict[str, str]:
+    safe_symbol = re.sub(r"[^A-Za-z0-9.\-]", "", str(symbol or "").upper())
+    if not safe_symbol:
+        return {}
+    url = NASDAQ_COMPANY_PROFILE_URL.format(symbol=safe_symbol)
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0",
+                "Origin": "https://www.nasdaq.com",
+                "Referer": f"https://www.nasdaq.com/market-activity/stocks/{safe_symbol.lower()}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "ignore"))
+    except Exception:
+        return {}
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+
+    def profile_value(key: str) -> str:
+        item = data.get(key)
+        if isinstance(item, dict):
+            return str(item.get("value") or "").strip()
+        return str(item or "").strip()
+
+    sector = localized_us_sector(profile_value("Sector"))
+    industry = profile_value("Industry")
+    profile: dict[str, str] = {}
+    if sector:
+        profile["sector"] = sector
+    if industry:
+        profile["industry"] = industry
+    return profile
+
+
+def fetch_us_company_profiles(symbols: list[str]) -> dict[str, dict[str, str]]:
+    unique_symbols = list(dict.fromkeys(s for s in symbols if s))
+    if not unique_symbols:
+        return {}
+    max_workers = min(6, len(unique_symbols))
+    profiles: dict[str, dict[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for symbol, profile in zip(unique_symbols, executor.map(fetch_us_company_profile, unique_symbols)):
+            if profile:
+                profiles[symbol] = profile
+    return profiles
 
 
 def fetch_us_quotes(symbols: list[str]) -> dict[str, Any]:
@@ -5938,6 +6044,12 @@ def fetch_us_quotes(symbols: list[str]) -> dict[str, Any]:
                 }
         except (ValueError, IndexError):
             continue
+    profiles = fetch_us_company_profiles(symbols)
+    for ticker, profile in profiles.items():
+        if ticker in result["items"]:
+            result["items"][ticker].update(profile)
+        else:
+            result["items"][ticker] = profile
     return result
 
 
