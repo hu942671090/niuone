@@ -324,9 +324,9 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.ADMIN_PASSWORD = original_password
 
         self.assertEqual(handler.status, 200)
-        self.assertIn('<title>牛牛1号</title>', body)
-        self.assertNotIn('<title>牛牛1号 · 设置</title>', body)
-        self.assertNotIn('<title>牛牛1号 · 管理</title>', body)
+        self.assertIn('<title>牛牛大作手</title>', body)
+        self.assertNotIn('<title>牛牛大作手 · 设置</title>', body)
+        self.assertNotIn('<title>牛牛大作手 · 管理</title>', body)
         self.assertIn('推文监控/美股买入评级模型', body)
         self.assertIn('买卖决策模型', body)
         self.assertIn('选股及买卖决策时间点', body)

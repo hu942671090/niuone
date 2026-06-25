@@ -1,8 +1,8 @@
-# NiuOne · 牛牛1号 Dashboard
+# NiuOne · 牛牛1号
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-NiuOne 是一个本地优先的市场信息与交易辅助 Dashboard。它把 A 股市场面板、策略筛选、模拟交易、X 关注列表监控、美股机构评级摘要和定时任务归档集中在同一个轻量 Python 服务中。
+NiuOne 是一个本地优先的市场信息与交易辅助工具。它以“牛牛大作手”为网页主题，把 A 股市场面板、策略筛选、模拟交易、X 关注列表监控、美股机构评级摘要和定时任务归档集中在同一个轻量 Python 服务中。
 
 项目默认将所有运行数据、数据库、日志、token 和本地虚拟环境写入 `.local-data/`。该目录已被 `.gitignore` 忽略，适合把源码公开到 GitHub，同时把真实数据保留在工程目录内。
 
@@ -11,7 +11,7 @@ NiuOne 是一个本地优先的市场信息与交易辅助 Dashboard。它把 A 
 ## 功能概览
 
 - **一键本地运行**：macOS、Windows、Linux 均提供启动入口，首次运行自动创建虚拟环境并安装依赖。
-- **Dashboard 聚合视图**：展示消息历史、指数、板块、热门股票、资金流、市场流向和策略结果。
+- **聚合视图**：展示消息历史、指数、板块、热门股票、资金流、市场流向和策略结果。
 - **策略与模拟交易**：集成 B1 策略扫描、牛牛实战模拟账户、持仓和收益曲线展示。
 - **定时任务归档**：支持市场监控、美股机构评级日报、X 关注列表监控等任务输出。
 - **本地访问控制**：支持邀请码、管理员 token、限流和运行配置管理。
@@ -20,7 +20,7 @@ NiuOne 是一个本地优先的市场信息与交易辅助 Dashboard。它把 A 
 
 | 依赖 | 用途 |
 |---|---|
-| Python 3.11+ | 运行 Dashboard、创建虚拟环境、执行任务脚本 |
+| Python 3.11+ | 运行本地服务、创建虚拟环境、执行任务脚本 |
 | Git | 克隆项目 |
 | PowerShell | Windows 一键启动需要，系统通常自带 Windows PowerShell |
 
@@ -50,7 +50,7 @@ http://127.0.0.1:8787/
 - 创建 `.local-data/`
 - 创建 `.local-data/.venv`
 - 安装 `requirements.txt`
-- 生成 `.local-data/dashboard.env`
+- 生成本地配置文件
 - 将数据库、token、日志、任务输出写入 `.local-data/runtime/`
 
 Linux 如果提示没有执行权限：
@@ -61,47 +61,35 @@ chmod +x run.sh run.desktop
 
 ## 配置
 
-默认配置文件位于：
-
-```text
-.local-data/dashboard.env
-```
+首次启动会在 `.local-data/` 中生成本地配置文件。
 
 长期运行或暴露到局域网/公网前，请至少检查：
 
 | 配置项 | 说明 |
 |---|---|
-| `DASHBOARD_HOST` | 监听地址，默认 `127.0.0.1` |
-| `DASHBOARD_PORT` | 监听端口，默认 `8787` |
-| `DASHBOARD_AUTH_ENABLED` | 本地一键启动默认 `0`；公网或多人访问必须改为 `1` |
-| `DASHBOARD_ADMIN_PASSWORD` | 管理页密码，可留空使用 token 方式 |
-| `DASHBOARD_CONFIG` | 模型/provider YAML 配置路径 |
+| 监听地址 | 默认 `127.0.0.1` |
+| 监听端口 | 默认 `8787` |
+| 访问认证 | 本地一键启动默认关闭；公网或多人访问必须开启 |
+| 管理页密码 | 可留空使用 token 方式 |
+| 模型配置 | 用于配置模型 provider 和密钥 |
 
-也可以复制样例后手工调整：
-
-```bash
-mkdir -p .local-data
-cp dashboard.env.example .local-data/dashboard.env
-```
-
-Dashboard 启动后，管理员可通过 `/admin` 管理运行配置、模型配置和邀请码。
+启动后，管理员可通过 `/admin` 管理运行配置、模型配置和邀请码。
 
 ## 项目结构
 
 ```text
 .
-├── app/                    # Dashboard 和任务源码
+├── app/                    # 本地服务和任务源码
 ├── tests/                  # 单元测试
 ├── scripts/                # 验证、迁移和独立任务脚本
 ├── docs/                   # 操作文档
 ├── config/                 # 运行策略说明
-├── dashboard.env.example   # 可提交的环境变量样例
 ├── run.sh                  # macOS/Linux 一键启动
 ├── run.command             # macOS 双击启动
 ├── run.bat                 # Windows 双击启动
 ├── run.ps1                 # Windows PowerShell 启动
 ├── run.desktop             # Linux 桌面启动
-└── run-dashboard.sh        # 生产/LaunchAgent 启动入口
+└── requirements.txt        # Python 依赖清单
 ```
 
 ## 文档
