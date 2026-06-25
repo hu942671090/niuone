@@ -1,56 +1,42 @@
-# 牛牛大作手 Dashboard · NiuOne
+# NiuOne · 牛牛大作手 Dashboard
 
-本仓库是牛牛大作手 Dashboard 的统一源码、运行和 Codex 维护目录。项目上传到 GitHub 后，会通过 `.github/workflows/ci.yml` 在 GitHub Actions 中执行同一套验证脚本。
+[![CI](https://github.com/kunkundi/niuone/actions/workflows/ci.yml/badge.svg)](https://github.com/kunkundi/niuone/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-- 项目根目录：克隆后的仓库目录
-- 线上源码：`app/`
-- 本机/线上运行数据：默认在工程目录内 `.local-data/runtime/`
-- 一键启动入口：`run.sh` / `run.command` / `run.bat`
-- 生产启动入口：`run-dashboard.sh`
-- 环境配置：默认读取工程目录内 `.local-data/dashboard.env`，可从 `dashboard.env.example` 复制后填写
+NiuOne 是一个本地优先的市场信息与交易辅助 Dashboard。它把 A 股市场面板、策略筛选、模拟交易、X 关注列表监控、美股机构评级摘要和定时任务归档集中在同一个轻量 Python 服务中。
 
-## 目录结构
+项目默认将所有运行数据、数据库、日志、token 和本地虚拟环境写入 `.local-data/`。该目录已被 `.gitignore` 忽略，适合把源码公开到 GitHub，同时把真实数据保留在工程目录内。
 
-```text
-.
-├── .github/workflows/ci.yml # GitHub Actions 验证工作流
-├── app/                    # 线上 dashboard Python 源码
-│   ├── niuone_dashboard.py
-│   ├── indices_dashboard_api.py
-│   ├── sectors_dashboard_api.py
-│   ├── hot_stocks_dashboard_api.py
-│   ├── money_flow_dashboard_api.py
-│   ├── market_flow_dashboard_api.py
-│   ├── push_history.py
-│   ├── niuniu_practice_trader.py
-│   ├── us_rating_report.py
-│   └── cn_stock_tools.py
-├── tests/                  # 单测
-├── docs/                   # 操作文档
-├── scripts/                # validate / standalone / deploy 脚本
-├── config/                 # 策略和运行说明
-├── dashboard.env.example   # 可提交的环境变量样例
-├── run.sh                  # macOS/Linux 一键启动：建 venv、装依赖、生成私有 env、启动网页
-├── run.command             # macOS 双击启动入口
-├── run.bat                 # Windows 双击启动入口
-├── run.ps1                 # Windows PowerShell 启动入口
-├── run.desktop             # Linux 桌面启动入口
-└── run-dashboard.sh        # 生产启动脚本
-```
+> NiuOne 仅用于研究、信息整理和个人决策辅助，不构成任何投资建议。
 
-真实 DB、token、日志、缓存和本机虚拟环境已经移到仓库外：
+## 功能概览
 
-```text
-.local-data/
-├── dashboard.env
-├── runtime/
-├── backups/
-└── .venv/
-```
+- **一键本地运行**：macOS、Windows、Linux 均提供启动入口，首次运行自动创建虚拟环境并安装依赖。
+- **Dashboard 聚合视图**：展示消息历史、指数、板块、热门股票、资金流、市场流向和策略结果。
+- **策略与模拟交易**：集成 B1 策略扫描、牛牛实战模拟账户、持仓和收益曲线展示。
+- **定时任务归档**：支持市场监控、美股机构评级日报、X 关注列表监控等任务输出。
+- **本地访问控制**：支持邀请码、管理员 token、限流和运行配置管理。
+- **CI 友好**：GitHub Actions 使用同一套 `scripts/validate.sh` 做语法、前端脚本和单元测试验证。
+
+## 系统要求
+
+| 依赖 | 用途 |
+|---|---|
+| Python 3.11+ | 运行 Dashboard、创建虚拟环境、执行任务脚本 |
+| Git | 克隆项目 |
+| Node.js 24+ | 仅开发验证时需要，用于检查内嵌 JavaScript |
+| PowerShell | Windows 一键启动需要，系统通常自带 Windows PowerShell |
+
+Python 依赖由一键启动脚本自动安装，当前核心依赖见 [requirements.txt](requirements.txt)。
 
 ## 快速开始
 
-| 系统 | 一键启动方式 |
+```bash
+git clone https://github.com/kunkundi/niuone.git
+cd niuone
+```
+
+| 系统 | 启动方式 |
 |---|---|
 | macOS | 双击 `run.command`，或终端执行 `./run.sh` |
 | Windows | 双击 `run.bat`，或 PowerShell 执行 `.\run.ps1` |
@@ -62,12 +48,13 @@
 http://127.0.0.1:8787/
 ```
 
-首次运行时，`run.sh` 会自动：
+首次运行会自动完成：
 
-- 创建工程内私有目录 `.local-data/`
-- 创建 `.local-data/.venv` 并安装 `requirements.txt`
+- 创建 `.local-data/`
+- 创建 `.local-data/.venv`
+- 安装 `requirements.txt`
 - 生成 `.local-data/dashboard.env`
-- 把真实 DB、token、日志和缓存写入 `.local-data/runtime/`
+- 将数据库、token、日志、任务输出写入 `.local-data/runtime/`
 
 Linux 如果提示没有执行权限：
 
@@ -75,119 +62,128 @@ Linux 如果提示没有执行权限：
 chmod +x run.sh run.desktop
 ```
 
-本地一键运行默认只监听 `127.0.0.1`，并关闭访问认证，方便新用户开箱体验。若要公网或长期运行，请编辑 `.local-data/dashboard.env`，至少把 `DASHBOARD_AUTH_ENABLED=1` 并配置访问控制。
+## 配置
 
-开发验证：
+默认配置文件位于：
 
-```bash
-./scripts/validate.sh
+```text
+.local-data/dashboard.env
 ```
 
-生产或长期本地运行时，也可以从样例复制后手工调整：
+长期运行或暴露到局域网/公网前，请至少检查：
+
+| 配置项 | 说明 |
+|---|---|
+| `DASHBOARD_HOST` | 监听地址，默认 `127.0.0.1` |
+| `DASHBOARD_PORT` | 监听端口，默认 `8787` |
+| `DASHBOARD_AUTH_ENABLED` | 本地一键启动默认 `0`；公网或多人访问必须改为 `1` |
+| `DASHBOARD_ADMIN_PASSWORD` | 管理页密码，可留空使用 token 方式 |
+| `DASHBOARD_CONFIG` | 模型/provider YAML 配置路径 |
+
+也可以复制样例后手工调整：
 
 ```bash
 mkdir -p .local-data
 cp dashboard.env.example .local-data/dashboard.env
 ```
 
-## Codex 维护流程
+Dashboard 启动后，管理员可通过 `/admin` 管理运行配置、模型配置和邀请码。
 
-```bash
-cd /path/to/NiuOne
+## 数据与隐私
 
-# 1. 修改 app/ 下源码
-# 例如：app/niuone_dashboard.py
+以下内容默认写入 `.local-data/`，不会提交到 Git：
 
-# 2. 运行验证
-./scripts/validate.sh
-
-# 3. 本地临时启动副本，避免影响线上 8787
-DASHBOARD_HOME=/tmp/niuone-smoke DASHBOARD_AUTH_ENABLED=*** DASHBOARD_PORT=8877 ./scripts/run_standalone.sh
-
-# 4. 浏览器打开测试
-# http://127.0.0.1:8877/
-
-# 5. 确认无误后重启线上服务
-./scripts/deploy_to_live.sh
+```text
+.local-data/
+├── dashboard.env
+├── .venv/
+├── runtime/
+│   ├── dashboard_admin_token.txt
+│   ├── dashboard_users.db
+│   ├── push_history.db
+│   ├── niuniu.db
+│   ├── config.yaml
+│   ├── cron/output/
+│   └── logs/
+└── backups/
 ```
 
-## 验证命令
+提交前可用以下命令确认真实数据仍被忽略：
+
+```bash
+git status --ignored --short
+```
+
+## 开发验证
 
 ```bash
 ./scripts/validate.sh
 ```
 
-会执行：
+验证内容包括：
 
-- 自动发现并执行 Python 语法检查
-- 提取主 dashboard 内嵌 `<script>` 并执行 `node --check`
-- 自动发现并执行 `tests/` 下的单测
-- 自动发现并执行 Shell 脚本语法检查
+- Python 语法检查
+- Dashboard 内嵌 JavaScript 语法检查
+- Shell 启动脚本语法检查
+- PowerShell 脚本语法检查（环境存在 PowerShell 时）
+- `tests/` 单元测试
+
+临时启动一个隔离运行时：
+
+```bash
+DASHBOARD_HOME=/tmp/niuone-smoke DASHBOARD_AUTH_ENABLED=0 DASHBOARD_PORT=8877 ./scripts/run_standalone.sh
+```
+
+访问：
+
+```text
+http://127.0.0.1:8877/
+```
 
 ## GitHub Actions
 
-上传到 GitHub 后，`push`、`pull_request` 和手动触发都会运行：
-
-```text
-.github/workflows/ci.yml
-```
-
-CI 使用 Ubuntu runner、Python 3.13 和 Node.js 24，安装 `requirements.txt` 后执行：
+CI 工作流位于 [.github/workflows/ci.yml](.github/workflows/ci.yml)，会在 `push`、`pull_request` 和手动触发时运行：
 
 ```bash
 ./scripts/validate.sh
 ```
 
-该工作流只验证源码和测试，不读取本机 `dashboard.env`，也不需要提交 `.local-data/` 中的数据库、token、日志或缓存。
+GitHub-hosted runner 只用于验证代码，不保存 `.local-data/`，也不适合作为长期运行的 Dashboard 服务。长期运行建议使用本机、VPS、NAS、PaaS 或自建服务器。
 
-## 独立任务入口
+## 常用任务
 
 ```bash
-# 生成“每日美股机构买入评级汇报”，写入 $DASHBOARD_HOME/cron/output/fd0b807138f4 和 push_history.db
+# 生成美股机构买入评级日报，并写入 Dashboard 归档和消息库
 ./scripts/run_us_rating_report.sh
 
-# 增量迁移 Hermes 历史归档、状态和 push_history.db 记录到 NiuOne local-data runtime
+# 增量迁移旧 Hermes 历史归档、状态和 push_history.db
 python3 scripts/migrate_hermes_history.py
 ```
 
-## 线上服务
-
-线上监听：
+## 项目结构
 
 ```text
-127.0.0.1:8787
+.
+├── app/                    # Dashboard 和任务源码
+├── tests/                  # 单元测试
+├── scripts/                # 验证、迁移和独立任务脚本
+├── docs/                   # 操作文档
+├── config/                 # 运行策略说明
+├── dashboard.env.example   # 可提交的环境变量样例
+├── run.sh                  # macOS/Linux 一键启动
+├── run.command             # macOS 双击启动
+├── run.bat                 # Windows 双击启动
+├── run.ps1                 # Windows PowerShell 启动
+├── run.desktop             # Linux 桌面启动
+└── run-dashboard.sh        # 生产/LaunchAgent 启动入口
 ```
 
-LaunchAgent：
+## 文档
 
-```text
-~/Library/LaunchAgents/ai.niuone.dashboard.plist
-~/Library/LaunchAgents/ai.niuone.cron-scheduler.plist
-~/Library/LaunchAgents/ai.niuone.x-watchlist.plist
-```
+- [docs/STANDALONE.md](docs/STANDALONE.md)：独立运行说明
+- [docs/OPERATIONS.md](docs/OPERATIONS.md)：部署、验证和回滚手册
+- [config/runtime-policy.md](config/runtime-policy.md)：运行数据和 secrets 处理策略
 
-应指向：
+## License
 
-```text
-/path/to/NiuOne/run-dashboard.sh
-```
-
-## 关键文档
-
-- `docs/OPERATIONS.md`：迁移、部署、验证、回滚完整操作手册
-- `docs/STANDALONE.md`：独立运行说明
-- `config/runtime-policy.md`：运行数据和 secrets 处理策略
-
-## 不要提交/泄露
-
-`.local-data/runtime/` 中包含真实运行数据和密钥：
-
-- `dashboard_admin_token.txt`
-- `dashboard_users.db`
-- `push_history.db`
-- `niuniu.db`
-- `config.yaml`
-- `cron/output/`
-- `logs/`
-
-这些都在 `.gitignore` 中，不要发给 Codex 外部上下文或公开仓库。
+NiuOne 使用 [Apache License 2.0](LICENSE) 发布。
