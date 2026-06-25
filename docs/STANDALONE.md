@@ -5,6 +5,25 @@ Dashboard 是 NiuOne 自己的独立运行时。核心约定：
 - `DASHBOARD_HOME`：dashboard 自己的运行数据目录，默认工程目录内 `.local-data/runtime`
 - 源码 helper 默认从当前 `app/` 目录加载
 
+## 一键本地启动
+
+```bash
+cd /path/to/NiuOne
+./run.sh
+```
+
+首次运行会自动创建 `.local-data/.venv`、安装依赖、生成 `.local-data/dashboard.env`，
+并启动 Dashboard。macOS 用户可以双击根目录的 `run.command`。
+
+访问：
+
+```text
+http://127.0.0.1:8787/
+```
+
+本地一键入口默认 `DASHBOARD_AUTH_ENABLED=0`，只适合监听 `127.0.0.1` 的本机体验。
+如果要暴露到局域网或公网，请编辑 `.local-data/dashboard.env` 开启认证。
+
 ## 最小独立启动
 
 ```bash

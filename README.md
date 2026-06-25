@@ -5,7 +5,8 @@
 - 项目根目录：克隆后的仓库目录
 - 线上源码：`app/`
 - 本机/线上运行数据：默认在工程目录内 `.local-data/runtime/`
-- 启动入口：`run-dashboard.sh`
+- 一键启动入口：`run.sh`（macOS 可双击 `run.command`）
+- 生产启动入口：`run-dashboard.sh`
 - 环境配置：默认读取工程目录内 `.local-data/dashboard.env`，可从 `dashboard.env.example` 复制后填写
 
 ## 目录结构
@@ -29,7 +30,9 @@
 ├── scripts/                # validate / standalone / deploy 脚本
 ├── config/                 # 策略和运行说明
 ├── dashboard.env.example   # 可提交的环境变量样例
-└── run-dashboard.sh        # 线上启动脚本
+├── run.sh                  # 一键本地启动：建 venv、装依赖、生成私有 env、启动网页
+├── run.command             # macOS 双击启动入口
+└── run-dashboard.sh        # 生产启动脚本
 ```
 
 真实 DB、token、日志、缓存和本机虚拟环境已经移到仓库外：
@@ -45,17 +48,37 @@
 ## 快速开始
 
 ```bash
-python3 -m pip install -r requirements.txt
+./run.sh
+```
+
+启动后浏览器会自动打开：
+
+```text
+http://127.0.0.1:8787/
+```
+
+首次运行时，`run.sh` 会自动：
+
+- 创建工程内私有目录 `.local-data/`
+- 创建 `.local-data/.venv` 并安装 `requirements.txt`
+- 生成 `.local-data/dashboard.env`
+- 把真实 DB、token、日志和缓存写入 `.local-data/runtime/`
+
+macOS 用户也可以直接双击：
+
+```text
+run.command
+```
+
+本地一键运行默认只监听 `127.0.0.1`，并关闭访问认证，方便新用户开箱体验。若要公网或长期运行，请编辑 `.local-data/dashboard.env`，至少把 `DASHBOARD_AUTH_ENABLED=1` 并配置访问控制。
+
+开发验证：
+
+```bash
 ./scripts/validate.sh
 ```
 
-不创建 `dashboard.env` 也可以直接用默认值启动：
-
-```bash
-DASHBOARD_HOME=/tmp/niuone-smoke DASHBOARD_AUTH_ENABLED=0 DASHBOARD_PORT=8877 ./scripts/run_standalone.sh
-```
-
-生产或长期本地运行时，复制样例并把路径和密钥改成本机值：
+生产或长期本地运行时，也可以从样例复制后手工调整：
 
 ```bash
 mkdir -p .local-data

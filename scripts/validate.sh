@@ -34,7 +34,7 @@ PY
 node --check "$TMP_JS"
 
 echo "== Shell syntax checks =="
-for script in run-*.sh scripts/*.sh; do
+for script in *.sh scripts/*.sh *.command; do
   [[ -f "$script" ]] || continue
   bash -n "$script"
 done
