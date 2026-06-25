@@ -1592,7 +1592,7 @@ ADMIN_GROUP_NOTES = {
     "买卖决策模型": "推荐使用 deepseek-v4-pro；用于选股结果后的买卖决策。",
     "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；盘面监控在 A 股交易日触发。",
-    "推文监控作者": "填写 X/Twitter handle；支持带 @ 或不带 @，保存后下一轮推文监控使用。",
+    "推文监控作者": "填写 X/Twitter handle，不需要 @；如果输入 @ 会在保存时自动去掉。",
     "推文监控周期": "单位为秒，保存后从下一轮监控开始使用。",
     "美股买入评级周期": "直接填写北京时间 HH:MM；默认每天触发。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
@@ -1666,12 +1666,12 @@ def split_handle_values(value: str) -> list[str]:
 def normalize_handle_list_update(value: str) -> str:
     handles = split_handle_values(value)
     if not handles and str(value or "").strip():
-        raise ValueError("推文监控作者请使用 X handle，例如 wallstreet0name 或 @wallstreet0name")
+        raise ValueError("推文监控作者请使用 X handle，例如 wallstreet0name")
     return ",".join(handles)
 
 
 def friendly_handle_list_text(value: str) -> str:
-    return "、".join("@" + handle for handle in split_handle_values(value))
+    return "、".join(split_handle_values(value))
 
 
 def normalize_time_list_update(value: str) -> str:
@@ -4938,13 +4938,13 @@ def render_env_input(item: dict[str, Any]) -> str:
         for handle in values:
             inputs.append(
                 "<div class='time-list-item'>"
-                f"<input type='text' name='{field_name}' value='@{html.escape(handle)}' placeholder='@handle' autocapitalize='off' spellcheck='false'>"
+                f"<input type='text' name='{field_name}' value='{html.escape(handle)}' placeholder='handle' autocapitalize='off' spellcheck='false'>"
                 "<button type='button' class='time-list-remove' data-time-list-remove "
                 "aria-label='删除作者' title='删除作者'>x</button>"
                 "</div>"
             )
         return (
-            f"<div class='time-list-control' data-time-list data-field-name='{field_name}' data-input-type='text' data-placeholder='@handle'>"
+            f"<div class='time-list-control' data-time-list data-field-name='{field_name}' data-input-type='text' data-placeholder='handle'>"
             f"<input type='hidden' name='{field_name}' value=''>"
             "<div class='time-list-grid' data-time-list-items>"
             + "".join(inputs)

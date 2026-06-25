@@ -388,7 +388,7 @@ class DashboardAuthTests(unittest.TestCase):
         payload_text = json.dumps(payload, ensure_ascii=False)
         self.assertIn('09:25、10:00、14:50', payload_text)
         self.assertIn('北京时间 09:26', payload_text)
-        self.assertIn('@foo、@bar', payload_text)
+        self.assertIn('foo、bar', payload_text)
         self.assertNotIn('26 9 * * 1-5', payload_text)
         self.assertFalse(any('LaunchAgent' in item.get('source', '') for item in payload['items']))
 
