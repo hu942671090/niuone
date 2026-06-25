@@ -211,6 +211,8 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_MARKET_CLOSE_CRON", "label": "盘后监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "10 15 * * 1-5", "effect": "next_run"},
     {"name": "X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "label": "推文监控间隔", "group": "推文监控周期", "kind": "int", "default": "1200", "effect": "next_run"},
     {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "美股买入评级周期", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
+    {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "美股买入评级周期", "kind": "int", "default": "240", "effect": "next_run"},
+    {"name": "US_RATING_REQUEST_TIMEOUT_SECONDS", "label": "美股评级单次请求超时秒数", "group": "美股买入评级周期", "kind": "int", "default": "120", "effect": "next_run"},
     {"name": "DASHBOARD_INDICES_TTL_SECONDS", "label": "指数行情更新间隔", "group": "指数行情更新周期", "kind": "int", "default": "15", "effect": "runtime"},
 
     {"name": "X_WATCHLIST_STRICT_CONTEXT_HOLD", "label": "X 上下文缺失时暂缓发送", "group": "X 监控", "kind": "bool", "default": "0", "effect": "next_run"},
@@ -247,6 +249,8 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_MARKET_CLOSE_CRON",
     "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
     "DASHBOARD_US_RATING_CRON",
+    "US_RATING_DEADLINE_SECONDS",
+    "US_RATING_REQUEST_TIMEOUT_SECONDS",
     "DASHBOARD_CRON_MAX_ATTEMPTS",
     "DASHBOARD_CRON_RETRY_DELAY_SECONDS",
     "DASHBOARD_INDICES_TTL_SECONDS",
@@ -1702,6 +1706,9 @@ def validate_business_updates(updates: dict[str, str]) -> None:
         elif name == "DASHBOARD_CRON_RETRY_DELAY_SECONDS" and str(value or "").strip():
             if int(value) < 0:
                 raise ValueError(f"{name} 必须大于等于 0")
+        elif name in {"US_RATING_DEADLINE_SECONDS", "US_RATING_REQUEST_TIMEOUT_SECONDS"} and str(value or "").strip():
+            if int(value) <= 0:
+                raise ValueError(f"{name} 必须大于 0")
 
 
 def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str] | tuple[str, ...] | None) -> dict[str, Any]:

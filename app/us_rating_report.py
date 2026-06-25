@@ -36,6 +36,8 @@ def load_dashboard_env() -> None:
         "US_RATING_MODEL",
         "US_RATING_BASE_URL",
         "US_RATING_API_KEY",
+        "US_RATING_DEADLINE_SECONDS",
+        "US_RATING_REQUEST_TIMEOUT_SECONDS",
         "CROSSDESK_BASE_URL",
         "CROSSDESK_API_KEY",
     }
@@ -72,6 +74,18 @@ JOB_NAME = "每日美股机构买入评级汇报"
 CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG") or str(DASHBOARD_HOME / "config.yaml")).expanduser()
 OUTPUT_DIR = Path(os.environ.get("DASHBOARD_US_RATING_OUTPUT_DIR") or str(DASHBOARD_HOME / "cron" / "output" / JOB_ID)).expanduser()
 US_RATING_MODEL = os.environ.get("US_RATING_MODEL") or os.environ.get("DASHBOARD_GROK_MODEL") or "grok-4.20-multi-agent-xhigh"
+
+
+def _int_env(name: str, default: int, *, min_value: int) -> int:
+    try:
+        value = int(str(os.environ.get(name) or "").strip())
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, value)
+
+
+US_RATING_DEADLINE_SECONDS = _int_env("US_RATING_DEADLINE_SECONDS", 240, min_value=30)
+US_RATING_REQUEST_TIMEOUT_SECONDS = _int_env("US_RATING_REQUEST_TIMEOUT_SECONDS", 120, min_value=10)
 
 
 def _load_config():
@@ -126,13 +140,14 @@ def _call_api(base_url, api_key, messages, max_tokens=8192):
     last_err = None
     # Keep our own wall clock bounded so slow upstream model/web-search runs end
     # as a clear cron failure instead of a stale dashboard.
-    deadline = time.monotonic() + 105
+    deadline = time.monotonic() + max(30, US_RATING_DEADLINE_SECONDS)
     for attempt in range(1, 4):
         remaining = deadline - time.monotonic()
         if remaining <= 5:
             break
         try:
-            with urlopen(req, timeout=min(55, max(10, remaining - 2)), context=_SSL_CONTEXT) as resp:
+            timeout_seconds = min(max(10, US_RATING_REQUEST_TIMEOUT_SECONDS), max(10, remaining - 2))
+            with urlopen(req, timeout=timeout_seconds, context=_SSL_CONTEXT) as resp:
                 data = json.loads(resp.read().decode("utf-8", "ignore"))
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 if str(content or "").strip():
