@@ -53,6 +53,8 @@ JOBS = (
     Job("DASHBOARD_MARKET_AUCTION_CRON", "25 9 * * 1-5", "8453b3f28cd3", "A股竞价盘前总结", ("a_share_auction_summary.py",), 180, True),
     Job("DASHBOARD_MARKET_MIDDAY_CRON", "40 11 * * 1-5", "192abba7eeb5", "A股午盘总结", ("a_share_midday_summary.py",), 180, True),
     Job("DASHBOARD_MARKET_CLOSE_CRON", "10 15 * * 1-5", "67ac98149ead", "A股盘后总结", ("a_share_close_summary.py",), 180, True),
+    Job("DASHBOARD_B3_EXIT_TIME", "30 9 * * 1-5", "f4b8c0ad1a35", "牛牛B3开盘离场检查", ("niuniu_practice_trader.py", "--auto-exits"), 120, True),
+    Job("DASHBOARD_TIME_EXIT_TIME", "45 14 * * 1-5", "fc4f23b79591", "牛牛尾盘离场检查", ("niuniu_practice_trader.py", "--auto-exits"), 120, True),
     Job("DASHBOARD_US_RATING_CRON", "0 11 * * *", "fd0b807138f4", "每日美股机构买入评级汇报", ("us_rating_report.py", "--archive-only"), 300, False),
 )
 
@@ -166,6 +168,18 @@ def normalize_job_expr(job: Job, expr: str) -> str:
         day, month, dow = default_parts[2:5] if len(default_parts) == 5 else ("*", "*", "*")
         return f"{minute} {hour} {day} {month} {dow}"
     return raw
+
+
+def job_expr_value(job: Job, env_values: dict[str, str]) -> str:
+    if job.env_name == "DASHBOARD_TIME_EXIT_TIME":
+        return (
+            env_values.get("DASHBOARD_TIME_EXIT_TIME")
+            or os.environ.get("DASHBOARD_TIME_EXIT_TIME")
+            or env_values.get("DASHBOARD_TIME_STOP_EXIT_TIME")
+            or os.environ.get("DASHBOARD_TIME_STOP_EXIT_TIME")
+            or job.default_expr
+        )
+    return env_values.get(job.env_name) or os.environ.get(job.env_name) or job.default_expr
 
 
 def load_state() -> dict[str, object]:
@@ -287,7 +301,7 @@ def main() -> None:
             for job in JOBS:
                 if not job_enabled(job, env_values):
                     continue
-                expr = normalize_job_expr(job, env_values.get(job.env_name) or os.environ.get(job.env_name) or job.default_expr)
+                expr = normalize_job_expr(job, job_expr_value(job, env_values))
                 try:
                     due = cron_matches(expr, now)
                 except Exception as exc:

@@ -43,6 +43,28 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_float(name: str, default: float) -> float:
+    try:
+        value = os.environ.get(name)
+        return float(value) if value else default
+    except (TypeError, ValueError):
+        return default
+
+
+def env_hhmm(name: str, default: str) -> dtime:
+    raw = str(os.environ.get(name) or default).strip()
+    if not re.fullmatch(r"\d{1,2}:\d{2}", raw):
+        raw = default
+    try:
+        hour, minute = [int(part) for part in raw.split(":", 1)]
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return dtime(hour, minute)
+    except Exception:
+        pass
+    hour, minute = [int(part) for part in default.split(":", 1)]
+    return dtime(hour, minute)
+
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
@@ -58,6 +80,9 @@ def load_dashboard_env() -> None:
         "DASHBOARD_DECISION_API_KEY",
         "DASHBOARD_DECISION_MAX_TOKENS",
         "DASHBOARD_DECISION_TIMEOUT",
+        "DASHBOARD_B3_EXIT_TIME",
+        "DASHBOARD_TIME_EXIT_TIME",
+        "DASHBOARD_TIME_STOP_EXIT_TIME",
         "CROSSDESK_BASE_URL",
         "CROSSDESK_API_KEY",
     }
@@ -266,6 +291,24 @@ def is_a_share_auction_time(dt: datetime | None = None) -> bool:
         return False
     t = dt.time()
     return dtime(9, 15) <= t < dtime(9, 30) or dtime(14, 57) <= t <= dtime(15, 0)
+
+
+def is_time_exit_check_time(dt: datetime | None = None) -> bool:
+    dt = dt or datetime.now()
+    if dt.weekday() >= 5:
+        return False
+    return TIME_EXIT_TIME <= dt.time() <= dtime(15, 0)
+
+
+def is_b3_exit_check_time(dt: datetime | None = None) -> bool:
+    dt = dt or datetime.now()
+    if dt.weekday() >= 5:
+        return False
+    return dt.strftime("%H:%M") == B3_EXIT_HHMM
+
+
+def is_time_stop_exit_check_time(dt: datetime | None = None) -> bool:
+    return is_time_exit_check_time(dt)
 
 
 def is_a_share_session_clock(dt: datetime | None = None) -> bool:
@@ -952,13 +995,13 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def available_to_sell(pos: dict[str, Any]) -> int:
+def available_to_sell(pos: dict[str, Any], today: str | None = None) -> int:
     lots = pos.get("buy_date_lots") or {}
     qty = int(pos.get("qty") or pos.get("shares") or 0)
     # Legacy positions created before lot tracking are historical holdings.
     if not lots:
         return qty
-    today = today_key()
+    today = today or today_key()
     total = 0
     for date, lot_qty in lots.items():
         if date != today:
@@ -1010,6 +1053,73 @@ def calc_trade_fees(amount: float, side: str) -> dict[str, float]:
 
 def position_qty(pos: dict[str, Any]) -> int:
     return int(pos.get("qty") or pos.get("shares") or 0)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def position_market_value(pos: dict[str, Any], fallback_price: float | None = None) -> float:
+    qty = position_qty(pos)
+    if qty <= 0:
+        return 0.0
+    price = _safe_float(pos.get("last_price") or pos.get("close") or fallback_price or pos.get("avg_cost"))
+    return max(0.0, qty * price)
+
+
+def open_position_count(positions: dict[str, Any]) -> int:
+    return sum(1 for pos in (positions or {}).values() if isinstance(pos, dict) and position_qty(pos) > 0)
+
+
+def portfolio_market_value(positions: dict[str, Any]) -> float:
+    return sum(position_market_value(pos) for pos in (positions or {}).values() if isinstance(pos, dict))
+
+
+def portfolio_total_equity_for_limits(cash: float, positions: dict[str, Any]) -> float:
+    total = float(cash or 0) + portfolio_market_value(positions)
+    return total if total > 0 else float(cash or 0)
+
+
+def strategy_position_limit_pct(strategy: str) -> float:
+    return min(
+        MAX_SINGLE_POSITION_PCT,
+        float(STRATEGY_POSITION_LIMIT_PCT.get(strategy or "", MAX_SINGLE_POSITION_PCT)),
+    )
+
+
+def candidate_buy_blockers(candidate: dict[str, Any] | None) -> list[str]:
+    if not candidate:
+        return ["买入标的不在本轮交易候选池"]
+    blockers = [str(x) for x in (candidate.get("hard_blockers") or []) if str(x).strip()]
+    raw_score = candidate.get("best_score")
+    if raw_score is None:
+        raw_score = candidate.get("score")
+    score = _safe_float(raw_score, 0.0)
+    threshold = _safe_float(candidate.get("entry_threshold"), 8.0)
+    if score < threshold:
+        blockers.append(f"评分{score:g}<基准{threshold:g}")
+    if candidate.get("actionable") is False:
+        blockers.append("候选未通过战法硬过滤")
+    dist = candidate.get("distance_pct")
+    if dist is not None and _safe_float(dist, 99.0) > COMMON_MAX_BBI_DISTANCE_PCT:
+        blockers.append(f"距BBI>{COMMON_MAX_BBI_DISTANCE_PCT}%")
+    return blockers
+
+
+def candidate_is_buyable(candidate: dict[str, Any] | None) -> bool:
+    return not candidate_buy_blockers(candidate)
+
+
+def add_execution_block(decision: dict[str, Any], code: str, reason: str) -> None:
+    blocks = decision.setdefault("execution_blocked_reasons", [])
+    text = f"{code}: {reason}" if code else reason
+    blocks.append(text)
+    decision["execution_blocked_reason"] = "；".join(blocks[-5:])
 
 
 def record_equity(state: dict[str, Any]) -> None:
@@ -1250,7 +1360,7 @@ def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -
 
 # ====== 自动止盈止损规则 ======
 
-STOP_LOSS_PCT = -6.0       # 止损线（基准值，会根据市场情绪自适应调整）
+STOP_LOSS_PCT = -4.0       # 止损线（基准值，会根据市场情绪自适应调整）
 TAKE_PROFIT_PCT = 12.0     # 止盈线（清仓）
 TAKE_PROFIT_PARTIAL_PCT = 8.0   # 第一批止盈（卖一半）
 TAKE_PROFIT_PARTIAL_RATIO = 0.5  # 第一批卖出的比例
@@ -1269,6 +1379,12 @@ NO_PROGRESS_MAX_PNL_PCT = 1.0
 LUZHU_MEDIUM_YANG_PCT = 2.0       # 卤煮：连续中/大阳线的保守量化阈值
 SELL_SCORE_REDUCE_THRESHOLD = 3
 SELL_SCORE_EXIT_THRESHOLD = 2
+B3_EXIT_TIME = env_hhmm("DASHBOARD_B3_EXIT_TIME", "09:30")
+B3_EXIT_HHMM = B3_EXIT_TIME.strftime("%H:%M")
+TIME_EXIT_TIME = env_hhmm("DASHBOARD_TIME_EXIT_TIME", os.environ.get("DASHBOARD_TIME_STOP_EXIT_TIME", "14:45") or "14:45")
+TIME_EXIT_HHMM = TIME_EXIT_TIME.strftime("%H:%M")
+TIME_STOP_EXIT_TIME = TIME_EXIT_TIME
+TIME_STOP_EXIT_HHMM = TIME_EXIT_HHMM
 S1_HIGH_ZONE_PCT = 0.90
 S1_UPTREND_MIN_PCT = 15.0
 S1_VOLUME_RATIO = 1.5
@@ -1280,6 +1396,20 @@ CONSENSUS_POSITION_BOOST = 1.5  # 策略共识≥3时仓位放大系数
 SELF_OPTIMIZATION_COOLDOWN = 3600  # 自优化最小间隔（秒）
 HIGH_VOL_REDUCTION = 0.7  # 高波动率仓位缩小系数
 LOW_VOL_BOOST = 1.3       # 低波动率仓位放大系数
+MAX_OPEN_POSITIONS = env_int("DASHBOARD_MAX_OPEN_POSITIONS", 5)
+MAX_NEW_BUYS_PER_DECISION = env_int("DASHBOARD_MAX_NEW_BUYS_PER_DECISION", 2)
+MAX_SINGLE_POSITION_PCT = env_float("DASHBOARD_MAX_SINGLE_POSITION_PCT", 10.0)
+MAX_TOTAL_POSITION_PCT = env_float("DASHBOARD_MAX_TOTAL_POSITION_PCT", 80.0)
+MIN_CASH_RESERVE_PCT = env_float("DASHBOARD_MIN_CASH_RESERVE_PCT", 20.0)
+COMMON_MAX_BBI_DISTANCE_PCT = 6.5
+STRATEGY_POSITION_LIMIT_PCT = {
+    "b3_accelerate": 10.0,
+    "b2_confirm": 10.0,
+    "breakout": 10.0,
+    "shaofu_b1": 8.0,
+    "super_b1": 6.0,
+    "trend_pullback": 8.0,
+}
 
 
 def get_volatility_adjustment(code: str) -> float:
@@ -1311,7 +1441,7 @@ def classify_buy_strategy(reason: str = "", candidate: dict[str, Any] | None = N
         raw_strategy = str(candidate.get("buy_strategy") or candidate.get("best_strategy") or candidate.get("strategy") or "").strip()
         if raw_strategy in {
             "trend_pullback", "breakout", "shaofu_b1", "b2_confirm",
-            "b3_accelerate", "super_b1", "balanced_momentum", "legacy_b1",
+            "b3_accelerate", "super_b1",
         }:
             return raw_strategy
         reason = " ".join([
@@ -1334,10 +1464,6 @@ def classify_buy_strategy(reason: str = "", candidate: dict[str, Any] | None = N
         return "breakout"
     if "少妇B1" in text or "shaofu_b1" in text:
         return "shaofu_b1"
-    if "中庸动量" in text:
-        return "balanced_momentum"
-    if "严格B1" in text or "高匹配B1" in text or "B1" in text:
-        return "legacy_b1"
     return "unknown_buy"
 
 
@@ -1376,7 +1502,7 @@ def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
         return "sell_score"
     if "BBI" in text or "白线" in text or "死叉" in text or "低点跌破" in text or "趋势确认失效" in text:
         return "technical_break"
-    if "未兑现" in text or "低效持仓" in text or "持仓到期" in text or "次日不涨" in text:
+    if "未兑现" in text or "低效持仓" in text or "持仓到期" in text or "次日不涨" in text or "未延续" in text:
         return "no_progress"
     if "调仓" in text or "仓位" in text or "硬约束" in text:
         return "position_adjust"
@@ -1538,9 +1664,9 @@ def get_adaptive_params() -> dict[str, float]:
     """根据市场情绪自适应调整参数。"""
     sent = check_market_sentiment()
     if sent["sentiment"] == "hot":
-        return {"stop_loss": -7.0, "position_mult": 1.2, "label": "🔥热-积极"}
+        return {"stop_loss": STOP_LOSS_PCT, "position_mult": 1.0, "label": "热-只排序不放宽风控"}
     elif sent["sentiment"] == "cold":
-        return {"stop_loss": -4.0, "position_mult": 0.6, "label": "🥶冷-保守"}
+        return {"stop_loss": STOP_LOSS_PCT, "position_mult": 0.5, "label": "冷-减半观察"}
     else:
         return {"stop_loss": STOP_LOSS_PCT, "position_mult": 1.0, "label": "中性"}
 
@@ -1922,11 +2048,19 @@ def _sell_signal(reason: str, signal: str, sell_ratio: float = 1.0) -> dict[str,
     return {"reason": reason, "signal": signal, "sell_ratio": sell_ratio}
 
 
-def evaluate_sell_signal(code: str, pos: dict[str, Any], today: str | None = None) -> dict[str, Any] | None:
+def evaluate_sell_signal(
+    code: str,
+    pos: dict[str, Any],
+    today: str | None = None,
+    *,
+    time_exit_allowed: bool = True,
+    b3_exit_allowed: bool | None = None,
+    time_stop_allowed: bool | None = None,
+) -> dict[str, Any] | None:
     """Evaluate the local sell rule stack for one open position.
 
     The rule stack combines fixed risk control, S1/B1-style failed confirmation,
-    volatility/trailing exits, and time stops. It mutates lightweight per-position
+    volatility/trailing exits, and time-based exits. It mutates lightweight per-position
     tracking fields such as peak price and consecutive BBI-break days.
     """
     today = today or today_key()
@@ -1934,6 +2068,10 @@ def evaluate_sell_signal(code: str, pos: dict[str, Any], today: str | None = Non
     avg_cost = float(pos.get("avg_cost") or 0)
     if price <= 0 or avg_cost <= 0:
         return None
+    if time_stop_allowed is not None:
+        time_exit_allowed = time_stop_allowed
+    if b3_exit_allowed is None:
+        b3_exit_allowed = time_exit_allowed
 
     pnl_pct = (price / avg_cost - 1) * 100
     prior_high = float(pos.get("highest_price") or price)
@@ -2015,8 +2153,25 @@ def evaluate_sell_signal(code: str, pos: dict[str, Any], today: str | None = Non
 
     if max_pnl_pct > 0.8 and pnl_pct <= 0:
         return _sell_signal(f"盈转亏退出 (最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)", "profit_to_loss")
-    if hold_days >= NO_PROGRESS_HOLD_DAYS and max_pnl_pct < NO_PROGRESS_MAX_PNL_PCT and pnl_pct <= 0:
-        return _sell_signal(f"买入后{hold_days}日未兑现 (最高盈利{max_pnl_pct:.1f}%，先收队)", "no_progress")
+    entry_strategy = str(pos.get("buy_strategy") or "")
+    if b3_exit_allowed and entry_strategy == "b3_accelerate" and hold_days >= 1 and max_pnl_pct < 1.0 and pnl_pct <= 0:
+        return _sell_signal(
+            f"B3次日不涨离场 ({hold_days}d {B3_EXIT_HHMM}开盘检查，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
+            "b3_next_day_no_progress",
+        )
+    if time_exit_allowed:
+        if entry_strategy == "b2_confirm" and hold_days >= 2 and max_pnl_pct < 2.0 and pnl_pct <= 0.5:
+            return _sell_signal(
+                f"B2确认未延续离场 ({hold_days}d {TIME_EXIT_HHMM}尾盘检查，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
+                "b2_no_follow_through",
+            )
+        if entry_strategy == "super_b1" and hold_days >= NO_PROGRESS_HOLD_DAYS and max_pnl_pct < NO_PROGRESS_MAX_PNL_PCT:
+            return _sell_signal(
+                f"超级B1只赌一次未兑现离场 ({hold_days}d {TIME_EXIT_HHMM}尾盘检查，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
+                "super_b1_no_progress",
+            )
+        if hold_days >= NO_PROGRESS_HOLD_DAYS and max_pnl_pct < NO_PROGRESS_MAX_PNL_PCT and pnl_pct <= 0:
+            return _sell_signal(f"买入后{hold_days}日未兑现离场 ({TIME_EXIT_HHMM}尾盘检查，最高盈利{max_pnl_pct:.1f}%，先收队)", "no_progress")
 
     sell_score = pos.get("sell_score")
     if isinstance(sell_score, (int, float)):
@@ -2207,7 +2362,7 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
     
     退出优先级由 evaluate_sell_signal 统一维护：
     硬止损、S1/BBI失效、10日低点、峰值回撤/ATR吊灯、
-    分批止盈、目标止盈、持仓时间止损。
+    分批止盈、目标止盈、持仓时间离场。
     """
     trade_allowed, _ = is_a_share_execution_time(dt)
     if not trade_allowed:
@@ -2217,13 +2372,15 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
     if not positions:
         return []
     
-    today = today_key()
+    today = (dt or datetime.now()).strftime("%Y-%m-%d")
+    time_exit_allowed = is_time_exit_check_time(dt)
+    b3_exit_allowed = is_b3_exit_check_time(dt)
     executed = []
     cash = float(state.get("cash") or 0)
     
     for code in list(positions.keys()):
         pos = positions[code]
-        sellable = available_to_sell(pos)
+        sellable = available_to_sell(pos, today)
         if sellable <= 0:
             continue
         
@@ -2235,7 +2392,7 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
         if avg_cost <= 0:
             continue
         
-        exit_signal = evaluate_sell_signal(code, pos, today)
+        exit_signal = evaluate_sell_signal(code, pos, today, time_exit_allowed=time_exit_allowed, b3_exit_allowed=b3_exit_allowed)
         if not exit_signal:
             continue
         exit_reason = str(exit_signal.get("reason") or "")
@@ -2326,7 +2483,7 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
             "time": now_ts(),
             "b1_generated_at": "",
             "trade_allowed": True,
-            "trade_reason": "系统自动止盈止损检查",
+            "trade_reason": "系统自动离场检查",
             "decision": {
                 "summary": f"自动止盈止损：{len(executed)}笔卖出",
                 "actions": [{"action": "SELL", "code": e["code"], "shares": e["shares"], "reason": e["reason"]} for e in executed],
@@ -2339,6 +2496,27 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
         _sync_decision_to_db(log_entry)
     
     return executed
+
+
+def run_auto_exits_once(dt: datetime | None = None) -> dict[str, Any]:
+    """Run the side-effectful automatic exit script once for scheduled checks."""
+    dt = dt or datetime.now()
+    state = load_state()
+    refresh_realtime_prices(state)
+    refresh_position_intraday(state)
+    _refresh_position_bbi(state)
+    executed = check_auto_exits(state, dt)
+    record_equity(state)
+    save_state(state)
+    return {
+        "ok": True,
+        "checked_at": dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "b3_exit_time": B3_EXIT_HHMM,
+        "time_exit_time": TIME_EXIT_HHMM,
+        "executed": executed,
+        "executed_count": len(executed),
+        "portfolio": enrich_portfolio(state),
+    }
 
 
 def maybe_record_session_equity_heartbeat(min_interval_seconds: int = EQUITY_HEARTBEAT_MIN_SECONDS) -> bool:
@@ -2668,7 +2846,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
     except Exception as e:
         news_context = f"（消息面预检失败: {e}）"
     
-    compact_candidates = candidates[:15]
+    compact_candidates = candidates[:8]
     # 自适应参数（市场情绪驱动）
     adaptive = get_adaptive_params()
     # 多战法上下文：统计战法分布，给每个候选标注最优战法
@@ -2696,6 +2874,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
             f"时间纪律:{c.get('time_stop','-')} "
             f"共识:{c.get('consensus_count',1)}/多战法 "
             f"距BBI:{c.get('distance_pct')}% "
+            f"硬过滤:{','.join(c.get('hard_blockers',[]) or ['无'])} "
             f"风险:{','.join(c.get('risk_flags',[]) or ['无'])}"
         )
     candidates_section = "\n".join(cand_lines) if cand_lines else "（无候选股）"
@@ -2706,15 +2885,15 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 - A股模拟成交窗口：09:30-11:30、13:00-15:00；09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30为静默期，不得直接按参考价记成交。
 - T+1：今日买入的股票今日不可卖；只能卖available_qty。
 - 买入必须100股整数倍；不能融资、不能做空、现金不能为负。
-- 单次决策最多给5条操作；单票目标仓位原则上不超过总资产20%；保留至少5%现金。
-- 首次建仓不超过总资金50%；尾盘(14:30后)买入更保守。
-- 突破确认战法单票仓位15%，趋势回踩和Z哥B1类战法单票仓位10%
-- 自动卖出规则：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出
+- 单次决策最多给2条新买入；当前持仓达到{MAX_OPEN_POSITIONS}只时只允许卖出/持有，不能继续开新仓，避免“开超市”。
+- 单票目标仓位不超过总资产{MAX_SINGLE_POSITION_PCT:g}%；总持仓不超过{MAX_TOTAL_POSITION_PCT:g}%；至少保留{MIN_CASH_RESERVE_PCT:g}%现金。
+- 首次建仓必须小仓试错；B3/B2/突破≤10%，少妇B1/趋势回踩≤8%，超级B1≤6%；尾盘(14:30后)原则上不新开仓。
+- 自动卖出规则：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、B3仅在{B3_EXIT_HHMM}做开盘离场检查，B2/超级B1仅在{TIME_EXIT_HHMM}做尾盘离场检查、持仓超25日退出
 - 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出
 - 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场
 - 同板块持仓不超过2只（避免集中风险）
 - 必须按候选自带的“基准”判断是否达标；未达各自基准只能观察，不能因为裸分接近8就买
-- 策略共识≥3个战法时仓位可放大1.5x，共识=1时仓位缩到基准的0.7x
+- 策略共识只能用于排序，不能突破持仓数、单票仓位、总仓位、现金储备硬上限。
 - 当前自适应模式：{adaptive.get('label','中性')}（止损{adaptive.get('stop_loss',STOP_LOSS_PCT)}% 仓位{adaptive.get('position_mult',1.0)}x） ← 新增
 - 盈亏比过滤：优先选盈亏比≥2:1的票（上涨空间/下跌空间），盈亏比<1.5自动标记风险 ← 新增
 - 波动率仓位：20日波动>3.5%→仓位×0.7，波动<1.5%→仓位×1.3 ← 新增
@@ -2726,15 +2905,15 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 硬性准入规则（全部战法通用）：
 - 距BBI > 6.5% → 不买（回测显示追高胜率骤降）
 - 评分 < 8 → 不买（min_score从7提到8后，假信号减少40%+）
-- 止损线统一设为 -4%（回测显示-5%止损吃掉太多利润）
+- 止损线统一设为 -4%，买入K线/前低止损优先
 - 止盈设在 +12%~15%（回测显示突破确认能吃到9.6%平均盈利）
 - 单票仓位 ≤ 总资金15%（回测显示持仓<5只时最大回撤控制在8%以内）
 
 Z哥买入体系评分基准（永不套牢优先）：
-1. B3中继：确定性最高但盈亏比最低，基准最高；只做贴近B2、振幅小、不过热的箭在弦上，次日不涨开盘走
-2. B2确认：看放量长阳、一阳穿多线、J<55、B1后3日内最好；偏滞后或离BBI远就是追高，降级
-3. 少妇B1：胜率/盈亏比优先，但必须止损空间近、黄线/BBI附近、N型上移、上方压力不重；3天不涨走
-4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑
+1. B3中继：确定性最高但盈亏比最低，只做贴近B2、振幅小、J不过热的箭在弦上，T+1 {B3_EXIT_HHMM}开盘不涨走
+2. B2确认：必须放量长阳、一阳穿多线、J<55、B1后3日内；偏滞后或离BBI远就是追高，不买；T+2 {TIME_EXIT_HHMM}尾盘不延续走
+3. 少妇B1：交易级B1按J≤-10执行；J≤12但未到负值只观察。必须缩量、N型上移、黄线/BBI附近、上方压力不重；3天不涨走
+4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑，未兑现到窗口日{TIME_EXIT_HHMM}尾盘走
 
 非Z哥补充策略：
 - 突破确认 — 优先看有效突破和回踩不破
@@ -2789,6 +2968,7 @@ def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates:
     cand_by_code = {normalize_code(c.get("code", "")): c for c in candidates}
     positions = state.setdefault("positions", {})
     cash = float(state.get("cash") or 0)
+    new_buys = 0
     if not trade_allowed:
         return executed
     for action in (decision.get("actions") or [])[:5]:
@@ -2814,13 +2994,45 @@ def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates:
         if shares <= 0:
             continue
         if act == "BUY":
+            blockers = candidate_buy_blockers(candidate)
+            if blockers:
+                add_execution_block(decision, code, "买入拦截：" + "、".join(blockers))
+                continue
             buy_strategy = classify_buy_strategy(reason, candidate)
-            # Max affordable includes buy-side fees; keep the existing 5% cash buffer discipline.
+            existing_pos = positions.get(code)
+            old_qty = position_qty(existing_pos or {})
+            if old_qty <= 0 and open_position_count(positions) >= MAX_OPEN_POSITIONS:
+                add_execution_block(decision, code, f"持仓已达{MAX_OPEN_POSITIONS}只上限")
+                continue
+            if old_qty <= 0 and new_buys >= MAX_NEW_BUYS_PER_DECISION:
+                add_execution_block(decision, code, f"本轮新开仓已达{MAX_NEW_BUYS_PER_DECISION}笔上限")
+                continue
+
+            total_equity = portfolio_total_equity_for_limits(cash, positions)
+            current_position_value = position_market_value(existing_pos or {}, float(price))
+            current_market_value = portfolio_market_value(positions)
+            if existing_pos:
+                current_market_value = max(0.0, current_market_value - position_market_value(existing_pos) + current_position_value)
+            position_limit_value = total_equity * strategy_position_limit_pct(buy_strategy) / 100
+            position_budget = max(0.0, position_limit_value - current_position_value)
+            total_exposure_budget = max(0.0, total_equity * MAX_TOTAL_POSITION_PCT / 100 - current_market_value)
+            cash_reserve_budget = max(0.0, cash - total_equity * MIN_CASH_RESERVE_PCT / 100)
+            max_buy_budget = min(position_budget, total_exposure_budget, cash_reserve_budget)
+            if max_buy_budget <= 0:
+                add_execution_block(
+                    decision,
+                    code,
+                    f"仓位预算不足：单票/总仓/现金储备约束({strategy_position_limit_pct(buy_strategy):g}%/{MAX_TOTAL_POSITION_PCT:g}%/{MIN_CASH_RESERVE_PCT:g}%)",
+                )
+                continue
+
+            # Max affordable includes buy-side fees and the portfolio-level cash reserve discipline.
             per_lot_gross = price * 100
             per_lot_fees = calc_trade_fees(per_lot_gross, "BUY")["total_fee"]
-            max_affordable = int((cash * 0.95) // (per_lot_gross + per_lot_fees)) * 100
+            max_affordable = int(max_buy_budget // (per_lot_gross + per_lot_fees)) * 100
             qty = min(shares, max_affordable)
             if qty <= 0:
+                add_execution_block(decision, code, "仓位预算不足以买入1手")
                 continue
             gross = qty * float(price)
             fees = calc_trade_fees(gross, "BUY")
@@ -2828,7 +3040,6 @@ def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates:
             if total_cost > cash:
                 continue
             pos = positions.setdefault(code, {"code": code, "name": name, "qty": 0, "avg_cost": 0.0, "buy_date_lots": {}, "last_price": price})
-            old_qty = position_qty(pos)
             old_cost = old_qty * float(pos.get("avg_cost") or 0)
             new_qty = old_qty + qty
             pos["qty"] = new_qty
@@ -2853,6 +3064,8 @@ def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates:
             lots = pos.setdefault("buy_date_lots", {})
             lots[today_key()] = int(lots.get(today_key(), 0)) + qty
             cash -= total_cost
+            if old_qty <= 0:
+                new_buys += 1
             executed.append({"time": now_ts(), "action": "BUY", "code": code, "name": name,
                              "shares": qty, "price": round(price, 3), "amount": round(gross, 2),
                              "commission": fees["commission"], "transfer_fee": fees["transfer_fee"],
@@ -3171,7 +3384,8 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     # 自适应参数
     adaptive = get_adaptive_params()
     
-    candidates = b1_payload.get("items") or []
+    raw_candidates = b1_payload.get("trade_items") or b1_payload.get("items") or b1_payload.get("candidates") or []
+    candidates = [c for c in raw_candidates if isinstance(c, dict) and candidate_is_buyable(c)]
     
     # 本轮允许交易 → 清除之前的暂停标记
     if "trading_paused" in state:
@@ -3323,7 +3537,15 @@ def get_dashboard_payload() -> dict[str, Any]:
     payload["pause_reason"] = state.get("pause_reason", "")
     payload["pause_since"] = state.get("pause_since", "")
     payload["strategy_performance"] = track_strategy_performance(state)
-    payload["trade_rule_note"] = "A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。系统自动卖出：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。买入按万一免五计费。"
+    payload["trade_rule_note"] = (
+        f"A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，"
+        f"09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。"
+        f"买入硬约束：最多{MAX_OPEN_POSITIONS}只持仓、单轮最多{MAX_NEW_BUYS_PER_DECISION}笔新仓、"
+        f"单票≤{MAX_SINGLE_POSITION_PCT:g}%、总仓≤{MAX_TOTAL_POSITION_PCT:g}%、现金≥{MIN_CASH_RESERVE_PCT:g}%。"
+        f"系统自动卖出：-4%硬止损/买入K线前低止损、防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
+        f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。"
+        f"买入按万一免五计费。"
+    )
     payload["fee_rule"] = {
         "commission_rate": COMMISSION_RATE,
         "commission_min": COMMISSION_MIN,
@@ -3337,4 +3559,7 @@ def get_dashboard_payload() -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    print(json.dumps(get_dashboard_payload(), ensure_ascii=False, indent=2))
+    if "--auto-exits" in sys.argv:
+        print(json.dumps(run_auto_exits_once(), ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(get_dashboard_payload(), ensure_ascii=False, indent=2))

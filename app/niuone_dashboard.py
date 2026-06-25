@@ -188,6 +188,8 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用 B1 定时扫描", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股及买卖决策时间点", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
+    {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "09:30", "effect": "runtime"},
+    {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "14:45", "effect": "runtime"},
     {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "B1 扫描超时秒数", "group": "任务调度", "kind": "int", "default": "360", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "B1 漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "label": "B1 运行中陈旧秒数", "group": "任务调度", "kind": "int", "default": "900", "effect": "restart"},
@@ -259,6 +261,8 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_DECISION_MAX_TOKENS",
     "DASHBOARD_DECISION_TIMEOUT",
     "DASHBOARD_B1_SCHEDULE_TIMES",
+    "DASHBOARD_B3_EXIT_TIME",
+    "DASHBOARD_TIME_EXIT_TIME",
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
     "DASHBOARD_MARKET_CLOSE_CRON",
@@ -275,6 +279,9 @@ TRADER_RUNTIME_ENV_NAMES = {
     "DASHBOARD_DECISION_API_KEY",
     "DASHBOARD_DECISION_MAX_TOKENS",
     "DASHBOARD_DECISION_TIMEOUT",
+    "DASHBOARD_B3_EXIT_TIME",
+    "DASHBOARD_TIME_EXIT_TIME",
+    "DASHBOARD_TIME_STOP_EXIT_TIME",
 }
 ENV_GROUP_ORDER = [
     "牛牛美股",
@@ -673,7 +680,7 @@ def get_practice_payload_fast() -> dict[str, Any]:
         payload["pause_since"] = state.get("pause_since", "")
         strategy_performance = trader.track_strategy_performance(state) if hasattr(trader, "track_strategy_performance") else {}
         payload["strategy_performance"] = compact_strategy_performance(strategy_performance)
-        payload["trade_rule_note"] = "A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。系统自动卖出：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。"
+        payload["trade_rule_note"] = "A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。系统自动卖出：买入K线/前低止损、防卖飞5分评分、B3开盘离场检查09:30、B2/超级B1尾盘离场检查14:45、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。"
         payload["snapshot_mode"] = "fast"
         return payload
     except Exception as exc:
@@ -683,7 +690,7 @@ def get_practice_payload_fast() -> dict[str, Any]:
                 "equity_history": [], "last_error": str(exc), "snapshot_mode": "fast"}
 
 def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any]:
-    items = b1_payload.get("items") or b1_payload.get("candidates") or []
+    items = b1_payload.get("trade_items") or b1_payload.get("items") or b1_payload.get("candidates") or []
     payload = {"items": items, "generated_at": b1_payload.get("generated_at", "")}
     for key in ("schedule_slot", "schedule_run_kind", "schedule_triggered_at"):
         if b1_payload.get(key):
@@ -797,6 +804,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "position_hint": best.get("position_hint"),
                 "time_stop": best.get("time_stop"),
                 "actionable": best.get("actionable"),
+                "hard_blockers": best.get("hard_blockers", []),
+                "trade_ready": scanner.candidate_is_trade_ready(best),
                 "strategies": multi["strategies"],
                 "consensus_count": multi.get("consensus_count", 0),
                 "consensus_boost": multi.get("consensus_boost", 0),
@@ -811,6 +820,7 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
 
         refreshed.sort(key=sort_key, reverse=True)
         selected = scanner.select_display_candidates(refreshed)
+        trade_items = scanner.select_trade_candidates(refreshed)
         from collections import Counter
         strat_counts = Counter(str(item.get("best_strategy") or "unknown") for item in selected)
         refreshed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -822,6 +832,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             "items": selected,
             "candidates": selected,
             "count": len(selected),
+            "trade_items": trade_items,
+            "trade_count": len(trade_items),
             "strategy_distribution": dict(strat_counts),
             "candidate_refresh": {
                 "refreshed_at": refreshed_at,
@@ -959,6 +971,8 @@ def trigger_b1_scan(
         if result.returncode == 0:
             data = json.loads(result.stdout)
             items = data.get("items") or data.get("candidates") or []
+            candidates = data.get("candidates") or items
+            trade_items = data.get("trade_items") or items
             schedule_meta = {}
             if schedule_slot:
                 schedule_meta = {
@@ -966,7 +980,8 @@ def trigger_b1_scan(
                     "schedule_run_kind": schedule_run_kind or "scheduled",
                     "schedule_triggered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
-            cache = {**data, "items": items, "candidates": items, "count": len(items),
+            cache = {**data, "items": items, "candidates": candidates, "count": len(items),
+                     "trade_items": trade_items, "trade_count": len(trade_items),
                      "total_analyzed": data.get("total_analyzed", 0),
                      "generated_at": data.get("generated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                      "running": False, "error": "", "cooldown_remaining_seconds": 0,
@@ -1494,6 +1509,11 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         return "1" if value.lower() in {"1", "true", "yes", "on"} else "0"
     if kind == "int" and value:
         int(value)
+    if kind == "time":
+        normalized = normalize_hhmm(value)
+        if value and not normalized:
+            raise ValueError(f"{ENV_CONFIG_BY_NAME.get(name, {}).get('label', name)} 请使用北京时间 HH:MM，例如 14:45")
+        return normalized
     if kind == "time_list":
         return normalize_time_list_update(value)
     if kind == "handle_list":
@@ -1830,6 +1850,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_cron_update(name, normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "time_list":
             normalized[name] = normalize_time_list_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "time":
+            normalized[name] = normalize_env_update(name, normalized[name], "time")
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "handle_list":
             normalized[name] = normalize_handle_list_update(normalized[name])
     return normalized
@@ -1861,6 +1883,8 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             validate_cron_expr(normalize_cron_update(name, value))
         elif name == "DASHBOARD_B1_SCHEDULE_TIMES":
             normalize_time_list_update(value)
+        elif name in {"DASHBOARD_B3_EXIT_TIME", "DASHBOARD_TIME_EXIT_TIME", "DASHBOARD_TIME_STOP_EXIT_TIME"}:
+            normalize_env_update(name, value, "time")
         elif name == "X_WATCHLIST_ACCOUNTS":
             normalize_handle_list_update(value)
         elif name in {"X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "DASHBOARD_INDICES_TTL_SECONDS"} and str(value or "").strip():
@@ -3817,7 +3841,6 @@ function renderStrategyPerformance(perf, portfolio) {
     breakout: '#ec4899',
     shaofu_b1: '#f97316', b2_confirm: '#22c55e',
     b3_accelerate: '#a78bfa', super_b1: '#fb7185',
-    balanced_momentum: '#facc15', legacy_b1: '#38bdf8',
     mixed: '#c084fc', unknown_buy: '#64748b',
     auto_exit: '#94a3b8', unknown: '#64748b'
   };
@@ -3826,7 +3849,6 @@ function renderStrategyPerformance(perf, portfolio) {
     breakout: '突破确认',
     shaofu_b1: '少妇B1', b2_confirm: 'B2确认',
     b3_accelerate: 'B3中继', super_b1: '超级B1',
-    balanced_momentum: '中庸动量', legacy_b1: 'B1旧版',
     mixed: '混合买入', unknown_buy: '未识别买入',
     auto_exit: '系统退出', unknown: '其他'
   };
@@ -4216,7 +4238,9 @@ function renderB1Screen() {
     for (const item of items) {
       const s = item.best_score || item.score || 0;
       const threshold = Number(item.entry_threshold || 8);
-      if (s >= threshold) tierCounts.high++;
+      const hardBlockers = item.hard_blockers || [];
+      const tradeReady = !!item.actionable && !hardBlockers.length && s >= threshold;
+      if (tradeReady) tierCounts.high++;
       else if (s >= threshold - 1.5) tierCounts.mid++;
       else tierCounts.low++;
     }
@@ -4243,6 +4267,8 @@ function renderB1Screen() {
       const jRec = item.j_recovering ? '📈回升' : item.j_oversold ? '📉续降' : '--';
       const jInfo = item.min_j_10d != null ? `J最低 ${item.min_j_10d.toFixed(1)} ${jRec}` : '';
       const riskFlags = (item.risk_flags || []).map(f => `<span style="color:#f87171;font-size:11px;margin-left:6px">⚠️${esc(f)}</span>`).join('');
+      const hardBlockers = item.hard_blockers || [];
+      const hardBlockerFlags = hardBlockers.map(f => `<span style="color:#fbbf24;font-size:11px;margin-left:6px">硬过滤:${esc(f)}</span>`).join('');
       const stratName = item.best_strategy || '';
       const sm = STRATEGY_META[stratName] || {label:stratName||'综合', color:'#94a3b8'};
       let groupBadge = '';
@@ -4250,7 +4276,9 @@ function renderB1Screen() {
       const entryThreshold = Number(item.entry_threshold || 8);
       const scoreBasis = item.score_basis || '';
       const tradeDiscipline = [item.position_hint, item.time_stop].filter(Boolean).join(' · ');
-      if (finalScore >= entryThreshold) groupBadge = '<span style="background:rgba(52,211,153,.15);color:#34d399;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">达标</span>';
+      const tradeReady = !!item.actionable && !hardBlockers.length && finalScore >= entryThreshold;
+      if (tradeReady) groupBadge = '<span style="background:rgba(52,211,153,.15);color:#34d399;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">交易达标</span>';
+      else if (hardBlockers.length) groupBadge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">硬过滤</span>';
       else if (finalScore >= entryThreshold - 1.5) groupBadge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">等确认</span>';
       else groupBadge = '<span style="background:rgba(148,163,184,.12);color:#94a3b8;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">仅观察</span>';
       html += `<div style="background:rgba(16,19,26,.86);border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 10px 36px rgba(0,0,0,.18)">
@@ -4285,6 +4313,7 @@ function renderB1Screen() {
           <span>${esc(jInfo)}</span>
           ${scoreBasis ? `<span>${esc(scoreBasis)}</span>` : ''}
           ${tradeDiscipline ? `<span>${esc(tradeDiscipline)}</span>` : ''}
+          ${hardBlockerFlags}
           ${riskFlags}
         </div>
       </div>`;
@@ -5426,6 +5455,11 @@ def render_env_input(item: dict[str, Any]) -> str:
         return (
             f"<input type='time' name='env__{escaped_name}' value='{html.escape(value)}'>"
             f"<div class='config-meta'>北京时间{(' · ' + day_label) if day_label else ''}</div>"
+        )
+    if kind == "time":
+        return (
+            f"<input type='time' name='env__{escaped_name}' value='{html.escape(value)}'>"
+            "<div class='config-meta'>北京时间</div>"
         )
     if kind == "time_list":
         values = list(item.get("time_values") or split_hhmm_values(value))

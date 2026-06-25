@@ -93,6 +93,20 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
         self.assertTrue(scheduler.job_enabled(us_job, {"DASHBOARD_US_FEATURES_ENABLED": "true"}))
         self.assertTrue(scheduler.job_enabled(cn_job, {}))
 
+    def test_time_exit_job_uses_hhmm_setting(self):
+        scheduler = load_scheduler_module()
+        b3_job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_B3_EXIT_TIME")
+        job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_TIME_EXIT_TIME")
+
+        self.assertEqual(b3_job.command, ("niuniu_practice_trader.py", "--auto-exits"))
+        self.assertEqual(scheduler.normalize_job_expr(b3_job, "09:30"), "30 9 * * 1-5")
+        self.assertEqual(job.command, ("niuniu_practice_trader.py", "--auto-exits"))
+        self.assertEqual(scheduler.normalize_job_expr(job, "14:45"), "45 14 * * 1-5")
+        self.assertEqual(
+            scheduler.job_expr_value(job, {"DASHBOARD_TIME_STOP_EXIT_TIME": "14:46"}),
+            "14:46",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

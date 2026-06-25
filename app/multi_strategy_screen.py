@@ -63,26 +63,30 @@ DISPLAY_STRATEGY_ORDER = [
     "breakout",
     "trend_pullback",
 ]
+TRADE_CANDIDATE_LIMIT = 8
+COMMON_MAX_BBI_DISTANCE_PCT = 6.5
+B1_CORE_J_CEILING = -10.0
+B1_WATCH_J_CEILING = 12.0
 
 # 战法标签与颜色（供 dashboard 使用）
 STRATEGY_META = {
     "trend_pullback": {"label": "趋势回踩",  "color": "#60a5fa", "desc": "趋势股回踩BBI/EMA不破"},
     "breakout":       {"label": "突破确认",  "color": "#ec4899", "desc": "平台/前高突破后回踩站稳"},
     "shaofu_b1":      {"label": "少妇B1",    "color": "#f97316", "desc": "J≤12(最好负值)+N型上移+缩量回调+牛绳约束"},
-    "b2_confirm":     {"label": "B2确认",    "color": "#22c55e", "desc": "B1后3-15日放量中/大阳确认趋势"},
+    "b2_confirm":     {"label": "B2确认",    "color": "#22c55e", "desc": "B1后3日内放量中/大阳确认趋势"},
     "b3_accelerate":  {"label": "B3中继",    "color": "#a78bfa", "desc": "B2后小阳/十字星分歧转一致"},
     "super_b1":       {"label": "超级B1",    "color": "#fb7185", "desc": "放量破位洗盘后缩量企稳且J值仍负"},
 }
 
 # Scoring profiles encode the Zettaranc "never get trapped" discipline:
-# different buy points have different certainty, risk/reward, and time stops.
+# different buy points have different certainty, risk/reward, and time exits.
 STRATEGY_SCORE_PROFILES = {
     "b3_accelerate": {
         "priority": 90,
         "entry_threshold": 8.5,
         "score_basis": "确定性最高/盈亏比最低",
-        "position_hint": "快进快出，次日不涨走",
-        "time_stop": "次日不涨开盘走",
+        "position_hint": "快进快出，次日09:30不涨走",
+        "time_stop": "T+1开盘09:30不涨退出",
         "certainty_rank": 1,
         "risk_reward_rank": 4,
     },
@@ -91,7 +95,7 @@ STRATEGY_SCORE_PROFILES = {
         "entry_threshold": 8.0,
         "score_basis": "趋势确认/放量长阳",
         "position_hint": "确认仓，拒绝追高",
-        "time_stop": "2日内不放量延续则降预期",
+        "time_stop": "T+2尾盘14:45不延续退出",
         "certainty_rank": 2,
         "risk_reward_rank": 3,
     },
@@ -109,7 +113,7 @@ STRATEGY_SCORE_PROFILES = {
         "entry_threshold": 8.5,
         "score_basis": "洗盘反转/只赌一次",
         "position_hint": "小仓试错，破洗盘低点走",
-        "time_stop": "只赌一次，失败不补仓",
+        "time_stop": "14:45检查未兑现则退出",
         "certainty_rank": 4,
         "risk_reward_rank": 2,
     },
@@ -156,13 +160,85 @@ def with_strategy_profile(strategy_name: str, payload: dict[str, Any]) -> dict[s
     priority = int(profile.get("priority", 50))
     payload["score"] = round(score, 1)
     payload["entry_threshold"] = threshold
-    payload["actionable"] = score >= threshold
     payload["strategy_priority"] = priority
-    payload["decision_score"] = round(score + priority / 100, 2)
+    blockers = strategy_hard_blockers(strategy_name, payload)
+    payload["hard_blockers"] = blockers
+    payload["actionable"] = score >= threshold and not blockers
+    payload["decision_score"] = round(score + priority / 100 - len(blockers) * 1.5, 2)
     for key in ("score_basis", "position_hint", "time_stop", "certainty_rank", "risk_reward_rank"):
         if key in profile:
             payload[key] = profile[key]
     return payload
+
+def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[str]:
+    """Hard buy gates distilled from zettaranc rules; blocked names may still be watched."""
+    blockers: list[str] = []
+    dist = safe_float(payload.get("distance_pct"))
+    if dist is not None and dist > COMMON_MAX_BBI_DISTANCE_PCT:
+        blockers.append(f"距BBI>{COMMON_MAX_BBI_DISTANCE_PCT}%")
+
+    risk_flags = set(str(x) for x in (payload.get("risk_flags") or []))
+    if strategy_name == "shaofu_b1":
+        j = safe_float(payload.get("current_j"))
+        if j is None or j > B1_CORE_J_CEILING:
+            blockers.append("B1核心J未≤-10")
+        if not payload.get("vol_shrink") and not payload.get("pullback_shrink"):
+            blockers.append("未缩量回调")
+        if not payload.get("n_structure"):
+            blockers.append("N型上移不足")
+        if not payload.get("bull_rope"):
+            blockers.append("牛绳/BBI支撑不足")
+        stop_space = safe_float(payload.get("stop_space_pct"))
+        if stop_space is not None and stop_space > 6:
+            blockers.append("止损空间>6%")
+        pressure_space = safe_float(payload.get("pressure_space_pct"))
+        if pressure_space is not None and pressure_space < 5:
+            blockers.append("上方空间不足")
+    elif strategy_name == "b2_confirm":
+        j = safe_float(payload.get("current_j"))
+        if j is None or j >= 55:
+            blockers.append("B2要求J<55")
+        if not payload.get("vol_expand"):
+            blockers.append("B2未放量确认")
+        days = safe_float(payload.get("days_from_b1"))
+        if days is None or days > 3:
+            blockers.append("B2距离B1超过3日")
+        if "上影偏长" in risk_flags:
+            blockers.append("B2上影过长")
+    elif strategy_name == "b3_accelerate":
+        b2_distance = safe_float(payload.get("b2_distance"))
+        if b2_distance is None or b2_distance > 2:
+            blockers.append("B3距离B2过远")
+        j = safe_float(payload.get("current_j"))
+        if j is None or j >= 70:
+            blockers.append("B3 J值过热")
+        amplitude = safe_float(payload.get("amplitude_pct"))
+        if amplitude is not None and amplitude >= 6:
+            blockers.append("B3振幅过大")
+        change = safe_float(payload.get("change_pct"))
+        if change is not None and change < -0.5:
+            blockers.append("B3分歧未转一致")
+    elif strategy_name == "super_b1":
+        stop_space = safe_float(payload.get("stop_space_pct"))
+        if stop_space is not None and stop_space > 6:
+            blockers.append("超级B1止损空间>6%")
+        wash_days = safe_float(payload.get("wash_days_ago"))
+        if wash_days is not None and wash_days > 3:
+            blockers.append("洗盘信号不够新")
+        if "N型结构不足" in risk_flags or "企稳K线实体偏大" in risk_flags:
+            blockers.append("超级B1结构未企稳")
+    elif strategy_name == "breakout":
+        if not payload.get("pullback_confirmed"):
+            blockers.append("突破后未回踩确认")
+        if "放量过猛(疑似出货)" in risk_flags:
+            blockers.append("突破放量过猛")
+    elif strategy_name == "trend_pullback":
+        if not payload.get("bbi_upward"):
+            blockers.append("趋势未确认")
+        if not payload.get("pullback_held"):
+            blockers.append("回踩未守住")
+
+    return blockers
 
 def moving_avg(values, n):
     arr = list(values)
@@ -282,7 +358,7 @@ def recent_b1_indices(rows, lookback=15, end_offset=1):
             continue
         recent4 = rows[max(0, idx - 3):idx + 1]
         green_count = sum(1 for r in recent4 if is_yin(r))
-        if j <= 12 and green_count < 4:
+        if j <= B1_CORE_J_CEILING and green_count < 4:
             out.append(idx)
     return out
 
@@ -578,7 +654,7 @@ def score_shaofu_b1(rows) -> dict[str, Any] | None:
     close = recent["close"]
     bbi_r = recent.get("bbi")
     j = recent.get("j")
-    if bbi_r is None or j is None or j > 12:
+    if bbi_r is None or j is None or j > B1_WATCH_J_CEILING:
         return None
 
     recent4 = rows[-4:]
@@ -623,6 +699,8 @@ def score_shaofu_b1(rows) -> dict[str, Any] | None:
         score += 1
     if pressure_space >= 5:
         score += 1
+    if j > B1_CORE_J_CEILING:
+        score = min(score, 7.5)
     if dist_bbi > 6.5:
         score = min(score, 7.5)
     if stop_space > 8:
@@ -632,6 +710,8 @@ def score_shaofu_b1(rows) -> dict[str, Any] | None:
     risk_flags = []
     if not vol_shrink and not pullback_shrink:
         risk_flags.append("未明显缩量")
+    if j > B1_CORE_J_CEILING:
+        risk_flags.append("J值未到核心B1")
     if not n_ok:
         risk_flags.append("N型上移不足")
     if not bull_rope:
@@ -652,8 +732,9 @@ def score_shaofu_b1(rows) -> dict[str, Any] | None:
         "above_bbi": close >= bbi_r, "bbi_upward": bool(len(rows) >= 2 and rows[-2].get("bbi") and bbi_r >= rows[-2]["bbi"]),
         "current_j": safe_round(j, 2), "min_j_10d": safe_round(min(r.get("j") for r in rows[-10:] if r.get("j") is not None), 2),
         "j_recovering": len(rows) >= 2 and rows[-2].get("j") is not None and j > rows[-2]["j"],
-        "j_oversold": j <= 12,
-        "vol_shrink": vol_shrink, "n_structure": n_ok,
+        "j_oversold": j <= B1_CORE_J_CEILING,
+        "vol_shrink": vol_shrink, "pullback_shrink": pullback_shrink,
+        "n_structure": n_ok, "bull_rope": bull_rope,
         "z_white": safe_round(white, 2), "z_yellow": safe_round(yellow, 2),
         "stop_space_pct": safe_round(stop_space, 2),
         "yellow_distance_pct": safe_round(yellow_dist, 2),
@@ -1140,6 +1221,37 @@ def get_block_trade_signal(code: str, name: str = "") -> dict | None:
         return None
 
 
+def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
+    raw_score = item.get("best_score")
+    if raw_score is None:
+        raw_score = item.get("score")
+    score = safe_float(raw_score) or 0
+    threshold = safe_float(item.get("entry_threshold")) or 8
+    blockers = item.get("hard_blockers") or []
+    dist = safe_float(item.get("distance_pct"))
+    return (
+        bool(item.get("actionable", score >= threshold))
+        and score >= threshold
+        and not blockers
+        and (dist is None or dist <= COMMON_MAX_BBI_DISTANCE_PCT)
+    )
+
+
+def select_trade_candidates(results: list[dict[str, Any]], limit: int = TRADE_CANDIDATE_LIMIT) -> list[dict[str, Any]]:
+    """Candidates allowed to reach the trading decision model."""
+    selected = []
+    seen = set()
+    for item in results:
+        if len(selected) >= limit:
+            break
+        code = str(item.get("code") or "")
+        if not code or code in seen or not candidate_is_trade_ready(item):
+            continue
+        selected.append(item)
+        seen.add(code)
+    return selected
+
+
 def select_display_candidates(results: list[dict[str, Any]], limit: int = DISPLAY_CANDIDATE_LIMIT) -> list[dict[str, Any]]:
     """Keep top-ranked names while reserving slots for each strategy family."""
     selected: list[dict[str, Any]] = []
@@ -1154,14 +1266,18 @@ def select_display_candidates(results: list[dict[str, Any]], limit: int = DISPLA
         selected.append(item)
         seen.add(code)
 
-    for item in results[:DISPLAY_HEAD_LIMIT]:
+    trade_ready = [item for item in results if candidate_is_trade_ready(item)]
+    for item in trade_ready[:DISPLAY_HEAD_LIMIT]:
         add(item)
 
     for strat in DISPLAY_STRATEGY_ORDER:
-        for item in results:
+        for item in trade_ready:
             if item.get("best_strategy") == strat:
                 add(item)
                 break
+
+    for item in trade_ready:
+        add(item)
 
     for item in results:
         add(item)
@@ -1309,6 +1425,8 @@ def main():
             "position_hint": best.get("position_hint"),
             "time_stop": best.get("time_stop"),
             "actionable": best.get("actionable"),
+            "hard_blockers": best.get("hard_blockers", []),
+            "trade_ready": candidate_is_trade_ready(best),
             "strategies": multi["strategies"],
             "consensus_count": multi.get("consensus_count", 0),
             "consensus_boost": multi.get("consensus_boost", 0),
@@ -1326,6 +1444,7 @@ def main():
 
     results.sort(key=sort_key, reverse=True)
     display_candidates = select_display_candidates(results)
+    trade_candidates = select_trade_candidates(results)
 
     print(f"  Analyzed: {len(results)} stocks", file=sys.stderr)
     print(f"  Strategy distribution:", file=sys.stderr)
@@ -1350,8 +1469,11 @@ def main():
     
     output = {
         "generated_at": generated_at,
+        "items": display_candidates,
         "candidates": display_candidates,
         "count": len(display_candidates),
+        "trade_items": trade_candidates,
+        "trade_count": len(trade_candidates),
         "total_analyzed": len(results),
         "strategy_distribution": dict(strat_counts),
         "strategy_meta": STRATEGY_META,

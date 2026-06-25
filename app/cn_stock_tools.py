@@ -231,13 +231,13 @@ def analyze_b1(symbol):
     passed = [k for k, v in conditions.items() if v]
     score = len(passed)
     if score >= 8:
-        verdict = "高匹配B1"
+        verdict = "高匹配回踩观察"
     elif score >= 6:
-        verdict = "中等匹配B1"
+        verdict = "中等匹配回踩观察"
     elif score >= 4:
-        verdict = "弱匹配B1"
+        verdict = "弱匹配回踩观察"
     else:
-        verdict = "不匹配B1"
+        verdict = "不匹配回踩观察"
 
     risk_flags = []
     dist = ((recent["close"] / bbi_recent - 1) * 100)
@@ -248,7 +248,7 @@ def analyze_b1(symbol):
     if (recent["change_pct"] or 0) < -3:
         risk_flags.append("当日走弱较明显")
     if recent["high"] >= high60 * 0.98:
-        risk_flags.append("接近60日新高，注意不要把B1做成高潮追涨")
+        risk_flags.append("接近60日新高，注意不要把回踩观察做成高潮追涨")
 
     return {
         "quote": quote,
@@ -270,7 +270,7 @@ def analyze_b1(symbol):
         "verdict": verdict,
         "risk_flags": risk_flags,
         "notes": [
-            "这是基于公开总结的B1启发式判别，不等于Z哥原版完整口径。",
+            "这是基于BBI/趋势回踩的启发式观察，不作为当前6战法里的买入战法。",
             "更适合强势股右侧回踩再转强的场景，不适合长期阴跌票。",
             "请结合板块热度、题材强弱、市场情绪和个人风控。"
         ]
@@ -285,16 +285,16 @@ def get_klines_array(symbol, count=60):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CN stock helper for real-time quote and B1 heuristic analysis")
+    parser = argparse.ArgumentParser(description="CN stock helper for real-time quote and pullback heuristic analysis")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     q = sub.add_parser("quote", help="查询实时股价")
     q.add_argument("symbol", help="股票代码，如 600519 / sh600519 / 000001")
 
-    b = sub.add_parser("b1", help="做B1启发式判别")
+    b = sub.add_parser("b1", help="做回踩启发式观察")
     b.add_argument("symbol", help="股票代码，如 600519 / sh600519 / 000001")
 
-    s = sub.add_parser("screen", help="批量做B1启发式筛选")
+    s = sub.add_parser("screen", help="批量做回踩启发式筛选")
     s.add_argument("symbols", nargs="+", help="多个股票代码，空格分隔")
 
     k = sub.add_parser("kline", help="获取日K线 closes 数组（用于BBI计算）")

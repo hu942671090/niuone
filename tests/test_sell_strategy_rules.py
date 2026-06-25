@@ -231,6 +231,76 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(executed[0]["buy_strategy"], "b3_accelerate")
         self.assertEqual(decision["actions"][0]["reason"], executed[0]["reason"])
 
+    def test_execute_actions_blocks_non_actionable_buy_candidate(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "测试股", "source": "test"}
+            state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            decision = {
+                "actions": [{"action": "BUY", "code": "600000", "name": "测试股", "shares": 1000}]
+            }
+            candidates = [{
+                "code": "600000",
+                "name": "测试股",
+                "best_strategy": "shaofu_b1",
+                "best_score": 9.0,
+                "entry_threshold": 8.0,
+                "distance_pct": 1.2,
+                "actionable": False,
+                "hard_blockers": ["B1核心J未≤-10"],
+            }]
+
+            executed = trader.execute_actions(state, decision, candidates, True, "连续竞价交易时段")
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"], {})
+        self.assertIn("B1核心", decision["execution_blocked_reason"])
+
+    def test_execute_actions_blocks_new_buy_when_position_count_limit_reached(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "新股", "source": "test"}
+            positions = {
+                f"60000{i}": {
+                    "code": f"60000{i}",
+                    "name": f"持仓{i}",
+                    "qty": 100,
+                    "avg_cost": 10.0,
+                    "last_price": 10.0,
+                }
+                for i in range(trader.MAX_OPEN_POSITIONS)
+            }
+            state = {"cash": 100000.0, "positions": positions, "trade_log": []}
+            decision = {
+                "actions": [{"action": "BUY", "code": "601999", "name": "新股", "shares": 1000}]
+            }
+            candidates = [{
+                "code": "601999",
+                "name": "新股",
+                "best_strategy": "b3_accelerate",
+                "best_score": 10.0,
+                "entry_threshold": 8.5,
+                "distance_pct": 1.0,
+                "actionable": True,
+                "hard_blockers": [],
+            }]
+
+            executed = trader.execute_actions(state, decision, candidates, True, "连续竞价交易时段")
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(executed, [])
+        self.assertNotIn("601999", state["positions"])
+        self.assertIn("持仓已达", decision["execution_blocked_reason"])
+
     def test_morning_schedule_completed_during_lunch_defers_to_13(self):
         due_at = trader.deferred_execution_due_at(
             "2026-06-25 11:20",
@@ -443,6 +513,182 @@ class SellStrategyRuleTests(unittest.TestCase):
         signal = trader.evaluate_sell_signal("600000", pos, "2026-06-24")
         self.assertIsNotNone(signal)
         self.assertEqual(signal["signal"], "hard_stop")
+
+    def test_buy_strategy_classifier_drops_legacy_b1_aliases(self):
+        self.assertEqual(trader.classify_buy_strategy("超级B1放量破位洗盘"), "super_b1")
+        self.assertEqual(trader.classify_buy_strategy("少妇B1缩量回调"), "shaofu_b1")
+        self.assertEqual(trader.classify_buy_strategy("中庸动量评分达标"), "unknown_buy")
+        self.assertEqual(trader.classify_buy_strategy("高匹配B1评分达标"), "unknown_buy")
+        self.assertEqual(trader.classify_buy_strategy("B1旧版买入"), "unknown_buy")
+        self.assertEqual(trader.classify_buy_strategy(candidate={"best_strategy": "balanced_momentum"}), "unknown_buy")
+        self.assertEqual(trader.classify_buy_strategy(candidate={"best_strategy": "legacy_b1"}), "unknown_buy")
+
+    def test_b3_next_day_no_progress_exits(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 9.98,
+            "buy_strategy": "b3_accelerate",
+            "buy_date_lots": {"2026-06-23": 1000},
+        }
+        signal = trader.evaluate_sell_signal("600000", pos, "2026-06-24")
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal["signal"], "b3_next_day_no_progress")
+
+    def test_b3_time_exit_uses_open_check_gate(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 9.98,
+            "buy_strategy": "b3_accelerate",
+            "buy_date_lots": {"2026-06-23": 1000},
+        }
+
+        self.assertFalse(trader.is_b3_exit_check_time(datetime(2026, 6, 24, 9, 29)))
+        self.assertTrue(trader.is_b3_exit_check_time(datetime(2026, 6, 24, 9, 30)))
+        self.assertFalse(trader.is_b3_exit_check_time(datetime(2026, 6, 24, 14, 45)))
+
+        blocked = trader.evaluate_sell_signal(
+            "600000",
+            dict(pos),
+            "2026-06-24",
+            time_exit_allowed=True,
+            b3_exit_allowed=False,
+        )
+        self.assertIsNone(blocked)
+
+        opened = trader.evaluate_sell_signal(
+            "600000",
+            dict(pos),
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=True,
+        )
+        self.assertIsNotNone(opened)
+        self.assertEqual(opened["signal"], "b3_next_day_no_progress")
+        self.assertIn("09:30", opened["reason"])
+        self.assertIn("开盘", opened["reason"])
+
+    def test_b2_two_day_no_follow_through_exits(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.02,
+            "max_pnl_pct": 1.0,
+            "buy_strategy": "b2_confirm",
+            "buy_date_lots": {"2026-06-22": 1000},
+        }
+        signal = trader.evaluate_sell_signal("600000", pos, "2026-06-24")
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal["signal"], "b2_no_follow_through")
+
+    def test_time_exit_rules_wait_for_tail_check_gate(self):
+        cases = [
+            (
+                {
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 10.02,
+                    "max_pnl_pct": 1.0,
+                    "buy_strategy": "b2_confirm",
+                    "buy_date_lots": {"2026-06-22": 1000},
+                },
+                "2026-06-24",
+                "b2_no_follow_through",
+            ),
+            (
+                {
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 10.02,
+                    "max_pnl_pct": 0.5,
+                    "buy_strategy": "super_b1",
+                    "buy_date_lots": {"2026-06-21": 1000},
+                },
+                "2026-06-24",
+                "super_b1_no_progress",
+            ),
+        ]
+
+        for pos, today, expected_signal in cases:
+            with self.subTest(expected_signal=expected_signal):
+                early = trader.evaluate_sell_signal(
+                    "600000",
+                    dict(pos),
+                    today,
+                    time_exit_allowed=False,
+                )
+                self.assertIsNone(early)
+
+                tail = trader.evaluate_sell_signal(
+                    "600000",
+                    dict(pos),
+                    today,
+                    time_exit_allowed=True,
+                )
+                self.assertIsNotNone(tail)
+                self.assertEqual(tail["signal"], expected_signal)
+                self.assertIn("14:45", tail["reason"])
+
+    def test_auto_exit_b3_triggers_at_open_and_tail_rules_at_1445(self):
+        def make_b3_state():
+            return {
+                "cash": 0.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "avg_cost": 10.0,
+                        "last_price": 9.98,
+                        "buy_strategy": "b3_accelerate",
+                        "buy_date_lots": {"2026-06-23": 1000},
+                    }
+                },
+                "trade_log": [],
+                "decision_log": [],
+            }
+
+        state = make_b3_state()
+        at_open = trader.check_auto_exits(state, datetime(2026, 6, 24, 9, 30))
+        self.assertEqual(len(at_open), 1)
+        self.assertEqual(at_open[0]["exit_signal"], "b3_next_day_no_progress")
+        self.assertIn("09:30", at_open[0]["reason"])
+
+        state = make_b3_state()
+        at_tail = trader.check_auto_exits(state, datetime(2026, 6, 24, 14, 45))
+        self.assertEqual(at_tail, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+
+        def make_b2_state():
+            return {
+                "cash": 0.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "avg_cost": 10.0,
+                        "last_price": 10.02,
+                        "max_pnl_pct": 1.0,
+                        "buy_strategy": "b2_confirm",
+                        "buy_date_lots": {"2026-06-22": 1000},
+                    }
+                },
+                "trade_log": [],
+                "decision_log": [],
+            }
+
+        state = make_b2_state()
+        before_tail = trader.check_auto_exits(state, datetime(2026, 6, 24, 14, 44))
+        self.assertEqual(before_tail, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+
+        state = make_b2_state()
+        at_tail = trader.check_auto_exits(state, datetime(2026, 6, 24, 14, 45))
+        self.assertEqual(len(at_tail), 1)
+        self.assertEqual(at_tail[0]["exit_signal"], "b2_no_follow_through")
+        self.assertIn("14:45", at_tail[0]["reason"])
 
     def test_partial_profit_does_not_auto_sell_rest_at_same_band(self):
         state = {
