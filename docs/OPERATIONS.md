@@ -56,12 +56,11 @@
 http://127.0.0.1:8787/
 ```
 
-公网或局域网访问前，至少确认：
+部署到非本机环境前，至少确认：
 
 - `DASHBOARD_AUTH_ENABLED=1`
-- `DASHBOARD_HOST` 没有误暴露到不可信网络
+- `DASHBOARD_HOST` 符合你的部署环境和网络边界
 - `DASHBOARD_EDGE_CACHE_ENABLED=0`
-- `DASHBOARD_TRUSTED_PROXIES` 只包含可信反向代理
 - 设置页管理员密码或 admin token 已妥善保存
 
 ## 3. 模型配置
@@ -286,6 +285,6 @@ git status --ignored --short
 
 1. 改动源码后运行 `./scripts/validate.sh`。
 2. 临时测试使用独立 `DASHBOARD_HOME=/tmp/...` 和非 8787 端口。
-3. 公网访问必须开启认证和限流。
+3. 多人或远程访问必须开启认证和限流。
 4. 真实 DB、token、日志、模型配置只留在 `.local-data/`。
 5. 新任务应写入 `push_history.db` 或当前归档目录，避免只生成孤立文件。
