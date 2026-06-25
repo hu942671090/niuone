@@ -2271,8 +2271,54 @@ INDEX_HTML = r"""<!doctype html>
     .market-chevron { color:#64748b; font-size:18px; width:18px; text-align:center; line-height:1.35; transition:transform .14s ease, color .14s ease; }
     .market-monitor-card.open .market-chevron { color:#c4b5fd; transform:rotate(90deg); }
     .market-card-detail { padding:0 16px 16px; cursor:auto; }
-    .market-detail-box { border-top:1px solid rgba(148,163,184,.12); padding-top:14px; display:grid; gap:10px; }
-    .market-detail-line { white-space:pre-wrap; color:#e2e8f0; font-size:14px; line-height:1.65; overflow-wrap:anywhere; word-break:break-word; }
+    .market-detail-box { border-top:1px solid rgba(148,163,184,.12); padding-top:14px; display:grid; gap:14px; }
+    .market-detail-overview { display:grid; grid-template-columns:minmax(300px,.78fr) minmax(420px,1.22fr); gap:12px; align-items:start; border:1px solid rgba(96,165,250,.16); border-radius:12px; padding:12px; background:linear-gradient(135deg, rgba(15,23,42,.82), rgba(2,6,23,.36)); box-shadow:inset 0 1px 0 rgba(255,255,255,.035); }
+    .market-mood-panel { min-width:0; border-left:3px solid rgba(96,165,250,.82); border-radius:8px; padding:10px 12px; background:linear-gradient(135deg, rgba(37,99,235,.18), rgba(15,23,42,.42)); }
+    .market-mood-label { color:#93c5fd; font-size:11px; font-weight:850; letter-spacing:.04em; margin-bottom:5px; }
+    .market-mood-text { color:#f8fafc; font-size:15px; line-height:1.55; font-weight:750; overflow-wrap:anywhere; word-break:break-word; }
+    .market-metric-grid { display:grid; grid-template-columns:repeat(4,minmax(92px,1fr)); gap:8px; }
+    .market-metric-item { min-width:0; border:1px solid rgba(148,163,184,.13); border-radius:8px; padding:8px 9px; background:rgba(2,6,23,.46); box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }
+    .market-metric-label { color:#7b8aa0; font-size:11px; line-height:1.2; white-space:nowrap; }
+    .market-metric-value { margin-top:3px; color:#e5edf8; font-size:14px; line-height:1.25; font-weight:850; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .market-metric-value.up { color:#d75442; }
+    .market-metric-value.down { color:#59b881; }
+    .market-section-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start; }
+    .market-section { position:relative; min-width:0; overflow:hidden; border:1px solid rgba(148,163,184,.14); border-radius:10px; background:linear-gradient(180deg, rgba(15,23,42,.76), rgba(2,6,23,.34)); box-shadow:inset 0 1px 0 rgba(255,255,255,.03), 0 10px 28px rgba(0,0,0,.12); }
+    .market-section::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:rgba(96,165,250,.68); }
+    .market-section.wide { grid-column:1 / -1; }
+    .market-section.hot::before { background:rgba(248,113,113,.72); }
+    .market-section.flow::before { background:rgba(52,211,153,.72); }
+    .market-section.risk::before { background:rgba(248,113,113,.84); }
+    .market-section.tip::before { background:rgba(96,165,250,.76); }
+    .market-section.overview::before { background:rgba(167,139,250,.72); }
+    .market-section-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px 9px 13px; margin:0; border-bottom:1px solid rgba(148,163,184,.10); background:rgba(15,23,42,.56); }
+    .market-section-title-wrap { display:flex; align-items:center; gap:7px; min-width:0; }
+    .market-section-icon { width:24px; height:24px; border-radius:8px; display:grid; place-items:center; flex:0 0 auto; background:rgba(96,165,250,.12); color:#bfdbfe; font-size:14px; }
+    .market-section.hot .market-section-icon { background:rgba(248,113,113,.12); color:#fecaca; }
+    .market-section.flow .market-section-icon { background:rgba(52,211,153,.12); color:#bbf7d0; }
+    .market-section.risk .market-section-icon { background:rgba(248,113,113,.14); color:#fecaca; }
+    .market-section.tip .market-section-icon { background:rgba(96,165,250,.12); color:#bfdbfe; }
+    .market-section.overview .market-section-icon { background:rgba(167,139,250,.12); color:#ddd6fe; }
+    .market-section-title { color:#dbeafe; font-size:13px; font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .market-section-count { color:#8da0b8; font-size:11px; white-space:nowrap; border:1px solid rgba(148,163,184,.12); border-radius:999px; padding:2px 7px; background:rgba(2,6,23,.34); }
+    .market-section-body { display:grid; gap:0; padding:8px 12px 10px 13px; }
+    .market-detail-line { white-space:pre-wrap; color:#e2e8f0; font-size:13.5px; line-height:1.56; overflow-wrap:anywhere; word-break:break-word; }
+    .market-detail-line.item { display:grid; grid-template-columns:9px minmax(0,1fr); gap:7px; align-items:start; padding:5px 0; border-bottom:1px solid rgba(148,163,184,.075); }
+    .market-detail-line.item:last-child { border-bottom:0; }
+    .market-detail-line.item::before { content:""; width:5px; height:5px; border-radius:999px; margin-top:.62em; background:rgba(148,163,184,.62); }
+    .market-detail-line.note { color:#94a3b8; }
+    .market-detail-line.note::before { background:rgba(148,163,184,.38); }
+    .market-detail-line.flow { display:grid; grid-template-columns:46px minmax(0,1fr); gap:9px; align-items:baseline; padding:7px 0; border-bottom:1px solid rgba(148,163,184,.075); }
+    .market-detail-line.flow:last-child { border-bottom:0; }
+    .market-flow-label { color:#8da0b8; font-size:12px; font-weight:850; white-space:nowrap; }
+    .market-flow-value { color:#e2e8f0; min-width:0; overflow-wrap:anywhere; word-break:break-word; }
+    .market-num { display:inline-block; font-weight:900; font-variant-numeric:tabular-nums; border-radius:4px; padding:0 3px; line-height:1.22; }
+    .market-num.up { color:#d75442; background:rgba(215,84,66,.10); text-shadow:none; }
+    .market-num.down { color:#59b881; background:rgba(89,184,129,.10); text-shadow:none; }
+    .market-symbol { display:inline-block; color:#e5edf8; font-weight:850; font-variant-numeric:tabular-nums; border:1px solid rgba(96,165,250,.18); border-radius:5px; padding:0 5px; line-height:1.28; background:rgba(96,165,250,.10); }
+    .market-detail-line.risk { color:#fecaca; }
+    .market-detail-line.risk::before { background:rgba(248,113,113,.76); }
+    .market-detail-line.tip::before { background:rgba(96,165,250,.72); }
     .market-detail-heading { color:#dbeafe; font-size:13px; font-weight:850; margin-top:4px; }
     .market-detail-note { color:#94a3b8; }
     .market-day-pager { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-top:12px; padding:13px 15px; }
@@ -2451,7 +2497,22 @@ INDEX_HTML = r"""<!doctype html>
       .market-card-side { justify-content:space-between; align-items:center; }
       .market-type { font-size:11px; padding:4px 8px; }
       .market-card-detail { padding:0 11px 12px; }
+      .market-detail-box { gap:11px; padding-top:11px; }
+      .market-detail-overview { grid-template-columns:1fr; gap:9px; padding:9px; border-radius:10px; }
+      .market-mood-panel { padding:9px 10px; border-radius:8px; }
+      .market-mood-text { font-size:13.5px; line-height:1.5; }
+      .market-metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
+      .market-metric-item { padding:7px 8px; border-radius:8px; }
+      .market-metric-value { font-size:13px; }
+      .market-section-list { grid-template-columns:1fr; gap:10px; }
+      .market-section.wide { grid-column:auto; }
+      .market-section { border-radius:9px; }
+      .market-section-head { padding:9px 10px 8px 11px; }
+      .market-section-body { padding:7px 10px 9px 11px; }
+      .market-section-title { font-size:12.5px; }
+      .market-section-icon { width:22px; height:22px; border-radius:7px; font-size:13px; }
       .market-detail-line { font-size:13.5px; line-height:1.58; }
+      .market-detail-line.flow { grid-template-columns:38px minmax(0,1fr); gap:7px; padding:6px 0; }
       .market-detail-heading { font-size:12.5px; }
       .market-day-pager { align-items:stretch; padding:10px 11px; gap:8px; }
       .market-day-title { font-size:13.5px; }
@@ -4531,18 +4592,186 @@ function summarizeMarketRecord(r) {
     chips: chips.slice(0, 5)
   };
 }
-function renderMarketDetail(content) {
-  const lines = String(content || '').split('\n');
-  const html = lines.map(raw => {
-    const line = String(raw || '').trim();
-    if (!line) return '';
+function marketLeadingIcon(text) {
+  const m = String(text || '').match(/^(📊|🔥|💰|⚡|📈|💡|⚠️|⚠|🌡️|🌡|📌|👀|ℹ️|ℹ)\s*/u);
+  return m ? {icon: m[1], rest: String(text || '').slice(m[0].length).trim()} : {icon: '', rest: String(text || '').trim()};
+}
+function marketSectionTone(title, icon) {
+  const s = `${title || ''} ${icon || ''}`;
+  if (/风险|⚠/.test(s)) return 'risk';
+  if (/资金/.test(s)) return 'flow';
+  if (/热门|强势|封单|热度|🔥|⚡|🌡|📌/.test(s)) return 'hot';
+  if (/操作|提示|观察|💡|👀/.test(s)) return 'tip';
+  if (/概况|情绪|📊/.test(s)) return 'overview';
+  return '';
+}
+function marketHeadingInfo(raw) {
+  const clean = cleanMarketLine(raw);
+  if (!clean) return null;
+  const leading = marketLeadingIcon(clean);
+  const titleSource = leading.rest || clean;
+  const titleParts = titleSource.split(/[·|]/).map(x => x.trim()).filter(Boolean);
+  const title = (titleParts[0] || titleSource).replace(/[:：]$/, '').trim();
+  const hasMarkdownHeading = /\*\*.+\*\*/.test(String(raw || ''));
+  const knownHeading = /^(市场概况|竞价情绪|热门板块|资金流向|强势个股|成交活跃|操作提示|风险|复合热度|涨停封单|封单|重点观察)/.test(title);
+  if (!hasMarkdownHeading && !knownHeading) return null;
+  return {
+    title: title || '盘面小节',
+    meta: titleParts.slice(1).join(' · '),
+    icon: leading.icon || '•',
+    tone: marketSectionTone(title, leading.icon)
+  };
+}
+function parseMarketDetail(content) {
+  const sections = [];
+  const intro = [];
+  let current = null;
+  const pushCurrent = () => {
+    if (current && (current.items.length || current.meta)) sections.push(current);
+    current = null;
+  };
+  for (const raw of String(content || '').split('\n')) {
+    if (!String(raw || '').trim()) continue;
+    const heading = marketHeadingInfo(raw);
+    if (heading) {
+      pushCurrent();
+      current = {...heading, items: []};
+      continue;
+    }
+    const clean = cleanMarketLine(raw);
+    if (!clean) continue;
+    if (current) current.items.push(clean);
+    else intro.push(clean);
+  }
+  pushCurrent();
+  return {intro, sections};
+}
+function marketMoodLine(sections) {
+  for (const section of sections) {
+    for (const line of section.items || []) {
+      const clean = cleanMarketLine(line);
+      if (/^💬/.test(clean)) return clean.replace(/^💬\s*/, '').trim();
+    }
+  }
+  return '';
+}
+function marketMetricTone(label, value) {
+  const n = Number(String(value || '').replace(/[^\d.-]/g, ''));
+  if (/上涨|涨停/.test(label)) return 'up';
+  if (/下跌|跌停/.test(label)) return 'down';
+  if (Number.isFinite(n) && n > 0 && /^\+/.test(String(value || '').trim())) return 'up';
+  if (Number.isFinite(n) && n < 0) return 'down';
+  return '';
+}
+function marketSummaryMetrics(sections) {
+  const overview = sections.find(section => /市场概况|竞价情绪/.test(section.title)) || sections[0];
+  if (!overview) return [];
+  const metrics = [];
+  const seen = new Set();
+  for (const line of overview.items || []) {
+    const clean = cleanMarketLine(line).replace(/^💬\s*/, '').trim();
+    for (const part of clean.split(/[|·]/).map(x => x.trim()).filter(Boolean)) {
+      const m = part.match(/^(涨停池|跌停池|成交额|样本|上涨|下跌|平盘|涨停|跌停)\s*([+\-]?\d[\d,.]*(?:\.\d+)?\s*(?:只|亿|万亿|万|%)?)/);
+      if (!m || seen.has(m[1])) continue;
+      seen.add(m[1]);
+      metrics.push({label: m[1], value: m[2].replace(/\s+/g, ''), tone: marketMetricTone(m[1], m[2])});
+      if (metrics.length >= 8) return metrics;
+    }
+  }
+  return metrics;
+}
+function isMarketMetricLine(line) {
+  const clean = cleanMarketLine(line).replace(/^💬\s*/, '').trim();
+  return /(?:^|[|·]\s*)(涨停池|跌停池|成交额|样本|上涨|下跌|平盘|涨停|跌停)\s*[+\-]?\d/.test(clean);
+}
+function renderMarketOverview(parsed) {
+  const mood = marketMoodLine(parsed.sections);
+  const metrics = marketSummaryMetrics(parsed.sections);
+  if (!mood && !metrics.length) return '';
+  const moodHtml = mood ? `<div class="market-mood-panel"><div class="market-mood-label">核心判断</div><div class="market-mood-text">${esc(mood)}</div></div>` : '';
+  const metricHtml = metrics.length ? `<div class="market-metric-grid">${metrics.map(item => `
+    <div class="market-metric-item">
+      <div class="market-metric-label">${esc(item.label)}</div>
+      <div class="market-metric-value ${esc(item.tone)}">${esc(item.value)}</div>
+    </div>`).join('')}</div>` : '';
+  return `<div class="market-detail-overview">${moodHtml}${metricHtml}</div>`;
+}
+function marketSectionDisplayItems(section) {
+  const isOverview = /市场概况|竞价情绪/.test(section.title || '');
+  return (section.items || []).filter(line => {
     const clean = cleanMarketLine(line);
-    const heading = /\*\*.+\*\*/.test(line) || /^[📊🔥💰⚡📈💡⚠️🌡️📌👀ℹ️]/u.test(clean);
-    if (heading) return `<div class="market-detail-heading">${esc(clean)}</div>`;
-    const cls = /^[·•]/.test(clean) || /^流[入出]/.test(clean) || /^数据为/.test(clean) ? ' market-detail-note' : '';
-    return `<div class="market-detail-line${cls}">${esc(clean)}</div>`;
-  }).filter(Boolean).join('');
-  return `<div class="market-detail-box">${html}</div>`;
+    if (/^💬/.test(clean)) return false;
+    if (isOverview && isMarketMetricLine(clean)) return false;
+    return true;
+  });
+}
+function renderMarketSignedText(text, options = {}) {
+  const source = String(text || '');
+  const colorUnsignedMoney = !!options.colorUnsignedMoney;
+  const pattern = /((?:sh|sz|bj)?\d{6}\s+[*A-Za-z\u4e00-\u9fa5][*A-Za-z0-9\u4e00-\u9fa5·]{1,12})|([+\-]\d[\d,.]*(?:\.\d+)?\s*(?:%|万亿|亿|万|元)?|\d[\d,.]*(?:\.\d+)?\s*(?:万亿|亿))/gi;
+  let html = '';
+  let last = 0;
+  for (const match of source.matchAll(pattern)) {
+    const token = match[0];
+    const start = match.index || 0;
+    html += esc(source.slice(last, start));
+    if (match[1]) {
+      html += `<span class="market-symbol">${esc(token)}</span>`;
+      last = start + token.length;
+      continue;
+    }
+    const compact = token.replace(/\s+/g, '');
+    const unsignedMoney = !/^[+\-]/.test(compact) && /(?:万亿|亿)$/.test(compact);
+    const cls = compact.startsWith('-')
+      ? 'down'
+      : (compact.startsWith('+') || (colorUnsignedMoney && unsignedMoney) ? 'up' : '');
+    html += cls ? `<span class="market-num ${cls}">${esc(token)}</span>` : esc(token);
+    last = start + token.length;
+  }
+  html += esc(source.slice(last));
+  return html;
+}
+function renderMarketDetailLine(text, sectionTone = '') {
+  const clean = cleanMarketLine(text).replace(/^·\s*/, '').trim();
+  if (!clean) return '';
+  const flow = clean.match(/^(流入|流出)[:：]\s*(.+)$/);
+  if (flow) {
+    return `<div class="market-detail-line flow"><span class="market-flow-label">${esc(flow[1])}</span><span class="market-flow-value">${renderMarketSignedText(flow[2], {colorUnsignedMoney: true})}</span></div>`;
+  }
+  const cls = ['market-detail-line', 'item'];
+  if (/^数据暂不可用|^数据为|^ℹ️|^ℹ/.test(clean)) cls.push('note');
+  if (sectionTone === 'risk') cls.push('risk');
+  if (sectionTone === 'tip') cls.push('tip');
+  const colorUnsignedMoney = sectionTone === 'flow' || /净额/.test(clean);
+  return `<div class="${cls.join(' ')}"><span>${renderMarketSignedText(clean, {colorUnsignedMoney})}</span></div>`;
+}
+function renderMarketSection(section) {
+  const items = marketSectionDisplayItems(section);
+  if (!items.length && /市场概况|竞价情绪/.test(section.title || '')) return '';
+  if (!items.length && !section.meta) return '';
+  const tone = section.tone || '';
+  const wide = /热门板块|资金流向/.test(section.title || '') ? ' wide' : '';
+  const count = items.length ? `<span class="market-section-count">${items.length} 条</span>` : '';
+  const meta = section.meta ? `<span class="market-section-count">${esc(section.meta)}</span>` : count;
+  const body = items.map(line => renderMarketDetailLine(line, tone)).filter(Boolean).join('');
+  return `<section class="market-section ${esc(tone)}${wide}">
+    <div class="market-section-head">
+      <div class="market-section-title-wrap"><span class="market-section-icon">${esc(section.icon || '•')}</span><span class="market-section-title">${esc(section.title || '盘面小节')}</span></div>
+      ${meta}
+    </div>
+    ${body ? `<div class="market-section-body">${body}</div>` : ''}
+  </section>`;
+}
+function renderMarketDetail(content) {
+  const parsed = parseMarketDetail(content);
+  const overview = renderMarketOverview(parsed);
+  const intro = parsed.intro.filter(line => !/^牛牛大王[，,]/.test(line)).map(line => renderMarketDetailLine(line)).filter(Boolean).join('');
+  const sections = parsed.sections.map(renderMarketSection).filter(Boolean).join('');
+  if (!overview && !intro && !sections) {
+    const fallback = String(content || '').split('\n').map(line => renderMarketDetailLine(line)).filter(Boolean).join('');
+    return `<div class="market-detail-box">${fallback}</div>`;
+  }
+  return `<div class="market-detail-box">${overview}${intro ? `<div class="market-section-list"><section class="market-section wide"><div class="market-section-head"><div class="market-section-title-wrap"><span class="market-section-icon">•</span><span class="market-section-title">摘要</span></div></div><div class="market-section-body">${intro}</div></section></div>` : ''}${sections ? `<div class="market-section-list">${sections}</div>` : ''}</div>`;
 }
 function renderMarketMonitorCard(r) {
   const key = marketRecordKey(r);
