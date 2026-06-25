@@ -12,7 +12,7 @@ SRC = ROOT / 'app'
 
 
 class DashboardStandalonePathTests(unittest.TestCase):
-    def test_dashboard_home_env_makes_runtime_paths_independent_from_hermes(self):
+    def test_dashboard_home_env_controls_runtime_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
             env['DASHBOARD_HOME'] = tmp
@@ -26,7 +26,6 @@ spec.loader.exec_module(d)
 import push_history
 print(json.dumps({{
   'runtime_home': str(d.DASHBOARD_HOME),
-  'state_db': str(d.STATE_DB),
   'auth_db': str(d.AUTH_DB),
   'cron_output_dir': str(d.CRON_OUTPUT_DIR),
   'trader_script': str(d.TRADER_SCRIPT),
@@ -36,7 +35,6 @@ print(json.dumps({{
             out = subprocess.check_output([sys.executable, '-c', code], env=env, text=True)
             data = json.loads(out)
             self.assertEqual(data['runtime_home'], tmp)
-            self.assertTrue(data['state_db'].startswith(tmp + os.sep))
             self.assertTrue(data['auth_db'].startswith(tmp + os.sep))
             self.assertTrue(data['cron_output_dir'].startswith(tmp + os.sep))
             self.assertEqual(data['push_history_db'], str(Path(tmp) / 'push_history.db'))

@@ -45,9 +45,6 @@ LOCAL_DATA_DIR = get_local_data_dir(PROJECT_ROOT)
 DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
 CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG") or str(DASHBOARD_HOME / "config.yaml")).expanduser()
 DASHBOARD_ENV_FILE = get_dashboard_env_file(PROJECT_ROOT)
-STATE_DB = DASHBOARD_HOME / "state.db"
-LOG_DIR = DASHBOARD_HOME / "logs"
-SINCE_FILE = DASHBOARD_HOME / "messages_dashboard_since.txt"
 CRON_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 CRON_STATE_DIR = DASHBOARD_HOME / "cron" / "state"
 B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
@@ -121,7 +118,6 @@ EDGE_CACHE_ENABLED = os.environ.get("DASHBOARD_EDGE_CACHE_ENABLED", "0").lower()
 API_DEFAULT_LIMIT = 80
 API_LIMIT_MAX = 200
 API_OFFSET_MAX = int(os.environ.get("DASHBOARD_API_OFFSET_MAX", "5000") or "5000")
-LEGACY_SYNC_ON_READ = os.environ.get("DASHBOARD_LEGACY_SYNC_ON_READ", "0").lower() in {"1", "true", "yes", "on"}
 RATE_LIMIT_ENABLED = os.environ.get("DASHBOARD_RATE_LIMIT_ENABLED", "1").lower() not in {"0", "false", "no"}
 RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("DASHBOARD_RATE_LIMIT_WINDOW_SECONDS", "60") or "60")
 RATE_LIMIT_ANON = int(os.environ.get("DASHBOARD_RATE_LIMIT_ANON", "240") or "240")
@@ -195,7 +191,6 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "B1 漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "label": "B1 运行中陈旧秒数", "group": "任务调度", "kind": "int", "default": "900", "effect": "restart"},
     {"name": "DASHBOARD_PENDING_DECISION_POLL_SECONDS", "label": "延迟成交检查秒数", "group": "任务调度", "kind": "int", "default": "5", "effect": "restart"},
-    {"name": "DASHBOARD_LEGACY_SYNC_ON_READ", "label": "读取时同步旧归档", "group": "任务调度", "kind": "bool", "default": "0", "effect": "restart"},
     {"name": "DASHBOARD_DECISION_MAX_TOKENS", "label": "决策最大输出长度", "group": "买卖决策模型", "kind": "int", "default": "6000", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_TIMEOUT", "label": "决策请求超时", "group": "买卖决策模型", "kind": "int", "default": "180", "effect": "next_run"},
 
@@ -274,26 +269,10 @@ ENV_GROUP_ORDER = [
     "访问控制",
     "限流与缓存",
     "任务调度",
-    "兼容与过滤",
     "上游模型覆盖",
     "X 监控",
     "其他",
 ]
-RESPONSE_READY_RE = re.compile(
-    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}).*response ready: "
-    r"platform=(?P<platform>\S+) chat=(?P<chat>\S+) time=(?P<duration>[\d.]+)s "
-    r"api_calls=(?P<api_calls>\d+) response=(?P<chars>\d+) chars"
-)
-SENDING_RE = re.compile(
-    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}).*gateway\.platforms\.base: "
-    r"\[(?P<platform>[^\]]+)\] Sending response \((?P<chars>\d+) chars\) to (?P<chat>\S+)"
-)
-FLUSH_RE = re.compile(
-    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}).*gateway\.platforms\.(?P<platform>\w+): "
-    r"\[[^\]]+\] Flushing text batch (?P<batch>\S+) \((?P<chars>\d+) chars\)"
-)
-CURRENT_ORIGIN_CHAT_IDS = {value.strip() for value in os.environ.get("DASHBOARD_EXCLUDE_CHATS", "7920419938").split(",") if value.strip()}
-EXCLUDED_PLATFORMS = {value.strip().lower() for value in os.environ.get("DASHBOARD_EXCLUDE_PLATFORMS", "weixin").split(",") if value.strip()}
 
 
 def _now_ts() -> float:
@@ -1213,342 +1192,22 @@ def get_practice_benchmarks() -> dict[str, Any]:
     return data
 
 
-def parse_log_ts(value: str) -> float:
-    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S,%f").timestamp()
-
 def fmt_ts(ts: float | None) -> str:
     if not ts:
         return ""
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
-def parse_output_ts(value: str) -> float | None:
-    try:
-        return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S").timestamp()
-    except ValueError:
-        return None
-
-def body_after_header(raw: str) -> str:
-    response_marker = "\n## Response\n"
-    if response_marker in raw:
-        return raw.split(response_marker, 1)[1].strip()
-    if "---" in raw:
-        return raw.split("---", 1)[1].strip()
-    return raw
-
-def is_suppressed_cron_output(raw: str, body: str | None = None) -> bool:
-    text = raw.lower()
-    body_text = (body if body is not None else body_after_header(raw)).strip().lower()
-    return (
-        not body_text
-        or body_text == "[silent]"
-        or "**status:** silent" in text
-        or "empty output" in text
-        or "**status:** script failed" in text
-        or "script timed out after" in text
-        or "script not found:" in text
-    )
-
-def parse_x_direct_archive_records(path: Path, raw: str) -> list[dict[str, Any]]:
-    job_match = re.search(r"^\*\*Job ID:\*\*\s*(\S+)", raw, re.MULTILINE)
-    time_match = re.search(r"^\*\*Run Time:\*\*\s*(.+)$", raw, re.MULTILINE)
-    run_timestamp = parse_output_ts(time_match.group(1)) if time_match else path.stat().st_mtime
-    if run_timestamp is None:
-        run_timestamp = path.stat().st_mtime
-    job_id = job_match.group(1) if job_match else path.parent.name
-    body = body_after_header(raw)
-    marker_re = re.compile(r"<!--\s*handle:(?P<handle>\S+)\s+post_id:(?P<post_id>\S+)\s*-->\s*", re.M)
-    matches = list(marker_re.finditer(body))
-    if not matches:
-        stripped = re.sub(r"^<!--.*?-->\s*\n?", "", body, flags=re.M).strip()
-        if is_suppressed_cron_output(raw, stripped):
-            return []
-        return [{"timestamp": run_timestamp, "time": fmt_ts(run_timestamp), "platform": "cron",
-                 "platform_label": "Cron", "chat": "cron-output", "chars": len(stripped),
-                 "duration": None, "api_calls": None, "content": stripped,
-                 "session_id": f"cron_output_{job_id}_{path.stem}", "category": "x_monitor",
-                 "matched": False, "kind": "cron_output", "raw_path": str(path)}]
-    records = []
-    for idx, match in enumerate(matches):
-        next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(body)
-        block = body[match.end():next_start].strip()
-        if not block or block == "[SILENT]":
-            continue
-        post_id = match.group("post_id")
-        handle = match.group("handle").lstrip("@")
-        block_time_match = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", block)
-        timestamp = parse_output_ts(block_time_match.group(1)) if block_time_match else run_timestamp
-        if timestamp is None: timestamp = run_timestamp
-        records.append({"timestamp": timestamp, "time": fmt_ts(timestamp), "platform": "cron",
-                        "platform_label": "Cron", "chat": "cron-output", "chars": len(block),
-                        "duration": None, "api_calls": None, "content": block,
-                        "session_id": f"cron_output_{job_id}_{path.stem}_{post_id}", "category": "x_monitor",
-                        "matched": False, "kind": "cron_output", "raw_path": f"{path}#post_id={post_id}",
-                        "external_id": post_id, "metadata": {"handle": handle, "archive_path": str(path)}})
-    return records
-
-def load_since_timestamp() -> float | None:
-    try: raw = SINCE_FILE.read_text().strip()
-    except OSError: return None
-    if not raw: return None
-    try: return float(raw)
-    except ValueError: return None
-
-def iter_log_lines(max_files: int | None = None) -> list[str]:
-    if not LOG_DIR.exists(): return []
-    files = sorted([p for p in LOG_DIR.glob("gateway.log*") if p.is_file()], key=lambda p: p.stat().st_mtime, reverse=True)
-    if max_files is not None: files = files[:max_files]
-    lines: list[str] = []
-    for path in reversed(files):
-        try: lines.extend(path.read_text(errors="replace").splitlines())
-        except OSError: continue
-    return lines
-
-def chat_from_batch(batch: str | None) -> str:
-    if not batch: return ""
-    parts = batch.split(":")
-    return parts[-1] if len(parts) >= 5 else ""
-
-def load_delivery_events(limit: int | None = None) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
-    for line in iter_log_lines():
-        match = RESPONSE_READY_RE.search(line) or SENDING_RE.search(line) or FLUSH_RE.search(line)
-        if not match: continue
-        data = match.groupdict()
-        platform = data.get("platform") or "unknown"
-        timestamp = parse_log_ts(data["ts"])
-        events.append({"timestamp": timestamp, "time": fmt_ts(timestamp),
-                       "platform": platform.lower(), "platform_label": platform.title(),
-                       "chat": data.get("chat") or chat_from_batch(data.get("batch")),
-                       "chars": int(data.get("chars") or 0),
-                       "duration": float(data["duration"]) if data.get("duration") else None,
-                       "api_calls": int(data["api_calls"]) if data.get("api_calls") else None,
-                       "kind": "response_ready" if "duration" in data and data.get("duration") else "sent"})
-    unique: dict[tuple[Any, ...], dict[str, Any]] = {}
-    for event in events:
-        key = (round(event["timestamp"]), event["platform"], event["chat"], event["chars"], event["kind"])
-        unique[key] = event
-    sorted_events = sorted(unique.values(), key=lambda item: item["timestamp"], reverse=True)
-    return sorted_events[:limit] if limit is not None else sorted_events
-
-def load_assistant_messages(limit: int | None = None) -> list[dict[str, Any]]:
-    if not STATE_DB.exists(): return []
-    query = """SELECT m.id, m.session_id, s.source, s.user_id, m.content, m.timestamp
-               FROM messages m JOIN sessions s ON s.id = m.session_id
-               WHERE m.role = 'assistant' AND COALESCE(m.content, '') != '' AND m.active = 1
-               ORDER BY m.timestamp DESC"""
-    params: tuple[Any, ...] = ()
-    if limit is not None: query += " LIMIT ?"; params = (limit,)
-    try:
-        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(query, params).fetchall()
-        conn.close()
-    except sqlite3.Error: return []
-    messages = []
-    for row in rows:
-        content = str(row["content"] or "").strip()
-        if not content: continue
-        messages.append({"id": row["id"], "session_id": row["session_id"],
-                         "source": row["source"] or "unknown", "chat": row["user_id"] or "",
-                         "content": content, "preview": content[:500],
-                         "timestamp": float(row["timestamp"]), "time": fmt_ts(float(row["timestamp"]))})
-    return messages
-
-def parse_cron_output_records(path: Path) -> list[dict[str, Any]]:
-    try: raw = path.read_text(errors="replace").strip()
-    except OSError: return []
-    if not raw: return []
-    job_match = re.search(r"^\*\*Job ID:\*\*\s*(\S+)", raw, re.MULTILINE)
-    job_id = job_match.group(1) if job_match else path.parent.name
-    if path.parent.name == "x_watchlist_direct" or job_id == "a7d479f754d2":
-        return parse_x_direct_archive_records(path, raw)
-    title_match = re.search(r"^#\s*Cron Job:\s*(.+)$", raw, re.MULTILINE)
-    time_match = re.search(r"^\*\*Run Time:\*\*\s*(.+)$", raw, re.MULTILINE)
-    body = body_after_header(raw)
-    body = re.sub(r"^<!--.*?-->\s*\n?", "", body, flags=re.M)
-    if is_suppressed_cron_output(raw, body):
-        return []
-    timestamp = parse_output_ts(time_match.group(1)) if time_match else path.stat().st_mtime
-    if timestamp is None: timestamp = path.stat().st_mtime
-    title = title_match.group(1).strip() if title_match else job_id
-    session_id = f"cron_output_{job_id}_{path.stem}"
-    category = categorize_message(f"{title}\n{body}", session_id)
-    return [{"timestamp": timestamp, "time": fmt_ts(timestamp), "platform": "cron",
-             "platform_label": "Cron", "chat": "cron-output", "chars": len(body),
-             "duration": None, "api_calls": None, "content": body, "session_id": session_id,
-             "category": category, "matched": False, "kind": "cron_output", "raw_path": str(path)}]
-
-def parse_cron_output(path: Path) -> dict[str, Any] | None:
-    records = parse_cron_output_records(path)
-    return records[0] if records else None
-
-def load_cron_output_records() -> list[dict[str, Any]]:
-    if not CRON_OUTPUT_DIR.exists(): return []
-    records = []
-    for path in CRON_OUTPUT_DIR.glob("*/*.md"):
-        records.extend(parse_cron_output_records(path))
-    return records
-
 CATEGORIES = {"us_ratings": "美股机构买入评级", "x_monitor": "推特监控",
               "market_monitor": "盘面监控", "other": "其他"}
 
-def categorize_message(content: str, session_id: str = "") -> str:
-    text = f"{session_id}\n{content}".lower()
-    if any(keyword in text for keyword in ["美股机构买入", "机构买入", "买入评级", "评级日报",
-                                           "analyst rating", "analyst ratings",
-                                           "target price", "upgrade", "buy rating"]):
-        return "us_ratings"
-    if any(keyword in text for keyword in ["推特", "推文", "twitter", "tweet",
-                                           "x监控", "x 监控", "watchlist",
-                                           "x_watchlist", "x 新推文"]):
-        return "x_monitor"
-    if any(keyword in text for keyword in ["盘面", "大盘", "a股", "沪深", "主板",
-                                           "竞价", "板块", "市场监控", "盘中"]):
-        return "market_monitor"
-    return "other"
-
-def merge_records(limit: int | None = None, include_origin: bool = False) -> dict[str, Any]:
-    since_ts = load_since_timestamp()
-    source_limit = limit * 3 if limit is not None else None
-    deliveries = load_delivery_events(limit=source_limit)
-    messages = load_assistant_messages(limit=source_limit)
-    cron_outputs = load_cron_output_records()
-    messages = [m for m in messages if str(m.get("session_id") or "").startswith("cron_")]
-    if since_ts is not None:
-        deliveries = [e for e in deliveries if e["timestamp"] >= since_ts]
-        messages = [m for m in messages if m["timestamp"] >= since_ts]
-        cron_outputs = [r for r in cron_outputs if r["timestamp"] >= since_ts]
-    if EXCLUDED_PLATFORMS:
-        deliveries = [e for e in deliveries if e["platform"].lower() not in EXCLUDED_PLATFORMS]
-        messages = [m for m in messages if m["source"].lower() not in EXCLUDED_PLATFORMS]
-    if not include_origin and CURRENT_ORIGIN_CHAT_IDS:
-        deliveries = [e for e in deliveries if str(e.get("chat") or "") not in CURRENT_ORIGIN_CHAT_IDS]
-    unused = messages[:]
-    records: list[dict[str, Any]] = []
-    for event in deliveries:
-        if not include_origin and not str(event.get("chat") or ""): continue
-        best_index = None; best_delta = 10**9
-        for idx, message in enumerate(unused):
-            delta = abs(message["timestamp"] - event["timestamp"])
-            if delta < best_delta and delta <= 900: best_delta = delta; best_index = idx
-        message = unused.pop(best_index) if best_index is not None else None
-        records.append({"timestamp": event["timestamp"], "time": event["time"],
-                        "platform": event["platform"], "platform_label": event["platform_label"],
-                        "chat": event["chat"] or (message or {}).get("chat", ""),
-                        "chars": event["chars"] or len((message or {}).get("content", "")),
-                        "duration": event["duration"], "api_calls": event["api_calls"],
-                        "content": (message or {}).get("preview", "（日志只记录了发送事件，未匹配到完整正文）"),
-                        "session_id": (message or {}).get("session_id", ""),
-                        "category": categorize_message((message or {}).get("content", ""),
-                                                        (message or {}).get("session_id", "")),
-                        "matched": message is not None, "kind": event["kind"]})
-    if not include_origin:
-        records = [r for r in records if str(r.get("chat") or "") not in CURRENT_ORIGIN_CHAT_IDS]
-    records = [r for r in records if r.get("matched") and str(r.get("session_id") or "").startswith("cron_")]
-    if not include_origin:
-        records = [r for r in records if str(r.get("chat") or "")]
-    existing_keys = {(round(r["timestamp"]), r["platform"], r["session_id"]) for r in records}
-    for message in unused:
-        if not include_origin and str(message.get("chat") or "") in CURRENT_ORIGIN_CHAT_IDS: continue
-        key = (round(message["timestamp"]), message["source"].lower(), message["session_id"])
-        if key in existing_keys: continue
-        records.append({"timestamp": message["timestamp"], "time": message["time"],
-                        "platform": message["source"].lower(), "platform_label": message["source"].title(),
-                        "chat": message["chat"] or "cron-history", "chars": len(message["content"]),
-                        "duration": None, "api_calls": None, "content": message["preview"],
-                        "session_id": message["session_id"],
-                        "category": categorize_message(message["content"], message["session_id"]),
-                        "matched": False, "kind": "session_only"})
-    existing_output_keys = {(round(r["timestamp"]), r["session_id"]) for r in records}
-    for record in cron_outputs:
-        key = (round(record["timestamp"]), record["session_id"])
-        if key not in existing_output_keys: records.append(record)
-    records = sorted(records, key=lambda item: item["timestamp"], reverse=True)
-    if limit is not None: records = records[:limit]
-    platforms = sorted({r["platform"] for r in records if r["platform"]})
-    chats = sorted({r["chat"] for r in records if r["chat"]})
-    categories = {key: {"label": label, "count": sum(1 for r in records if r.get("category") == key)}
-                  for key, label in CATEGORIES.items()}
-    return {"generated_at": fmt_ts(time.time()), "since": fmt_ts(since_ts) if since_ts is not None else None,
-            "dashboard_home": str(DASHBOARD_HOME), "count": len(records), "platforms": platforms,
-            "chats": chats, "categories": categories, "records": records}
-
-LAST_DB_SYNC_TS = 0.0
-DB_SYNC_INTERVAL_SECONDS = 60
-DB_SYNC_IN_PROGRESS = False
-DB_SYNC_LOCK = threading.Lock()
-
-def _sync_legacy_records_worker(force: bool = False) -> int:
-    payload = merge_records(limit=None, include_origin=False)
-    messages = [legacy_record_to_db_message(record) for record in payload.get("records", [])]
-    return push_history.upsert_many(messages)
-
-def sync_legacy_records_to_db(force: bool = False) -> int:
-    """Sync legacy log/cron records into SQLite without blocking normal dashboard reads.
-
-    The old path did a full filesystem/log merge inline once a minute. If a viewer
-    clicked a tab exactly when that cache expired, `/api/messages?limit=1` could
-    block the whole SPA transition for 10+ seconds. Normal reads now kick off the
-    sync in a daemon thread and return immediately from SQLite; force=True keeps a
-    synchronous path for maintenance scripts.
-    """
-    global LAST_DB_SYNC_TS, DB_SYNC_IN_PROGRESS
-    now = time.time()
-    if not force and now - LAST_DB_SYNC_TS < DB_SYNC_INTERVAL_SECONDS:
-        return 0
-    if force:
-        with DB_SYNC_LOCK:
-            LAST_DB_SYNC_TS = now
-            return _sync_legacy_records_worker(force=True)
-    with DB_SYNC_LOCK:
-        if DB_SYNC_IN_PROGRESS or now - LAST_DB_SYNC_TS < DB_SYNC_INTERVAL_SECONDS:
-            return 0
-        DB_SYNC_IN_PROGRESS = True
-        LAST_DB_SYNC_TS = now
-    def _worker() -> None:
-        global DB_SYNC_IN_PROGRESS
-        try:
-            _sync_legacy_records_worker(force=False)
-        except Exception as exc:
-            print(f"[WARN] dashboard legacy sync failed: {type(exc).__name__}: {exc}", flush=True)
-        finally:
-            with DB_SYNC_LOCK:
-                DB_SYNC_IN_PROGRESS = False
-    threading.Thread(target=_worker, name="dashboard-legacy-sync", daemon=True).start()
-    return 0
-
-def legacy_record_to_db_message(record: dict[str, Any]) -> dict[str, Any]:
-    content = record.get("content") or ""
-    session_id = record.get("session_id") or ""
-    category = record.get("category") or categorize_message(content, session_id)
-    source_type = {"x_monitor": "x_watchlist", "market_monitor": "market_monitor",
-                   "us_ratings": "us_ratings"}.get(category, "legacy_dashboard")
-    external_id = str(record.get("external_id") or "")
-    for pattern in (r"post_id:([A-Za-z0-9_:-]+)", r"status/(\d+)", r"推文\s*ID[:：]\s*([A-Za-z0-9_:-]+)"):
-        if external_id: break
-        match = re.search(pattern, content)
-        if match: external_id = match.group(1); break
-    if not external_id and session_id.startswith("cron_output_"):
-        external_id = session_id
-    return {"timestamp": record.get("timestamp"), "time_text": record.get("time") or "",
-            "category": category, "source_type": source_type, "source_id": session_id,
-            "source_label": CATEGORIES.get(category, category), "platform": record.get("platform") or "",
-            "chat": record.get("chat") or "", "external_id": external_id,
-            "title": CATEGORIES.get(category, category), "content": content,
-            "chars": record.get("chars") if record.get("chars") is not None else len(content),
-            "matched": record.get("matched"), "kind": record.get("kind") or "",
-            "delivery": {"duration": record.get("duration"), "api_calls": record.get("api_calls")},
-            "metadata": {"legacy_session_id": session_id}, "raw_path": record.get("raw_path") or ""}
-
 def merge_records_from_db(limit: int | None = None, category: str | None = None, offset: int = 0) -> dict[str, Any]:
-    synced = sync_legacy_records_to_db() if LEGACY_SYNC_ON_READ else 0
     data = push_history.query_messages(limit=limit, category=category, offset=offset)
     records = data["records"]
     label_map = CATEGORIES
     categories = {key: {"label": label, "count": int(data["categories"].get(key, 0))}
                   for key, label in label_map.items()}
     return {"generated_at": fmt_ts(time.time()), "since": None, "dashboard_home": str(DASHBOARD_HOME),
-            "storage": "sqlite", "db_path": str(push_history.DB_PATH), "synced_legacy_records": synced,
+            "storage": "sqlite", "db_path": str(push_history.DB_PATH),
             "count": len(records), "total": data["total"], "platforms": data["platforms"],
             "chats": data["chats"], "categories": categories, "records": records}
 
@@ -5642,22 +5301,9 @@ class Handler(BaseHTTPRequestHandler):
             limit = clamp_limit(params.get("limit", [""])[0])
             offset = clamp_offset(params.get("offset", [""])[0])
             category = params.get("category", [""])[0].strip() or None
-            include_origin = params.get("include_origin", ["0"])[0].lower() in {"1", "true", "yes"}
-            cache_key = f"messages:v3:{category or 'all'}:{limit}:{offset}:{int(include_origin)}"
+            cache_key = f"messages:v4:{category or 'all'}:{limit}:{offset}"
             def produce_messages():
-                try:
-                    return merge_records_from_db(limit=limit, category=category, offset=offset)
-                except Exception as exc:
-                    result = merge_records(limit=limit + offset, include_origin=include_origin)
-                    if category:
-                        result["records"] = [r for r in result.get("records", []) if r.get("category") == category][offset:offset + limit]
-                        result["count"] = len(result["records"])
-                    else:
-                        result["records"] = result.get("records", [])[offset:offset + limit]
-                        result["count"] = len(result["records"])
-                    result["storage"] = "legacy_fallback"
-                    result["db_error"] = f"{type(exc).__name__}: {exc}"
-                    return result
+                return merge_records_from_db(limit=limit, category=category, offset=offset)
             self.send_json_cached(cache_key, API_TTLS["messages"], produce_messages, edge_ttl=API_TTLS["messages"], browser_ttl=5)
             return
         if parsed.path == "/api/b1_screen":
@@ -5988,7 +5634,7 @@ def main() -> None:
     start_pending_decision_executor()
     print(f"牛牛大作手：http://{args.host}:{args.port}")
     print(f"用户管理：admin token saved at {ADMIN_TOKEN_FILE}; open /admin?token=<token-from-file>")
-    print(f"读取：{STATE_DB} 和 {LOG_DIR}/gateway.log*")
+    print(f"消息历史：{push_history.DB_PATH}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

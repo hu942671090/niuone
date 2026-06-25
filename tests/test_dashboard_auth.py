@@ -343,7 +343,6 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('<th>来源</th>', body)
         self.assertNotIn('新增配置项', body)
         self.assertNotIn('DASHBOARD_HOME', body)
-        self.assertNotIn('Hermes', body)
         self.assertNotIn('LaunchAgent', body)
 
     def test_business_settings_are_local_to_dashboard_env(self):
@@ -388,7 +387,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('09:25、10:00、14:50', payload_text)
         self.assertIn('北京时间 09:26', payload_text)
         self.assertNotIn('26 9 * * 1-5', payload_text)
-        self.assertFalse(any('Hermes' in item.get('source', '') or 'LaunchAgent' in item.get('source', '') for item in payload['items']))
+        self.assertFalse(any('LaunchAgent' in item.get('source', '') for item in payload['items']))
 
     @unittest.skipIf(dashboard.yaml is None, 'PyYAML unavailable')
     def test_model_api_base_urls_do_not_prefill_defaults(self):

@@ -54,9 +54,10 @@ http://127.0.0.1:8877/
 ├── dashboard_users.db
 ├── dashboard_admin_token.txt
 ├── push_history.db
-├── state.db                 # 如果存在 Hermes legacy state 导入需求
-├── logs/                    # legacy gateway 日志目录，可空
-└── cron/output/             # B1/cache/helper 输出
+├── niuniu.db
+├── config.yaml
+├── logs/
+└── cron/output/             # B1/cache/helper/日报输出
 ```
 
 ## 关键环境变量
@@ -86,23 +87,3 @@ cd /path/to/NiuOne
 # 生成美股机构买入评级日报，并写入 dashboard 归档/消息库
 ./scripts/run_us_rating_report.sh
 ```
-
-## 与旧 Hermes 部署兼容
-
-线上旧部署可以继续设置：
-
-```bash
-python3 /path/to/NiuOne/app/niuone_dashboard.py --host 127.0.0.1 --port 8787
-```
-
-如果未来要完全迁移，可以：
-
-```bash
-mkdir -p ~/.niuniu-dashboard
-cp ~/.hermes/dashboard_users.db ~/.niuniu-dashboard/  # 可选
-cp ~/.hermes/dashboard_admin_token.txt ~/.niuniu-dashboard/  # 可选
-cp ~/.hermes/push_history.db ~/.niuniu-dashboard/  # 可选
-cp -R ~/.hermes/cron ~/.niuniu-dashboard/  # 可选
-```
-
-然后用 `DASHBOARD_HOME=~/.niuniu-dashboard` 启动即可。
