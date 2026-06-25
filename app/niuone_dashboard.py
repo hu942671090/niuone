@@ -1661,6 +1661,37 @@ def friendly_handle_list_text(value: str) -> str:
     return "、".join(split_handle_values(value))
 
 
+def x_watchlist_state_accounts(path: Path | None = None) -> list[str]:
+    if path is None:
+        path = Path(os.environ.get("DASHBOARD_X_WATCHLIST_STATE") or str(CRON_STATE_DIR / "x_watchlist_latest.json")).expanduser()
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(state, dict):
+        return []
+    handles: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: object) -> None:
+        handle = normalize_x_handle(str(value or ""))
+        if handle and handle not in seen:
+            seen.add(handle)
+            handles.append(handle)
+
+    for key in ("latest", "seen_ids"):
+        section = state.get(key)
+        if isinstance(section, dict):
+            for handle in section:
+                add(handle)
+    sent_missing = state.get("sent_missing_context")
+    if isinstance(sent_missing, list):
+        for item in sent_missing:
+            if isinstance(item, dict):
+                add(item.get("handle"))
+    return handles
+
+
 def normalize_time_list_update(value: str) -> str:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1815,6 +1846,9 @@ def business_config_fallback_value(name: str) -> tuple[str, str]:
         return provider.get("base_url", ""), "config.yaml" if provider.get("base_url") else "default"
     if name in {"DASHBOARD_GROK_API_KEY", "DASHBOARD_DECISION_API_KEY"}:
         return provider.get("api_key", ""), "config.yaml" if provider.get("api_key") else "default"
+    if name == "X_WATCHLIST_ACCOUNTS":
+        handles = x_watchlist_state_accounts()
+        return ",".join(handles), "x_watchlist_state" if handles else "default"
     return "", "default"
 
 
@@ -1827,12 +1861,17 @@ def build_admin_config_payload() -> dict[str, Any]:
         schema = ENV_CONFIG_BY_NAME.get(name, {"name": name, "label": name, "group": "其他", "kind": "text", "default": "", "effect": "restart"})
         fallback_value, fallback_source = business_config_fallback_value(name)
         default_value = schema.get("default", "")
-        effective = os.environ.get(name) or env_values.get(name) or fallback_value or default_value
+        if name in os.environ:
+            effective = os.environ.get(name, "")
+        elif name in env_values:
+            effective = env_values.get(name, "")
+        else:
+            effective = fallback_value or default_value
         secret = schema.get("kind") == "secret" or is_secret_config_key(name)
         file_value = env_values.get(name)
         if file_value is None:
             file_value = "" if secret else default_value
-        source = "dashboard.env" if name in env_values else ("process env" if os.environ.get(name) else fallback_source)
+        source = "process env" if name in os.environ else ("dashboard.env" if name in env_values else fallback_source)
         item = {
             **schema,
             "secret": secret,
@@ -1859,12 +1898,16 @@ def build_admin_config_payload() -> dict[str, Any]:
                 "time_values": split_hhmm_values(str(file_value or "")),
             })
         if schema.get("kind") == "handle_list" and not secret:
+            edit_value = str(file_value or "")
+            if name not in env_values and name not in os.environ and fallback_value:
+                edit_value = fallback_value
+            state_value = env_values.get(name) if name in env_values else (fallback_value or default_value)
             item.update({
                 "effective": friendly_handle_list_text(effective),
-                "file_value": normalize_handle_list_update(str(file_value or "")),
-                "file_state": friendly_handle_list_text(env_values.get(name) or fallback_value or default_value),
+                "file_value": normalize_handle_list_update(edit_value),
+                "file_state": friendly_handle_list_text(state_value),
                 "default": friendly_handle_list_text(default_value),
-                "handle_values": split_handle_values(str(file_value or "")),
+                "handle_values": split_handle_values(edit_value),
             })
         items.append(item)
     return {

@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -53,8 +54,18 @@ class DashboardAuthTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp.name)
+        self.original_dashboard_env_file = dashboard.DASHBOARD_ENV_FILE
+        self.original_cron_state_dir = dashboard.CRON_STATE_DIR
+        self.saved_env = {
+            name: os.environ.get(name)
+            for name in ('X_WATCHLIST_ACCOUNTS', 'DASHBOARD_X_WATCHLIST_STATE')
+        }
+        for name in self.saved_env:
+            os.environ.pop(name, None)
         dashboard.AUTH_DB = self.tmp_path / 'dashboard_users.db'
         dashboard.ADMIN_TOKEN_FILE = self.tmp_path / 'dashboard_admin_token.txt'
+        dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
+        dashboard.CRON_STATE_DIR = self.tmp_path / 'cron' / 'state'
         dashboard.API_RESPONSE_CACHE.clear()
         dashboard.API_CACHE_KEY_LOCKS.clear()
         dashboard.RATE_LIMIT_BUCKETS.clear()
@@ -62,6 +73,13 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.ensure_auth_db()
 
     def tearDown(self):
+        dashboard.DASHBOARD_ENV_FILE = self.original_dashboard_env_file
+        dashboard.CRON_STATE_DIR = self.original_cron_state_dir
+        for name, value in self.saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         self.tmp.cleanup()
 
     def test_invite_redeem_creates_viewer_token_and_exhausts_limit(self):
@@ -344,6 +362,37 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('新增配置项', body)
         self.assertNotIn('DASHBOARD_HOME', body)
         self.assertNotIn('LaunchAgent', body)
+
+    def test_admin_config_restores_x_watchlist_accounts_from_state(self):
+        dashboard.CRON_STATE_DIR.mkdir(parents=True)
+        (dashboard.CRON_STATE_DIR / 'x_watchlist_latest.json').write_text(json.dumps({
+            'latest': {'Foo': {}, 'bar': {}},
+            'seen_ids': {'baz': [], 'foo': []},
+            'sent_missing_context': [{'handle': 'qux'}],
+        }), encoding='utf-8')
+
+        payload = dashboard.build_admin_config_payload()
+        item = next(item for item in payload['items'] if item['name'] == 'X_WATCHLIST_ACCOUNTS')
+
+        self.assertEqual(item['source'], 'x_watchlist_state')
+        self.assertEqual(item['file_value'], 'foo,bar,baz,qux')
+        self.assertEqual(item['handle_values'], ['foo', 'bar', 'baz', 'qux'])
+        self.assertEqual(item['effective'], 'foo、bar、baz、qux')
+
+    def test_admin_config_respects_explicit_empty_x_watchlist_accounts(self):
+        dashboard.CRON_STATE_DIR.mkdir(parents=True)
+        (dashboard.CRON_STATE_DIR / 'x_watchlist_latest.json').write_text(json.dumps({
+            'latest': {'foo': {}},
+        }), encoding='utf-8')
+        dashboard.DASHBOARD_ENV_FILE.write_text('X_WATCHLIST_ACCOUNTS=\n', encoding='utf-8')
+
+        payload = dashboard.build_admin_config_payload()
+        item = next(item for item in payload['items'] if item['name'] == 'X_WATCHLIST_ACCOUNTS')
+
+        self.assertEqual(item['source'], 'dashboard.env')
+        self.assertEqual(item['file_value'], '')
+        self.assertEqual(item['handle_values'], [])
+        self.assertEqual(item['effective'], '')
 
     def test_business_settings_are_local_to_dashboard_env(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE

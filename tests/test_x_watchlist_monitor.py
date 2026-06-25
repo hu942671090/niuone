@@ -17,6 +17,8 @@ class XWatchlistMonitorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
             env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sys
 sys.path.insert(0, {str(SRC)!r})
@@ -43,6 +45,8 @@ print(json.dumps({{
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
             env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             env['X_WATCHLIST_ACCOUNTS'] = '@Foo, bar;Foo invalid-handle-too-long'
             code = f"""
 import importlib.util, json, sys
@@ -60,10 +64,42 @@ print(json.dumps({{
             self.assertEqual(data['accounts'], ['foo', 'bar'])
             self.assertEqual(data['parsed_empty_len'], 0)
 
+    def test_accounts_fall_back_to_existing_state_when_env_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / 'cron' / 'state' / 'x_watchlist_latest.json'
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps({
+                'latest': {'Foo': {}, 'bar': {}},
+                'seen_ids': {'baz': [], 'foo': []},
+                'sent_missing_context': [{'handle': 'qux'}],
+            }), encoding='utf-8')
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
+            env.pop('X_WATCHLIST_ACCOUNTS', None)
+            code = f"""
+import importlib.util, json, sys
+sys.path.insert(0, {str(SRC)!r})
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+print(json.dumps({{
+  'accounts': m.ACCOUNTS,
+  'state_accounts': m.watchlist_accounts_from_state(),
+}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            self.assertEqual(data['accounts'], ['foo', 'bar', 'baz', 'qux'])
+            self.assertEqual(data['state_accounts'], ['foo', 'bar', 'baz', 'qux'])
+
     def test_empty_accounts_skip_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
             env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             env.pop('X_WATCHLIST_ACCOUNTS', None)
             code = f"""
 import importlib.util, json, sys
@@ -88,6 +124,8 @@ print(json.dumps({{
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
             env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sys, time
 from pathlib import Path
@@ -128,6 +166,8 @@ print(json.dumps({{
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
             env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sqlite3, sys, time
 from pathlib import Path
@@ -190,6 +230,8 @@ print(json.dumps({{
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
             env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sys
 sys.path.insert(0, {str(SRC)!r})
