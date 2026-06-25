@@ -3395,12 +3395,10 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   let points = [];
   let timeTicks = [];
   let xFromTime;
-  let titleStr = '';
   
   if (isDailyMode) {
     points = dailyCompactedPoints;
-    if (points.length < 2) return '<div class="empty" style="padding:18px">日收益等待更多交易日净值点…</div>';
-    titleStr = `日收益 · 起始资金 ${fmtAmount(initialCash)}`;
+    if (points.length < 2) return '<div class="empty" style="padding:18px">每日总收益等待更多交易日净值点…</div>';
     // 横轴按日期
     const totalDays = points.length;
     xFromTime = time => {
@@ -3456,7 +3454,6 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
       points = points.filter((_, i, arr) => i === 0 || i === arr.length - 1 || i % step === 0);
     }
     
-    titleStr = `固定盘面时间轴 09:30-15:00 · 基准线 ${fmtAmount(initialCash)}`;
     xFromTime = time => {
       const clampedMinute = Math.max(0, Math.min(totalSessionMinutes, clampedTradingClockMinuteOfDay(time)));
       return left + (clampedMinute / totalSessionMinutes) * innerW;
@@ -3469,15 +3466,9 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   }
   const vals = points.map(p => p.equity);
   const chartBase = isDailyMode ? initialCash : vals[0];
-  const chartPcts = vals.map((v, i) => {
-    const base = isDailyMode ? (i > 0 ? vals[i - 1] : initialCash) : chartBase;
-    return base ? (v / base - 1) * 100 : 0;
-  });
-  const chartDeltas = vals.map((v, i) => {
-    const base = isDailyMode ? (i > 0 ? vals[i - 1] : initialCash) : chartBase;
-    return v - (base || 0);
-  });
-  const start = vals[0], last = vals[vals.length - 1], prev = vals[Math.max(0, vals.length - 2)];
+  const chartPcts = vals.map(v => chartBase ? (v / chartBase - 1) * 100 : 0);
+  const chartDeltas = vals.map(v => v - (chartBase || 0));
+  const last = vals[vals.length - 1], prev = vals[Math.max(0, vals.length - 2)];
   // 收益曲线只展示牛牛账户本身，指数对照不再叠加，避免干扰账户收益率观察。
   const activeBenchmarks = [];
   const benchmarkSeries = activeBenchmarks.map((b, idx) => ({...b, color: b.symbol === 'sh000001' ? '#f59e0b' : b.symbol === 'sh000300' ? '#60a5fa' : b.symbol === 'sz399006' ? '#ec4899' : '#8b5cf6'}));
@@ -3528,12 +3519,13 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   const latestDeltaPct = chartPcts[chartPcts.length - 1] || 0;
   const delta = latestDelta;
   const deltaPct = latestDeltaPct;
+  const dayDelta = last - prev;
+  const dayDeltaPct = prev ? (last / prev - 1) * 100 : 0;
   const maxDrawdown = (() => {
     let peak = vals[0], mdd = 0;
     for (const v of vals) { peak = Math.max(peak, v); mdd = Math.min(mdd, peak ? (v / peak - 1) * 100 : 0); }
     return mdd;
   })();
-  const trendCls = totalPnl >= 0 ? 'up' : 'down';
   const deltaCls = delta >= 0 ? 'up' : 'down';
   const midPct = (yMaxPct + yMinPct) / 2;
   const showMidAxisLabel = Math.abs(midPct) >= 0.08;
@@ -3549,14 +3541,18 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     const cls = idx === 0 ? 'start' : (idx === timeTicks.length - 1 ? 'end' : 'mid');
     return `<span class="practice-time-label ${cls}" style="left:${((t.x / w) * 100).toFixed(2)}%">${esc(t.label)}</span>`;
   }).join('');
-  const chartTitle = isDailyMode ? '收益曲线 · 日收益' : '收益曲线 · 当日收益';
+  const chartTitle = isDailyMode ? '收益曲线 · 每日总收益' : '收益曲线 · 当日收益';
   const chartSub = isDailyMode
-    ? `按交易日最后净值计算 · 0轴为前一交易日净值 · 最近点：${esc(lastTime)}`
+    ? `按交易日最后净值计算 · 0轴为起始资金 · 最近点：${esc(lastTime)}`
     : `固定盘面时间轴 09:30-15:00 · 0轴为今日首个净值 · 最近点：${esc(lastTime)}`;
-  const primaryKpiLabel = isDailyMode ? '最近日收益' : '当日收益';
+  const primaryKpiLabel = isDailyMode ? '最新总收益' : '当日收益';
+  const secondaryKpiLabel = isDailyMode ? '较前日变化' : '累计收益';
+  const secondaryKpiPnl = isDailyMode ? dayDelta : totalPnl;
+  const secondaryKpiPct = isDailyMode ? dayDeltaPct : totalPct;
+  const secondaryKpiCls = secondaryKpiPnl >= 0 ? 'up' : 'down';
   const modeButtons = `<div class="practice-mode-control" aria-label="收益曲线模式">
     <button class="practice-mode-btn ${!isDailyMode ? 'active' : ''}" type="button" onclick="setPracticeCurveMode('intraday')">当日收益</button>
-    <button class="practice-mode-btn ${isDailyMode ? 'active' : ''}" type="button" onclick="setPracticeCurveMode('daily')">日收益</button>
+    <button class="practice-mode-btn ${isDailyMode ? 'active' : ''}" type="button" onclick="setPracticeCurveMode('daily')">每日总收益</button>
   </div>`;
   return `<div class="practice-chart-card">
     <div class="practice-chart-head">
@@ -3570,7 +3566,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
       </div>
       <div class="practice-chart-kpis">
         <div class="practice-kpi"><div class="practice-kpi-label">${primaryKpiLabel}</div><div class="practice-kpi-value ${deltaCls}">${delta >= 0 ? '+' : ''}${fmtAmount(delta)} / ${deltaPct >= 0 ? '+' : ''}${fmtNumber(deltaPct)}%</div></div>
-        <div class="practice-kpi"><div class="practice-kpi-label">累计收益</div><div class="practice-kpi-value ${trendCls}">${fmtAmount(totalPnl)} / ${fmtNumber(totalPct)}%</div></div>
+        <div class="practice-kpi"><div class="practice-kpi-label">${secondaryKpiLabel}</div><div class="practice-kpi-value ${secondaryKpiCls}">${secondaryKpiPnl >= 0 ? '+' : ''}${fmtAmount(secondaryKpiPnl)} / ${secondaryKpiPct >= 0 ? '+' : ''}${fmtNumber(secondaryKpiPct)}%</div></div>
         <div class="practice-kpi"><div class="practice-kpi-label">最大回撤</div><div class="practice-kpi-value down">${fmtNumber(maxDrawdown)}%</div></div>
       </div>
     </div>
