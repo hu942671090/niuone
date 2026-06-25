@@ -1,14 +1,14 @@
-# NiuOne 运行与维护手册
+# 部署、验证和回滚手册
 
-本文档记录 NiuOne Dashboard 的本地运行、验证、部署、日志和回滚流程。真实运行数据统一放在工程目录内 `.local-data/`，该目录不进入 Git。
+本文档记录 NiuOne 的本地运行、验证、部署、日志检查和回滚流程。真实运行数据统一保存在 `.local-data/`，该目录不进入 Git。
 
 ## 1. 目录约定
 
 ```text
 /path/to/NiuOne/
-├── app/                    # Dashboard 和任务源码
+├── app/                    # 本地服务和任务源码
 ├── tests/                  # 单元测试
-├── scripts/                # 验证、部署和独立任务脚本
+├── scripts/                # 验证、部署和任务脚本
 ├── docs/                   # 文档
 ├── config/                 # 运行策略说明
 ├── .local-data/            # 本机真实运行数据，Git ignored
@@ -17,7 +17,9 @@
 ├── run.bat                 # Windows 双击启动
 ├── run.ps1                 # Windows PowerShell 启动
 ├── run.desktop             # Linux 桌面启动
-└── run-dashboard.sh        # 生产/LaunchAgent 启动入口
+├── run-dashboard.sh        # 网页服务启动入口
+├── run-niuone-cron-scheduler.sh
+└── run-x-watchlist-daemon.sh
 ```
 
 运行数据默认位于：
@@ -32,6 +34,7 @@
 │   ├── push_history.db
 │   ├── niuniu.db
 │   ├── config.yaml
+│   ├── cron/state/
 │   ├── cron/output/
 │   └── logs/
 └── backups/
@@ -39,48 +42,19 @@
 
 不要把 `.local-data/` 中的 DB、token、日志、模型配置或归档内容提交到 Git，也不要复制到公开上下文。
 
-## 2. 一键运行
+## 2. 运行前检查
 
-| 系统 | 启动方式 |
-|---|---|
-| macOS | 双击 `run.command`，或终端执行 `./run.sh` |
-| Windows | 双击 `run.bat`，或 PowerShell 执行 `.\run.ps1` |
-| Linux | 终端执行 `./run.sh`，桌面环境可尝试双击 `run.desktop` |
+一键启动：
 
-首次运行会自动创建 `.local-data/.venv`、安装依赖、生成 `.local-data/dashboard.env`，并启动：
+```bash
+./run.sh
+```
+
+首次运行会创建 `.local-data/.venv`、安装依赖、生成 `.local-data/dashboard.env`，然后启动：
 
 ```text
 http://127.0.0.1:8787/
 ```
-
-Linux 如提示没有执行权限：
-
-```bash
-chmod +x run.sh run.desktop
-```
-
-## 3. 关键环境变量
-
-配置文件默认读取：
-
-```text
-.local-data/dashboard.env
-```
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `DASHBOARD_HOME` | `.local-data/runtime` | 运行数据根目录 |
-| `DASHBOARD_HOST` | `127.0.0.1` | Dashboard 监听地址 |
-| `DASHBOARD_PORT` | `8787` | Dashboard 监听端口 |
-| `PYTHON_BIN` | `.local-data/.venv/bin/python` 或 Windows venv Python | Python 可执行文件 |
-| `DASHBOARD_CONFIG` | `$DASHBOARD_HOME/config.yaml` | provider/model 配置 |
-| `DASHBOARD_PUSH_HISTORY_DB` | `$DASHBOARD_HOME/push_history.db` | 消息历史 DB |
-| `DASHBOARD_PORTFOLIO_STATE` | `$DASHBOARD_HOME/cron/output/niuniu_practice_portfolio.json` | 模拟账户状态 |
-| `DASHBOARD_TRADER_SCRIPT` | `app/niuniu_practice_trader.py` | 牛牛实战脚本 |
-| `DASHBOARD_AUTH_ENABLED` | 一键本地启动默认 `0` | 公网或多人访问必须设置为 `1` |
-| `DASHBOARD_ADMIN_PASSWORD` | 空 | 管理页密码，可留空使用 admin token |
-| `DASHBOARD_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | 允许信任转发 IP 的代理 CIDR |
-| `DASHBOARD_EDGE_CACHE_ENABLED` | `0` | 是否允许 CDN 缓存 API |
 
 公网或局域网访问前，至少确认：
 
@@ -88,6 +62,22 @@ chmod +x run.sh run.desktop
 - `DASHBOARD_HOST` 没有误暴露到不可信网络
 - `DASHBOARD_EDGE_CACHE_ENABLED=0`
 - `DASHBOARD_TRUSTED_PROXIES` 只包含可信反向代理
+- 设置页管理员密码或 admin token 已妥善保存
+
+## 3. 模型配置
+
+NiuOne 需要大模型驱动完整工作流。事件抓取、信息检索、X 关注列表监控和美股机构评级日报推荐使用 Grok；选股后的买卖决策推荐使用 DeepSeek。
+
+核心配置项：
+
+| 场景 | 配置项 |
+|---|---|
+| Grok API | `DASHBOARD_GROK_BASE_URL`、`DASHBOARD_GROK_API_KEY`、`DASHBOARD_GROK_MODEL` |
+| DeepSeek API | `DASHBOARD_DECISION_BASE_URL`、`DASHBOARD_DECISION_API_KEY`、`DASHBOARD_DECISION_MODEL` |
+| 美股评级单独覆盖 | `US_RATING_BASE_URL`、`US_RATING_API_KEY`、`US_RATING_MODEL` |
+| X 关注列表单独覆盖 | `X_WATCHLIST_BASE_URL`、`X_WATCHLIST_API_KEY`、`X_WATCHLIST_MODEL` |
+
+优先通过 `/admin` 设置页维护。也可以直接编辑 `.local-data/dashboard.env`，保存后按配置影响范围重启或等待下一轮任务读取。
 
 ## 4. 验证流程
 
@@ -98,12 +88,12 @@ chmod +x run.sh run.desktop
 验证内容：
 
 1. Python 语法检查
-2. Dashboard 内嵌 JavaScript `node --check`
+2. 内嵌前端 JavaScript 语法检查
 3. Shell 启动脚本语法检查
 4. PowerShell 脚本语法检查（环境存在 PowerShell 时）
 5. `tests/` 单元测试
 
-临时启动隔离实例：
+隔离实例验证：
 
 ```bash
 DASHBOARD_HOME=/tmp/niuone-smoke DASHBOARD_AUTH_ENABLED=0 DASHBOARD_PORT=8878 ./scripts/run_standalone.sh
@@ -120,7 +110,7 @@ curl -s -o /dev/null -w 'HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0
 
 ## 5. 本机长期运行
 
-macOS LaunchAgent 文件：
+macOS LaunchAgent 文件通常位于：
 
 ```text
 ~/Library/LaunchAgents/ai.niuone.dashboard.plist
@@ -154,13 +144,22 @@ launchctl kickstart -k gui/$(id -u)/ai.niuone.x-watchlist
 
 ## 6. 部署流程
 
+本机部署脚本：
+
 ```bash
 cd /path/to/NiuOne
-./scripts/validate.sh
 ./scripts/deploy_to_live.sh
 ```
 
-`deploy_to_live.sh` 会备份当前 `app/` 到 `.local-data/backups/`，然后重启本机 LaunchAgent 服务。
+该脚本会：
+
+- 先运行 `./scripts/validate.sh`
+- 备份当前 `app/`、本地环境文件和 `run-dashboard.sh` 到 `.local-data/backups/`
+- 确保运行目录存在
+- 对当前 `127.0.0.1:8787` 服务进程发送 `HUP`
+- 访问 `/login` 做 smoke check
+
+如果服务由 LaunchAgent 托管，`HUP` 后通常会由托管器拉起新进程；如果没有托管器，请手动重新运行 `./run.sh` 或对应启动脚本。
 
 部署后检查：
 
@@ -170,39 +169,55 @@ TOKEN=$(cat .local-data/runtime/dashboard_admin_token.txt)
 curl -s "http://127.0.0.1:8787/api/messages?limit=1&token=$TOKEN" | python3 -m json.tool | head
 ```
 
-`/api/messages` 返回中的 `db_path` 应指向：
+`/api/messages` 返回中的 `db_path` 应指向工程目录内的 `.local-data/runtime/push_history.db`。
+
+## 7. 日志和任务检查
+
+常用日志目录：
 
 ```text
-/path/to/NiuOne/.local-data/runtime/push_history.db
+.local-data/runtime/logs/
 ```
 
-## 7. 常用任务
+常用状态和输出目录：
+
+```text
+.local-data/runtime/cron/state/
+.local-data/runtime/cron/output/
+```
+
+任务脚本：
 
 ```bash
-# 生成美股机构买入评级日报，并写入 Dashboard 归档和消息库
-./scripts/run_us_rating_report.sh
-
-# 运行 cron scheduler
 ./run-niuone-cron-scheduler.sh
-
-# 运行 X 关注列表监控 daemon
 ./run-x-watchlist-daemon.sh
+./scripts/run_us_rating_report.sh
 ```
+
+X 关注列表作者通过 `/admin` 的“推文监控作者”维护，填写 handle 时不需要 `@`。
 
 ## 8. 回滚
 
-备份默认位于：
+部署备份默认位于：
 
 ```text
 .local-data/backups/
 ```
 
-手动回滚示例：
+手动回滚 `app/` 示例：
 
 ```bash
 cp -R .local-data/backups/<backup-name>/app/. app/
 ./scripts/validate.sh
 launchctl kickstart -k gui/$(id -u)/ai.niuone.dashboard
+```
+
+如果要回滚 Git 提交，优先使用非破坏性命令：
+
+```bash
+git revert <commit-sha>
+./scripts/validate.sh
+git push origin main
 ```
 
 回滚后检查：
@@ -213,7 +228,7 @@ curl -s -o /dev/null -w 'HTTP:%{http_code}\n' http://127.0.0.1:8787/login
 
 ## 9. 常见问题
 
-### Dashboard 无法启动
+### 页面无法启动
 
 检查：
 
@@ -221,7 +236,7 @@ curl -s -o /dev/null -w 'HTTP:%{http_code}\n' http://127.0.0.1:8787/login
 ./run.sh --no-browser
 ```
 
-确认 Python 可用、依赖安装成功、`DASHBOARD_PORT` 未被占用。
+确认 Python 可用、依赖安装成功、端口未被占用。
 
 ### 页面能打开但没有历史消息
 
@@ -233,7 +248,19 @@ TOKEN=$(cat .local-data/runtime/dashboard_admin_token.txt)
 curl -s "http://127.0.0.1:8787/api/messages?limit=5&token=$TOKEN" | python3 -m json.tool | head
 ```
 
-当前消息流以 `push_history.db` 为唯一来源。任务脚本需要正常写入该 DB 后，Dashboard 才会出现对应消息。
+当前消息流以 `push_history.db` 为主要来源。任务脚本需要正常写入该数据库后，页面才会出现对应消息。
+
+### 任务没有自动更新
+
+检查三个方向：
+
+```bash
+launchctl print gui/$(id -u)/ai.niuone.cron-scheduler | sed -n '1,100p'
+launchctl print gui/$(id -u)/ai.niuone.x-watchlist | sed -n '1,100p'
+tail -n 200 .local-data/runtime/logs/*.log
+```
+
+同时确认模型 API key、任务时间和推文监控作者已经配置。
 
 ### 修改前端后页面空白
 
@@ -243,7 +270,7 @@ curl -s "http://127.0.0.1:8787/api/messages?limit=5&token=$TOKEN" | python3 -m j
 ./scripts/validate.sh
 ```
 
-该脚本会抽取 `app/niuone_dashboard.py` 内嵌 JavaScript 并执行 `node --check`。
+该脚本会抽取 `app/niuone_dashboard.py` 内嵌 JavaScript 并执行语法检查。
 
 ### 不要提交真实数据
 
@@ -261,4 +288,4 @@ git status --ignored --short
 2. 临时测试使用独立 `DASHBOARD_HOME=/tmp/...` 和非 8787 端口。
 3. 公网访问必须开启认证和限流。
 4. 真实 DB、token、日志、模型配置只留在 `.local-data/`。
-5. 新任务应直接写入 `push_history.db` 或 Dashboard 当前归档目录。
+5. 新任务应写入 `push_history.db` 或当前归档目录，避免只生成孤立文件。
