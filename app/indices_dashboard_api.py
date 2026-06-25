@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""indices_dashboard_api.py — 综合指数行情 + 全球夜盘 + 黄金/外汇
+供牛牛大作手主服务的 /api/indices 动态导入。
+
+输出: {"items": [...], "groups": {domestic/global/commodity: [...]}}
+"""
+
+import json
+import re
+import ssl
+import time
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+SSL_CTX = ssl._create_unverified_context()
+UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com/"}
+
+# 腾讯 qt.gtimg.cn 可以同时取 A股指数、港股指数、美股指数
+INDEX_DEFS = [
+    ("sh", "sh000001", "上证指数", "domestic", "a_index"),
+    ("sz", "sz399001", "深证成指", "domestic", "a_index"),
+    ("cyb", "sz399006", "创业板指", "domestic", "a_index"),
+    ("kc50", "sh000688", "科创50", "domestic", "a_index"),
+    ("dow", "usDJI", "道琼斯指数", "global", "us_index"),
+    ("nas", "usIXIC", "纳斯达克指数", "global", "us_index"),
+    ("spx", "usINX", "标普500指数", "global", "us_index"),
+]
+
+# 新浪提供期货、黄金和原油
+SINA_DEFS = [
+    ("a50_fut", "hf_CHA50CFD", "富时中国A50期货", "global", "a_futures", "CHA50CFD"),
+    ("xau", "hf_XAU", "伦敦金", "commodity", "commodity", "XAU"),
+    ("brent", "hf_OIL", "布伦特原油", "commodity", "commodity", "OIL"),
+    ("spx_fut", "hf_ES", "标普500期货", "global", "us_futures", "ES"),
+    ("nas_fut", "hf_NQ", "纳斯达克期货", "global", "us_futures", "NQ"),
+    ("dow_fut", "hf_YM", "道琼斯期货", "global", "us_futures", "YM"),
+]
+
+KLINE_URL = "https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={qt_code},day,,,60,qfq"
+MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={qt_code}"
+SINA_GLOBAL_MINUTE_URL = "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20t=/GlobalFuturesService.getGlobalFuturesMinLine?symbol={symbol}"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d&includePrePost=false"
+YAHOO_US_INDEX_SYMBOLS = {
+    "usDJI": "^DJI",
+    "usIXIC": "^IXIC",
+    "usINX": "^GSPC",
+}
+NY_TZ = ZoneInfo("America/New_York")
+
+_CACHE = {"ts": 0, "data": None}
+CACHE_TTL = 45
+
+
+def _open(url, timeout=8, headers=None):
+    req = urllib.request.Request(url, headers=headers or UA)
+    return urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX).read()
+
+
+def _qt_query(codes):
+    if not codes:
+        return ""
+    url = "https://qt.gtimg.cn/q=" + ",".join(codes)
+    try:
+        return _open(url, timeout=8).decode("gbk", errors="replace")
+    except Exception:
+        try:
+            return _open(url.replace("https://", "http://"), timeout=10).decode("gbk", errors="replace")
+        except Exception:
+            return ""
+
+
+def _fmt_time(raw):
+    raw = str(raw or "")
+    if len(raw) >= 14 and raw[:14].isdigit():
+        return f"{raw[0:4]}-{raw[4:6]}-{raw[6:8]} {raw[8:10]}:{raw[10:12]}:{raw[12:14]}"
+    return raw
+
+
+def _parse_qt(raw):
+    results = {}
+    for line in raw.strip().splitlines():
+        m = re.match(r'v_([^=]+)="(.*)";?', line.strip())
+        if not m:
+            continue
+        code, fields = m.group(1), m.group(2)
+        parts = fields.rstrip('";').split("~")
+        if len(parts) < 33:
+            continue
+        try:
+            price = float(parts[3] or 0)
+            prev_close = float(parts[4] or 0)
+            change = float(parts[31] or 0) if len(parts) > 31 else (price - prev_close)
+            change_pct = float(parts[32] or 0) if len(parts) > 32 else ((price - prev_close) / prev_close * 100 if prev_close else 0)
+            results[code] = {
+                "name": parts[1] or code,
+                "price": price,
+                "prev_close": prev_close,
+                "change": round(change, 2),
+                "change_pct": round(change_pct, 2),
+                "high": float(parts[33] or 0) if len(parts) > 33 else None,
+                "low": float(parts[34] or 0) if len(parts) > 34 else None,
+                "time": _fmt_time(parts[30] if len(parts) > 30 else ""),
+            }
+        except Exception:
+            continue
+    return results
+
+
+def _sina_query(codes):
+    url = "https://hq.sinajs.cn/list=" + ",".join(codes)
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
+    try:
+        return _open(url, timeout=8, headers=headers).decode("gbk", errors="replace")
+    except Exception:
+        return ""
+
+
+def _parse_sina(raw):
+    results = {}
+    for line in raw.strip().splitlines():
+        m = re.match(r'var hq_str_([^=]+)="(.*)";?', line.strip())
+        if not m:
+            continue
+        code, fields = m.group(1), m.group(2)
+        p = fields.rstrip('";').split(',')
+        try:
+            if code.startswith('hf_'):
+                # hf_*: current, prev/settle-ish, open, bid, high, low, time, ... date, name
+                price = float(p[0] or 0)
+                base = float((p[7] or p[2] or p[1] or 0))
+                change = price - base if base else 0
+                pct = change / base * 100 if base else 0
+                name = p[13] if len(p) > 13 and p[13] else code
+                if code == 'hf_CHA50CFD':
+                    name = '富时中国A50期货'
+                elif code == 'hf_XAU':
+                    name = '伦敦金'
+                elif code == 'hf_OIL':
+                    name = '布伦特原油'
+                elif code == 'hf_ES':
+                    name = '标普500期货'
+                elif code == 'hf_NQ':
+                    name = '纳斯达克期货'
+                elif code == 'hf_YM':
+                    name = '道琼斯期货'
+                t = f"{p[12]} {p[6]}" if len(p) > 12 else ""
+            else:
+                # USDCNY/DINIW: time,current,prev/open-ish,low,...,name,date
+                price = float(p[1] or 0)
+                base = float((p[2] or p[5] or 0))
+                change = price - base if base else 0
+                pct = change / base * 100 if base else 0
+                name = p[9] if len(p) > 9 and p[9] else code
+                t = f"{p[10]} {p[0]}" if len(p) > 10 else ""
+            results[code] = {"name": name, "price": price, "prev_close": base, "change": round(change, 2), "change_pct": round(pct, 2), "time": t}
+        except Exception:
+            continue
+    return results
+
+
+def _trade_minute_from_hhmm(hhmm):
+    raw = str(hhmm or "").replace(":", "")
+    if len(raw) < 4 or not raw[:4].isdigit():
+        return None
+    try:
+        hour = int(raw[:2])
+        minute = int(raw[2:4])
+    except Exception:
+        return None
+    minutes = hour * 60 + minute
+    am_start, am_end, pm_start, pm_end = 9 * 60 + 30, 11 * 60 + 30, 13 * 60, 15 * 60
+    if minutes < am_start or minutes > pm_end or (am_end < minutes < pm_start):
+        return None
+    if minutes <= am_end:
+        return minutes - am_start
+    return 120 + (minutes - pm_start)
+
+
+def _fetch_minute_line(qt_code):
+    """Fetch intraday minute line for A-share indices.
+
+    The old dashboard sparkline used daily K closes, so the tiny line looked
+    static during the session. Tencent minute/query returns the current trading
+    day's per-minute points and updates as time advances.
+    """
+    if not qt_code.startswith(("sh", "sz")):
+        return []
+    try:
+        raw = _open(MINUTE_URL.format(qt_code=qt_code), timeout=8, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}).decode("utf-8", "replace")
+        data = json.loads(raw)
+        node = data.get("data", {}).get(qt_code, {})
+        rows = (((node.get("data") or {}).get("data")) if isinstance(node.get("data"), dict) else None) or node.get("min_data") or []
+        points = []
+        for row in rows:
+            if isinstance(row, (list, tuple)):
+                if len(row) < 2:
+                    continue
+                hhmm, price_raw = row[0], row[1]
+            else:
+                parts = str(row).split()
+                if len(parts) < 2:
+                    continue
+                hhmm, price_raw = parts[0], parts[1]
+            minute = _trade_minute_from_hhmm(hhmm)
+            if minute is None:
+                continue
+            try:
+                price = float(price_raw)
+            except Exception:
+                continue
+            if price > 0:
+                points.append({"time": str(hhmm), "minute": minute, "price": price})
+        return points
+    except Exception:
+        return []
+
+
+def _fetch_sina_global_minute_line(symbol):
+    """Fetch Sina global futures/spot minute line, e.g. XAU for 伦敦金."""
+    try:
+        raw = _open(
+            SINA_GLOBAL_MINUTE_URL.format(symbol=symbol),
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"},
+        ).decode("utf-8", "replace")
+        m = re.search(r"var\s+\w+\s*=\s*\((.*)\);?\s*$", raw, re.S)
+        if not m:
+            return []
+        payload = json.loads(m.group(1))
+        rows = payload.get("minLine_1d") or []
+        points = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            # First row can be [date, price, market, ..., hh:mm, ..., datetime]
+            # Later rows are usually [hh:mm, price, ..., datetime].
+            time_raw = row[4] if len(str(row[0])) == 10 and len(row) > 4 else row[0]
+            price_raw = row[1]
+            try:
+                price = float(price_raw)
+            except Exception:
+                continue
+            if price > 0:
+                points.append({"time": str(time_raw), "price": price})
+        return points
+    except Exception:
+        return []
+
+
+def _fetch_yahoo_minute_line(symbol):
+    """Fetch 1-minute intraday line for US cash indices from Yahoo Finance."""
+    if not symbol:
+        return []
+    try:
+        url = YAHOO_CHART_URL.format(symbol=urllib.parse.quote(symbol, safe=""))
+        raw = _open(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).decode("utf-8", "replace")
+        payload = json.loads(raw)
+        result = (payload.get("chart", {}).get("result") or [None])[0] or {}
+        timestamps = result.get("timestamp") or []
+        quote = ((result.get("indicators", {}).get("quote") or [{}])[0]) or {}
+        closes = quote.get("close") or []
+        points = []
+        for ts, close in zip(timestamps, closes):
+            try:
+                price = float(close)
+                dt = datetime.fromtimestamp(float(ts), NY_TZ)
+            except Exception:
+                continue
+            if price > 0:
+                points.append({"time": dt.strftime("%H:%M"), "price": price})
+        return points
+    except Exception:
+        return []
+
+
+def _fetch_kline(qt_code, count=45):
+    # 只给 A股指数拉日K，海外/期货接口不共用这个格式
+    if not qt_code.startswith(("sh", "sz")):
+        return []
+    try:
+        raw = _open(KLINE_URL.format(qt_code=qt_code), timeout=8, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}).decode("utf-8", "replace")
+        data = json.loads(raw)
+        day = data.get("data", {}).get(qt_code, {}).get("day", [])
+        return [float(k[2]) for k in day[-count:] if len(k) > 2]
+    except Exception:
+        return []
+
+
+def fetch_indices_data():
+    now = time.time()
+    if _CACHE["data"] is not None and now - _CACHE["ts"] < CACHE_TTL:
+        return _CACHE["data"]
+
+    qt_codes = [code for _, code, _, _, _ in INDEX_DEFS]
+    qt_data = _parse_qt(_qt_query(qt_codes))
+    sina_data = _parse_sina(_sina_query([code for _, code, _, _, _, _ in SINA_DEFS]))
+
+    def build_index_item(defn):
+        key, code, name, group, market_type = defn
+        q = qt_data.get(code, {})
+        minute_line = _fetch_minute_line(code)
+        if not minute_line and market_type == "us_index":
+            minute_line = _fetch_yahoo_minute_line(YAHOO_US_INDEX_SYMBOLS.get(code, ""))
+        sparkline = [p["price"] for p in minute_line] or _fetch_kline(code)
+        return {
+            "key": key, "code": code, "name": name, "group": group, "market_type": market_type,
+            "price": q.get("price", 0),
+            "prev_close": q.get("prev_close", 0),
+            "change": q.get("change", 0),
+            "change_pct": q.get("change_pct", 0),
+            "high": q.get("high"), "low": q.get("low"),
+            "sparkline": sparkline,
+            "minute_line": minute_line,
+            "sparkline_type": "minute" if minute_line else "daily",
+            "time": q.get("time") or time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def build_sina_item(defn):
+        key, code, name, group, market_type, minute_symbol = defn
+        q = sina_data.get(code, {})
+        minute_line = _fetch_sina_global_minute_line(minute_symbol) if minute_symbol else []
+        return {
+            "key": key, "code": code, "name": name, "group": group, "market_type": market_type,
+            "price": q.get("price", 0),
+            "prev_close": q.get("prev_close", 0),
+            "change": q.get("change", 0),
+            "change_pct": q.get("change_pct", 0),
+            "sparkline": [p["price"] for p in minute_line],
+            "minute_line": minute_line,
+            "sparkline_type": "minute" if minute_line else None,
+            "time": q.get("time") or time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        index_items = list(pool.map(build_index_item, INDEX_DEFS))
+        sina_items = list(pool.map(build_sina_item, SINA_DEFS))
+    items = index_items + sina_items
+
+    data = {"items": items, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    data["groups"] = {
+        "domestic": [x for x in items if x.get("group") == "domestic"],
+        "global": [x for x in items if x.get("group") == "global"],
+        "commodity": [x for x in items if x.get("group") == "commodity"],
+    }
+    data["market_groups"] = {
+        "a_index": [x for x in items if x.get("market_type") == "a_index"],
+        "us_index": [x for x in items if x.get("market_type") == "us_index"],
+        "a_futures": [x for x in items if x.get("market_type") == "a_futures"],
+        "us_futures": [x for x in items if x.get("market_type") == "us_futures"],
+        "commodity": [x for x in items if x.get("market_type") == "commodity"],
+    }
+    _CACHE.update({"ts": now, "data": data})
+    return data
+
+
+if __name__ == "__main__":
+    print(json.dumps(fetch_indices_data(), ensure_ascii=False, indent=2))

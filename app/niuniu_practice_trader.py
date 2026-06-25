@@ -1,0 +1,3319 @@
+#!/usr/bin/env python3
+"""牛牛实战：A股模拟账户 + B1候选后的模型决策。
+
+This is a paper-trading simulator, not a real broker integration.
+Rules implemented:
+- Initial capital: 1,000,000 CNY
+- A-share round lot: buy in 100-share lots
+- T+1: shares bought today cannot be sold today
+- No shorting, no negative cash
+- Only book simulated fills during A-share executable windows on weekdays
+- Model decision provider: Crossdesk.ccwu.cc / deepseek-v4-flash, OpenAI-compatible
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import statistics
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, time as dtime
+from pathlib import Path
+from typing import Any
+
+from niuone_paths import get_dashboard_home
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover
+    yaml = None
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        value = os.environ.get(name)
+        return int(value) if value else default
+    except (TypeError, ValueError):
+        return default
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
+
+
+def load_dashboard_env() -> None:
+    allowed = {
+        "DASHBOARD_GROK_MODEL",
+        "DASHBOARD_GROK_BASE_URL",
+        "DASHBOARD_GROK_API_KEY",
+        "DASHBOARD_DECISION_MODEL",
+        "DASHBOARD_DECISION_BASE_URL",
+        "DASHBOARD_DECISION_API_KEY",
+        "DASHBOARD_DECISION_MAX_TOKENS",
+        "DASHBOARD_DECISION_TIMEOUT",
+        "CROSSDESK_BASE_URL",
+        "CROSSDESK_API_KEY",
+    }
+    path = PROJECT_ROOT / "dashboard.env"
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key not in allowed or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip("\"'")
+
+
+load_dashboard_env()
+STATE_FILE = Path(os.environ.get("DASHBOARD_PORTFOLIO_STATE", DASHBOARD_HOME / "cron" / "output" / "niuniu_practice_portfolio.json")).expanduser()
+CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG", DASHBOARD_HOME / "config.yaml")).expanduser()
+STOCK_TOOLS_SCRIPT = Path(os.environ.get("DASHBOARD_CN_STOCK_TOOLS", SCRIPT_DIR / "cn_stock_tools.py")).expanduser()
+INITIAL_CASH = 1_000_000.0
+# 交易费率：万一免五 = 佣金 0.01%，免 5 元最低佣金。
+# A股另计：印花税仅卖出 0.05%，过户费双向 0.001%。
+COMMISSION_RATE = 0.0001
+COMMISSION_MIN = 0.0
+STAMP_DUTY_SELL_RATE = 0.0005
+TRANSFER_FEE_RATE = 0.00001
+REALTIME_QUOTE_MAX_AGE_SECONDS = 8
+EQUITY_HEARTBEAT_MIN_SECONDS = 60
+INTRADAY_CACHE_TTL_SECONDS = 45
+INTRADAY_MAX_POINTS = 260
+TENCENT_MINUTE_URL = "https://ifzq.gtimg.cn/appstock/app/minute/query"
+INTRADAY_CACHE: dict[str, dict[str, Any]] = {}
+
+
+# ====== 大盘环境提示 ======
+
+MARKET_ENV_CACHE: dict[str, Any] = {"ts": 0.0, "bullish": True, "index": "", "ema20": 0.0, "close": 0.0}
+MARKET_ENV_TTL_SECONDS = 300  # 5分钟缓存
+MARKET_SENTIMENT_CACHE: dict[str, Any] = {"ts": 0.0, "limit_up_count": 0, "sentiment": "neutral", "detail": ""}
+MARKET_SENTIMENT_TTL = 600  # 10分钟缓存
+
+
+def check_market_sentiment() -> dict[str, Any]:
+    """用涨停家数代理市场情绪。>80热 / 30-80中性 / <30冷"""
+    global MARKET_SENTIMENT_CACHE
+    now_ts_val = time.time()
+    if now_ts_val - MARKET_SENTIMENT_CACHE.get("ts", 0) < MARKET_SENTIMENT_TTL:
+        return dict(MARKET_SENTIMENT_CACHE)
+    
+    try:
+        import akshare as ak
+        today_str = datetime.now().strftime("%Y%m%d")
+        df = ak.stock_zt_pool_em(date=today_str)
+        zt_count = len(df) if df is not None else 0
+        
+        if zt_count >= 80:
+            sentiment = "hot"
+            detail = f"涨停{zt_count}家→市场🔥活跃，可积极建仓"
+        elif zt_count >= 30:
+            sentiment = "neutral"
+            detail = f"涨停{zt_count}家→市场正常，正常建仓"
+        else:
+            sentiment = "cold"
+            detail = f"涨停{zt_count}家→市场🥶冷清，谨慎建仓"
+        
+        # 统计热门板块（从涨停股中提取行业）
+        hot_sectors = []
+        if df is not None and not df.empty:
+            from collections import Counter
+            sector_counts = Counter()
+            for _, row in df.iterrows():
+                sector = str(row.get("所属行业", "")).strip()
+                if sector and sector != "nan":
+                    sector_counts[sector] += 1
+            hot_sectors = [f"{s}({c}只)" for s, c in sector_counts.most_common(5)]
+        
+        MARKET_SENTIMENT_CACHE = {
+            "ts": now_ts_val, "limit_up_count": zt_count,
+            "sentiment": sentiment, "detail": detail,
+            "hot_sectors": hot_sectors,
+        }
+    except Exception as e:
+        MARKET_SENTIMENT_CACHE = {
+            "ts": now_ts_val, "limit_up_count": 0,
+            "sentiment": "unknown", "detail": f"情绪数据获取失败({e})",
+            "hot_sectors": [],
+        }
+    
+    return dict(MARKET_SENTIMENT_CACHE)
+
+def check_market_environment() -> dict[str, Any]:
+    """检查A股大盘环境，供模型参考。
+    
+    返回 {"bullish": bool, "index": str, "detail": str}
+    """
+    global MARKET_ENV_CACHE
+    now_ts_val = time.time()
+    if now_ts_val - MARKET_ENV_CACHE.get("ts", 0) < MARKET_ENV_TTL_SECONDS:
+        return dict(MARKET_ENV_CACHE)
+    
+    try:
+        import urllib.request as _ur
+        url = "https://ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000001,day,,,60,qfq"
+        req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with _ur.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8", "ignore"))
+        kdata = data.get("data", {}).get("sh000001", {}).get("day", []) or \
+                data.get("data", {}).get("sh000001", {}).get("qfqday", [])
+        if len(kdata) < 25:
+            raise RuntimeError("K线不足")
+        
+        closes = [float(item[2]) for item in kdata if len(item) >= 6]
+        # EMA20
+        k = 2 / 21
+        ema = closes[0]
+        for c in closes[1:]:
+            ema = c * k + ema * (1 - k)
+        
+        latest_close = closes[-1]
+        bullish = latest_close > ema
+        detail = f"上证{latest_close:.0f} {'>' if bullish else '<'} EMA20({ema:.0f})"
+        
+        MARKET_ENV_CACHE = {
+            "ts": now_ts_val, "bullish": bullish,
+            "index": "sh000001", "ema20": round(ema, 2),
+            "close": round(latest_close, 2), "detail": detail,
+        }
+    except Exception as e:
+        # 获取失败时默认允许交易（避免阻断）
+        MARKET_ENV_CACHE = {
+            "ts": now_ts_val, "bullish": True, "index": "sh000001",
+            "detail": f"指数数据获取失败({e})，默认放行",
+        }
+    
+    return dict(MARKET_ENV_CACHE)
+
+
+# ====== 止盈止损规则 ======
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
+SINA_QUOTE_URL = "https://hq.sinajs.cn/list="
+EASTMONEY_STOCK_URL = "https://push2.eastmoney.com/api/qt/stock/get"
+EASTMONEY_UT = "bd1d9ddb04089700cf9c27f6f7426281"
+MODEL = os.environ.get("DASHBOARD_DECISION_MODEL") or "deepseek-v4-pro"
+DECISION_MAX_TOKENS = env_int("DASHBOARD_DECISION_MAX_TOKENS", 6000)
+DECISION_REQUEST_TIMEOUT = env_int("DASHBOARD_DECISION_TIMEOUT", 180)
+PROVIDER_DISPLAY_NAME = "Crossdesk.ccwu.cc"
+CROSSDESK_PROVIDER_NAME = "Crossdesk.ccwu.cc"
+TRADE_LOG_LIMIT = 200
+EQUITY_HISTORY_LIMIT = 500
+
+
+def now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def today_key() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def is_a_share_trading_time(dt: datetime | None = None) -> tuple[bool, str]:
+    """A-share market trading/auction clock, including the opening auction."""
+    dt = dt or datetime.now()
+    if dt.weekday() >= 5:
+        return False, "非交易日（周末）"
+    t = dt.time()
+    if dtime(9, 15) <= t < dtime(9, 25):
+        return True, "早盘集合竞价申报时段"
+    if dtime(9, 30) <= t <= dtime(11, 30):
+        return True, "上午连续竞价交易时段"
+    if dtime(13, 0) <= t < dtime(14, 57):
+        return True, "下午连续竞价交易时段"
+    if dtime(14, 57) <= t <= dtime(15, 0):
+        return True, "尾盘集合竞价交易时段"
+    return False, "非A股交易时段（09:25-09:30为开盘集合竞价静默期；连续竞价09:30开始）"
+
+
+def is_a_share_execution_time(dt: datetime | None = None) -> tuple[bool, str]:
+    """Whether the paper account may immediately book a simulated fill.
+
+    Opening auction orders are not modeled as instant fills: 09:15-09:25 only
+    accepts auction declarations, and 09:25-09:30 is a quiet period before
+    continuous auction starts.
+    """
+    dt = dt or datetime.now()
+    if dt.weekday() >= 5:
+        return False, "非交易日（周末）"
+    t = dt.time()
+    if dtime(9, 15) <= t < dtime(9, 25):
+        return False, "早盘集合竞价申报时段，仅记录观察/委托参考，不模拟即时成交"
+    if dtime(9, 25) <= t < dtime(9, 30):
+        return False, "开盘集合竞价静默期（09:25-09:30），不接受申报且不模拟成交"
+    if dtime(9, 30) <= t <= dtime(11, 30):
+        return True, "上午连续竞价交易时段"
+    if dtime(13, 0) <= t < dtime(14, 57):
+        return True, "下午连续竞价交易时段"
+    if dtime(14, 57) <= t <= dtime(15, 0):
+        return True, "尾盘集合竞价交易时段"
+    return False, "非A股可成交时段（模拟成交仅允许09:30-11:30、13:00-15:00）"
+
+
+def is_a_share_auction_time(dt: datetime | None = None) -> bool:
+    dt = dt or datetime.now()
+    if dt.weekday() >= 5:
+        return False
+    t = dt.time()
+    return dtime(9, 15) <= t < dtime(9, 30) or dtime(14, 57) <= t <= dtime(15, 0)
+
+
+def is_a_share_session_clock(dt: datetime | None = None) -> bool:
+    """Full A-share dashboard session clock: 09:15-15:00, including auction and lunch break."""
+    dt = dt or datetime.now()
+    if dt.weekday() >= 5:
+        return False
+    return dtime(9, 15) <= dt.time() <= dtime(15, 0)
+
+
+def parse_ts(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(str(value or ""), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def default_state() -> dict[str, Any]:
+    return {
+        "created_at": now_ts(),
+        "updated_at": now_ts(),
+        "initial_cash": INITIAL_CASH,
+        "cash": INITIAL_CASH,
+        "positions": {},
+        "trade_log": [],
+        "decision_log": [],
+        "pending_decisions": [],
+        "equity_history": [],
+        "last_b1_generated_at": "",
+        "last_decision_at": "",
+        "last_error": "",
+    }
+
+
+def load_state() -> dict[str, Any]:
+    if not STATE_FILE.exists():
+        state = default_state()
+        save_state(state)
+        return state
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except Exception:
+        state = default_state()
+    base = default_state()
+    base.update(state)
+    base.setdefault("positions", {})
+    base.setdefault("trade_log", [])
+    base.setdefault("decision_log", [])
+    base.setdefault("pending_decisions", [])
+    base.setdefault("equity_history", [])
+    return base
+
+
+def save_state(state: dict[str, Any]) -> None:
+    state["updated_at"] = now_ts()
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Merge append-only logs with the on-disk copy before replacing the file.
+    # Dashboard refreshes can load an older state, spend time refreshing quotes,
+    # then save after the background B1 decision process has appended a new log.
+    # Without this merge, the later dashboard save can erase that decision entry.
+    try:
+        if STATE_FILE.exists():
+            current = json.loads(STATE_FILE.read_text())
+
+            def merge_list(key: str, identity_fields: tuple[str, ...], prefer_state: bool = False) -> None:
+                merged = []
+                seen = set()
+                first = state.get(key) if prefer_state else current.get(key)
+                second = current.get(key) if prefer_state else state.get(key)
+                for item in (first or []) + (second or []):
+                    if not isinstance(item, dict):
+                        continue
+                    ident = tuple(json.dumps(item.get(f, ""), ensure_ascii=False, sort_keys=True) for f in identity_fields)
+                    if ident in seen:
+                        continue
+                    seen.add(ident)
+                    merged.append(item)
+                state[key] = merged
+
+            state_trade_ids = {
+                tuple(json.dumps(item.get(f, ""), ensure_ascii=False, sort_keys=True)
+                      for f in ("time", "action", "code", "shares", "price", "reason"))
+                for item in (state.get("trade_log") or [])
+                if isinstance(item, dict)
+            }
+            current_has_unseen_trades = any(
+                tuple(json.dumps(item.get(f, ""), ensure_ascii=False, sort_keys=True)
+                      for f in ("time", "action", "code", "shares", "price", "reason")) not in state_trade_ids
+                for item in (current.get("trade_log") or [])
+                if isinstance(item, dict)
+            )
+            if current_has_unseen_trades:
+                # A slow dashboard quote refresh can save an old portfolio after
+                # the trade engine has already appended fills. Keep the traded
+                # cash/positions from disk; quote refresh can safely run again.
+                state["cash"] = current.get("cash", state.get("cash"))
+                state["positions"] = current.get("positions", state.get("positions", {}))
+
+            merge_list("decision_log", ("time", "b1_generated_at", "decision"))
+            merge_list("trade_log", ("time", "action", "code", "shares", "price", "reason"))
+            merge_list("pending_decisions", ("id",), prefer_state=True)
+            merge_list("equity_history", ("time",), prefer_state=True)
+            merge_list("daily_equity_history", ("time",), prefer_state=True)
+
+            # Preserve newest B1/decision markers if an older dashboard snapshot is saving late.
+            for key in ("last_b1_generated_at", "last_decision_at"):
+                if str(current.get(key) or "") > str(state.get(key) or ""):
+                    state[key] = current.get(key)
+    except Exception:
+        pass
+
+    tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    tmp.replace(STATE_FILE)
+
+
+def normalize_code(code: str) -> str:
+    code = re.sub(r"\D", "", str(code or ""))[-6:]
+    return code
+
+
+def quote_one(code: str) -> dict[str, Any]:
+    code = normalize_code(code)
+    if not code:
+        return {"code": code, "price": None, "name": ""}
+    script = STOCK_TOOLS_SCRIPT
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script), "quote", code],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return json.loads(proc.stdout)
+    except Exception as exc:
+        return {"code": code, "price": None, "name": "", "error": f"{type(exc).__name__}: {exc}"}
+    return {"code": code, "price": None, "name": "", "error": "quote failed"}
+
+
+def market_symbol(code: str) -> str:
+    code = normalize_code(code)
+    prefix = "sh" if code.startswith(("6", "9")) else ("bj" if code.startswith(("4", "8")) else "sz")
+    return prefix + code
+
+
+def intraday_minute_index(hhmm: str) -> int | None:
+    text = str(hhmm or "").strip().replace(":", "")
+    if len(text) < 4 or not text[:4].isdigit():
+        return None
+    hour = int(text[:2])
+    minute = int(text[2:4])
+    minute_of_day = hour * 60 + minute
+    am_start = 9 * 60 + 30
+    am_end = 11 * 60 + 30
+    pm_start = 13 * 60
+    pm_end = 15 * 60
+    if minute_of_day < am_start or minute_of_day > pm_end or (am_end < minute_of_day < pm_start):
+        return None
+    if minute_of_day <= am_end:
+        return minute_of_day - am_start
+    return 120 + (minute_of_day - pm_start)
+
+
+def parse_intraday_minute_rows(rows: list[Any], prev_close: float | None = None) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    base = float(prev_close or 0)
+    for item in rows:
+        parts = str(item or "").strip().split()
+        if len(parts) < 2:
+            continue
+        minute_idx = intraday_minute_index(parts[0])
+        if minute_idx is None:
+            continue
+        try:
+            price = float(parts[1])
+        except Exception:
+            continue
+        if price <= 0:
+            continue
+        if base <= 0:
+            base = price
+        volume = None
+        amount = None
+        try:
+            volume = float(parts[2]) if len(parts) >= 3 else None
+        except Exception:
+            volume = None
+        try:
+            amount = float(parts[3]) if len(parts) >= 4 else None
+        except Exception:
+            amount = None
+        hhmm = parts[0].replace(":", "")
+        time_text = f"{hhmm[:2]}:{hhmm[2:4]}"
+        points.append({
+            "time": time_text,
+            "minute": minute_idx,
+            "price": round(price, 3),
+            "pct": round((price / base - 1) * 100, 3) if base > 0 else 0.0,
+            "volume": volume,
+            "amount": amount,
+        })
+    return points[-INTRADAY_MAX_POINTS:]
+
+
+def fetch_intraday_minutes(code: str, prev_close: float | None = None) -> dict[str, Any]:
+    code = normalize_code(code)
+    symbol = market_symbol(code)
+    now_value = time.time()
+    cached = INTRADAY_CACHE.get(symbol)
+    if cached and now_value - float(cached.get("ts") or 0) < INTRADAY_CACHE_TTL_SECONDS:
+        return dict(cached.get("data") or {})
+    url = f"{TENCENT_MINUTE_URL}?code={symbol}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        payload = json.loads(resp.read().decode("utf-8", "ignore"))
+    stock_data = ((payload.get("data") or {}).get(symbol) or {}).get("data") or {}
+    raw_rows = stock_data.get("data") or []
+    points = parse_intraday_minute_rows(raw_rows, prev_close=prev_close)
+    if not points:
+        raise RuntimeError("empty intraday minute data")
+    latest = points[-1]
+    data = {
+        "source": "Tencent ifzq minute/query",
+        "updated_at": now_ts(),
+        "symbol": symbol,
+        "prev_close": prev_close,
+        "points": points,
+        "last_price": latest.get("price"),
+        "last_pct": latest.get("pct"),
+    }
+    INTRADAY_CACHE[symbol] = {"ts": now_value, "data": data}
+    return dict(data)
+
+
+def safe_quote_float(value: str) -> float | None:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_quote_price(price: float | None, *fallbacks: float | None) -> float | None:
+    if price and price > 0:
+        return price
+    for fallback in fallbacks:
+        if fallback and fallback > 0:
+            return fallback
+    return None
+
+
+def build_quote(code: str, name: str, price: float, prev_close: float | None, open_price: float | None,
+                high: float | None, low: float | None, turnover_yuan: float | None, source: str,
+                quote_time: str | None = None) -> dict[str, Any]:
+    change = round(price - prev_close, 2) if prev_close else None
+    change_pct = round((change / prev_close) * 100, 2) if change is not None and prev_close else None
+    return {
+        "code": normalize_code(code),
+        "name": name,
+        "price": price,
+        "prev_close": prev_close,
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "change": change,
+        "change_pct": change_pct,
+        "turnover_yuan": turnover_yuan,
+        "quote_time": quote_time or now_ts(),
+        "source": source,
+    }
+
+
+def parse_tencent_quote_line(line: str) -> dict[str, Any] | None:
+    if "=" not in line or "~" not in line:
+        return None
+    key, raw = line.split("=", 1)
+    symbol = key.strip().lstrip("v_")
+    parts = raw.strip().strip('";').split("~")
+    if len(parts) < 38:
+        return None
+    price = safe_quote_float(parts[3])
+    prev_close = safe_quote_float(parts[4])
+    open_price = safe_quote_float(parts[5])
+    high = safe_quote_float(parts[33])
+    low = safe_quote_float(parts[34])
+    turnover_wan = safe_quote_float(parts[37])
+    price = normalize_quote_price(price, prev_close, open_price)
+    if not price:
+        return None
+    return build_quote(
+        code=symbol,
+        name=parts[1] if len(parts) > 1 else "",
+        price=price,
+        prev_close=prev_close,
+        open_price=open_price,
+        high=high,
+        low=low,
+        turnover_yuan=turnover_wan * 10000 if turnover_wan is not None else None,
+        source="Tencent qt realtime quote",
+    )
+
+
+def parse_sina_quote_line(line: str) -> dict[str, Any] | None:
+    if "=" not in line or '"' not in line:
+        return None
+    key, raw = line.split("=", 1)
+    symbol = key.strip().split("hq_str_", 1)[-1]
+    parts = raw.strip().strip('";').split(",")
+    if len(parts) < 32 or not parts[0]:
+        return None
+    open_price = safe_quote_float(parts[1])
+    prev_close = safe_quote_float(parts[2])
+    price = safe_quote_float(parts[3])
+    high = safe_quote_float(parts[4])
+    low = safe_quote_float(parts[5])
+    turnover_yuan = safe_quote_float(parts[9])
+    price = normalize_quote_price(price, prev_close, open_price)
+    if not price:
+        return None
+    quote_time = now_ts()
+    if len(parts) > 31 and parts[30] and parts[31]:
+        quote_time = f"{parts[30]} {parts[31]}"
+    return build_quote(
+        code=symbol,
+        name=parts[0],
+        price=price,
+        prev_close=prev_close,
+        open_price=open_price,
+        high=high,
+        low=low,
+        turnover_yuan=turnover_yuan,
+        source="Sina hq realtime quote",
+        quote_time=quote_time,
+    )
+
+
+def quote_one_as_realtime(code: str) -> dict[str, Any] | None:
+    q = quote_one(code)
+    price = q.get("price") if isinstance(q.get("price"), (int, float)) else None
+    if not price or price <= 0:
+        return None
+    return build_quote(
+        code=code,
+        name=q.get("name") or "",
+        price=float(price),
+        prev_close=q.get("prev_close") if isinstance(q.get("prev_close"), (int, float)) else None,
+        open_price=q.get("open") if isinstance(q.get("open"), (int, float)) else None,
+        high=q.get("high") if isinstance(q.get("high"), (int, float)) else None,
+        low=q.get("low") if isinstance(q.get("low"), (int, float)) else None,
+        turnover_yuan=q.get("turnover_yuan") if isinstance(q.get("turnover_yuan"), (int, float)) else None,
+        source=q.get("source") or "cn_stock_tools quote fallback",
+    )
+
+
+def eastmoney_secid(code: str) -> str:
+    code = normalize_code(code)
+    market = "1" if code.startswith(("6", "9")) else "0"
+    return f"{market}.{code}"
+
+
+def parse_eastmoney_stock(data: dict[str, Any]) -> dict[str, Any] | None:
+    if not data:
+        return None
+    price = data.get("f43")
+    prev_close = data.get("f60")
+    open_price = data.get("f46")
+    high = data.get("f44")
+    low = data.get("f45")
+    price = normalize_quote_price(price if isinstance(price, (int, float)) else None,
+                                  prev_close if isinstance(prev_close, (int, float)) else None,
+                                  open_price if isinstance(open_price, (int, float)) else None)
+    if not price:
+        return None
+    return build_quote(
+        code=str(data.get("f57") or ""),
+        name=str(data.get("f58") or ""),
+        price=float(price),
+        prev_close=prev_close if isinstance(prev_close, (int, float)) else None,
+        open_price=open_price if isinstance(open_price, (int, float)) else None,
+        high=high if isinstance(high, (int, float)) else None,
+        low=low if isinstance(low, (int, float)) else None,
+        turnover_yuan=data.get("f48") if isinstance(data.get("f48"), (int, float)) else None,
+        source="Eastmoney push2 stock/get realtime quote",
+    )
+
+
+def fetch_tencent_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
+    symbols = [market_symbol(code) for code in codes if normalize_code(code)]
+    if not symbols:
+        return {}, ""
+    try:
+        url = TENCENT_QUOTE_URL + ",".join(symbols)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            text = resp.read().decode("gbk", "ignore")
+        quotes = {}
+        for line in text.split(";"):
+            parsed = parse_tencent_quote_line(line)
+            if parsed and parsed.get("code"):
+                quotes[parsed["code"]] = parsed
+        return quotes, ""
+    except Exception as exc:
+        return {}, f"Tencent {type(exc).__name__}: {exc}"
+
+
+def fetch_eastmoney_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
+    normalized = [normalize_code(code) for code in codes if normalize_code(code)]
+    if not normalized:
+        return {}, ""
+    quotes: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    for code in normalized:
+        try:
+            # Eastmoney often closes Python urllib connections on this machine;
+            # curl works reliably, so use it only for this fallback channel.
+            proc = subprocess.run([
+                "curl", "-L", "--max-time", "8", "-sS",
+                EASTMONEY_STOCK_URL,
+                "-H", "User-Agent: Mozilla/5.0",
+                "-H", "Referer: https://quote.eastmoney.com/",
+                "--get",
+                "--data-urlencode", f"secid={eastmoney_secid(code)}",
+                "--data-urlencode", f"ut={EASTMONEY_UT}",
+                "--data-urlencode", "fltt=2",
+                "--data-urlencode", "invt=2",
+                "--data-urlencode", "fields=f43,f57,f58,f60,f169,f170,f46,f44,f45,f47,f48,f50",
+            ], capture_output=True, text=True, timeout=10)
+            if proc.returncode != 0 or not proc.stdout.strip():
+                errors.append(f"{code}:curl{proc.returncode}")
+                continue
+            data = json.loads(proc.stdout)
+            quote = parse_eastmoney_stock((data or {}).get("data") or {})
+            if quote and quote.get("code"):
+                quotes[quote["code"]] = quote
+            else:
+                errors.append(f"{code}:empty")
+        except Exception as exc:
+            errors.append(f"{code}:{type(exc).__name__}")
+    return quotes, ("Eastmoney " + ",".join(errors)) if errors else ""
+
+
+def fetch_sina_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
+    symbols = [market_symbol(code) for code in codes if normalize_code(code)]
+    if not symbols:
+        return {}, ""
+    try:
+        url = SINA_QUOTE_URL + ",".join(symbols)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            text = resp.read().decode("gbk", "ignore")
+        quotes = {}
+        for line in text.splitlines():
+            parsed = parse_sina_quote_line(line)
+            if parsed and parsed.get("code"):
+                quotes[parsed["code"]] = parsed
+        return quotes, ""
+    except Exception as exc:
+        return {}, f"Sina {type(exc).__name__}: {exc}"
+
+
+def fetch_realtime_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    normalized_codes = [normalize_code(code) for code in codes if normalize_code(code)]
+    meta = {"channel_counts": {"tencent": 0, "eastmoney": 0, "sina": 0, "single": 0}, "errors": []}
+    quotes: dict[str, dict[str, Any]] = {}
+    tencent_quotes, tencent_error = fetch_tencent_quotes(normalized_codes)
+    if tencent_error:
+        meta["errors"].append(tencent_error)
+    for code, quote in tencent_quotes.items():
+        if code in normalized_codes and code not in quotes:
+            quotes[code] = quote
+            meta["channel_counts"]["tencent"] += 1
+    missing = [code for code in normalized_codes if code not in quotes]
+    eastmoney_quotes, eastmoney_error = fetch_eastmoney_quotes(missing)
+    if eastmoney_error:
+        meta["errors"].append(eastmoney_error)
+    for code, quote in eastmoney_quotes.items():
+        if code in missing and code not in quotes:
+            quotes[code] = quote
+            meta["channel_counts"]["eastmoney"] += 1
+    missing = [code for code in normalized_codes if code not in quotes]
+    sina_quotes, sina_error = fetch_sina_quotes(missing)
+    if sina_error:
+        meta["errors"].append(sina_error)
+    for code, quote in sina_quotes.items():
+        if code in missing and code not in quotes:
+            quotes[code] = quote
+            meta["channel_counts"]["sina"] += 1
+    missing = [code for code in normalized_codes if code not in quotes]
+    for code in missing:
+        quote = quote_one_as_realtime(code)
+        if quote:
+            quotes[code] = quote
+            meta["channel_counts"]["single"] += 1
+    final_missing = [code for code in normalized_codes if code not in quotes]
+    if final_missing:
+        meta["errors"].append("missing quotes: " + ",".join(final_missing))
+    return quotes, meta
+
+
+def execution_quote(code: str, dt: datetime | None = None) -> dict[str, Any]:
+    dt = dt or datetime.now()
+    if is_a_share_auction_time(dt):
+        quotes, _ = fetch_realtime_quotes([code])
+        quote = quotes.get(normalize_code(code)) or {}
+        price = quote.get("price") if isinstance(quote.get("price"), (int, float)) else None
+        if price and price > 0:
+            return {
+                **quote,
+                "price": float(price),
+                "execution_price_source": f"auction_reference:{quote.get('source') or 'realtime_quote'}",
+            }
+    quote = quote_one(code)
+    price = quote.get("price") if isinstance(quote.get("price"), (int, float)) else None
+    if price and price > 0:
+        return {**quote, "price": float(price), "execution_price_source": quote.get("source") or "quote_one"}
+    return quote
+
+
+def refresh_realtime_prices(state: dict[str, Any]) -> dict[str, Any]:
+    positions = state.get("positions") or {}
+    codes = [normalize_code(code) for code, pos in positions.items() if position_qty(pos) > 0]
+    meta = {"enabled": True, "source": "Tencent→Eastmoney→Sina→single quote redundant realtime", "quote_time": now_ts(),
+            "updated": 0, "fallback": 0, "error": "", "channel_counts": {"tencent": 0, "eastmoney": 0, "sina": 0, "single": 0}}
+    if not codes:
+        state["last_quote_refresh"] = meta
+        return meta
+    quotes, quote_meta = fetch_realtime_quotes(codes)
+    meta["channel_counts"] = quote_meta.get("channel_counts", meta["channel_counts"])
+    errors = quote_meta.get("errors") or []
+    for code in codes:
+        pos = positions.get(code) or positions.get(str(code))
+        quote = quotes.get(code)
+        if not pos or not quote or not quote.get("price"):
+            meta["fallback"] += 1
+            continue
+        pos["last_price"] = quote["price"]
+        pos["quote_time"] = quote["quote_time"]
+        pos["quote_source"] = quote["source"]
+        pos["change_pct"] = quote.get("change_pct")
+        pos["prev_close"] = quote.get("prev_close")
+        if quote.get("high") is not None:
+            pos["day_high"] = quote.get("high")
+        if quote.get("low") is not None:
+            pos["day_low"] = quote.get("low")
+        if quote.get("name"):
+            pos["name"] = pos.get("name") or quote["name"]
+        meta["updated"] += 1
+    if errors:
+        meta["error"] = " | ".join(errors)
+    state["last_quote_refresh"] = meta
+    return meta
+
+
+def refresh_position_intraday(state: dict[str, Any]) -> dict[str, Any]:
+    positions = state.get("positions") or {}
+    meta = {"enabled": True, "source": "Tencent ifzq minute/query", "updated": 0, "error": "", "quote_time": now_ts()}
+    errors: list[str] = []
+    for code, pos in positions.items():
+        if position_qty(pos) <= 0:
+            continue
+        try:
+            prev_close = pos.get("prev_close") if isinstance(pos.get("prev_close"), (int, float)) else None
+            intraday = fetch_intraday_minutes(code, prev_close=prev_close)
+            pos["intraday"] = intraday
+            if intraday.get("last_price"):
+                pos["last_price"] = intraday["last_price"]
+            if intraday.get("last_pct") is not None:
+                pos["change_pct"] = round(float(intraday["last_pct"]), 2)
+            meta["updated"] += 1
+        except Exception as exc:
+            errors.append(f"{code}:{type(exc).__name__}")
+    if errors:
+        meta["error"] = ",".join(errors[:6])
+    state["last_intraday_refresh"] = meta
+    return meta
+
+
+def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
+    positions = state.get("positions") or {}
+    total_mv = 0.0
+    rows = []
+    for code, pos in positions.items():
+        # Use last_price from portfolio state first to avoid network hangs
+        price = pos.get("last_price") or pos.get("avg_cost") or 0
+        qty = int(pos.get("qty") or pos.get("shares") or 0)
+        price_float = float(price or 0)
+        prev_close = pos.get("prev_close")
+        try:
+            prev_close_float = float(prev_close or 0)
+        except Exception:
+            prev_close_float = 0.0
+        mv = price_float * qty
+        cost = float(pos.get("avg_cost") or 0) * qty
+        pnl = mv - cost
+        today_pnl, today_pnl_pct = position_today_pnl(pos, price_float, qty, prev_close_float)
+        change_pct = pos.get("change_pct")
+        if change_pct is None and prev_close_float > 0:
+            change_pct = (price_float / prev_close_float - 1) * 100
+        day_high = pos.get("day_high") if pos.get("day_high") is not None else pos.get("high")
+        day_low = pos.get("day_low") if pos.get("day_low") is not None else pos.get("low")
+        try:
+            day_high_float = float(day_high or 0)
+        except Exception:
+            day_high_float = 0.0
+        try:
+            day_low_float = float(day_low or 0)
+        except Exception:
+            day_low_float = 0.0
+        day_high_pct = (day_high_float / prev_close_float - 1) * 100 if day_high_float > 0 and prev_close_float > 0 else None
+        day_low_pct = (day_low_float / prev_close_float - 1) * 100 if day_low_float > 0 and prev_close_float > 0 else None
+        total_mv += mv
+        row = {
+            "code": code,
+            "name": pos.get("name") or "",
+            "qty": qty,
+            "available_qty": available_to_sell(pos),
+            "avg_cost": pos.get("avg_cost") or 0,
+            "last_price": price,
+            "day_high": day_high,
+            "day_low": day_low,
+            "day_high_pct": round(day_high_pct, 2) if day_high_pct is not None else None,
+            "day_low_pct": round(day_low_pct, 2) if day_low_pct is not None else None,
+            "quote_time": pos.get("quote_time") or "",
+            "quote_source": pos.get("quote_source") or "state_last_price",
+            "change_pct": round(float(change_pct), 2) if isinstance(change_pct, (int, float)) else change_pct,
+            "prev_close": prev_close,
+            "today_pnl": round(today_pnl, 2) if today_pnl is not None else None,
+            "today_pnl_pct": round(today_pnl_pct, 2) if today_pnl_pct is not None else None,
+            "market_value": round(mv, 2),
+            "pnl": round(pnl, 2),
+            "pnl_pct": round((pnl / cost * 100), 2) if cost > 0 else 0,
+            "buy_date_lots": pos.get("buy_date_lots") or {},
+            "exit_state": {
+                "highest_price": pos.get("highest_price"),
+                "max_pnl_pct": pos.get("max_pnl_pct"),
+                "bbi": pos.get("bbi"),
+                "bbi_distance_pct": pos.get("bbi_distance_pct"),
+                "bbi_break_days": pos.get("bbi_break_days"),
+                "atr20": pos.get("atr20"),
+                "low10": pos.get("low10"),
+                "chandelier_stop": pos.get("chandelier_stop"),
+                "trailing_gap_pct": pos.get("trailing_gap_pct"),
+                "shaofu_stop_price": pos.get("shaofu_stop_price"),
+                "sell_score": pos.get("sell_score"),
+                "sell_score_reason": pos.get("sell_score_reason"),
+                "z_white": pos.get("z_white"),
+                "z_yellow": pos.get("z_yellow"),
+                "z_white_break_days": pos.get("z_white_break_days"),
+                "z_dead_cross": pos.get("z_dead_cross"),
+                "s123_signal": pos.get("s123_signal"),
+                "s123_reason": pos.get("s123_reason"),
+                "chuhuo_wushi": pos.get("chuhuo_wushi"),
+                "luzhu_half_signal": pos.get("luzhu_half_signal"),
+            },
+        }
+        pos["last_price"] = price
+        rows.append(row)
+    cash = float(state.get("cash") or 0)
+    total_equity = cash + total_mv
+    return {
+        "generated_at": now_ts(),
+        "initial_cash": float(state.get("initial_cash") or INITIAL_CASH),
+        "cash": round(cash, 2),
+        "market_value": round(total_mv, 2),
+        "total_equity": round(total_equity, 2),
+        "total_pnl": round(total_equity - float(state.get("initial_cash") or INITIAL_CASH), 2),
+        "total_pnl_pct": round((total_equity / float(state.get("initial_cash") or INITIAL_CASH) - 1) * 100, 2),
+        "positions": rows,
+        "trade_log": list(reversed(state.get("trade_log", [])[-TRADE_LOG_LIMIT:])),
+        "decision_log": list(reversed(state.get("decision_log", [])[-50:])),
+        "pending_decisions": [
+            item for item in state.get("pending_decisions", [])
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ],
+        "today_sold_stocks": state.get("today_sold_stocks", []),
+        "today_sold_quote_refresh": state.get("today_sold_quote_refresh", {}),
+        "equity_history": state.get("equity_history", [])[-EQUITY_HISTORY_LIMIT:],
+        "last_b1_generated_at": state.get("last_b1_generated_at") or "",
+        "last_decision_at": state.get("last_decision_at") or "",
+        "last_quote_refresh": state.get("last_quote_refresh") or {},
+        "last_intraday_refresh": state.get("last_intraday_refresh") or {},
+        "last_error": state.get("last_error") or "",
+    }
+
+
+def available_to_sell(pos: dict[str, Any]) -> int:
+    lots = pos.get("buy_date_lots") or {}
+    qty = int(pos.get("qty") or pos.get("shares") or 0)
+    # Legacy positions created before lot tracking are historical holdings.
+    if not lots:
+        return qty
+    today = today_key()
+    total = 0
+    for date, lot_qty in lots.items():
+        if date != today:
+            total += int(lot_qty or 0)
+    return min(qty, total)
+
+
+def position_today_pnl(pos: dict[str, Any], price: float, qty: int, prev_close: float) -> tuple[float | None, float | None]:
+    if qty <= 0:
+        return None, None
+    avg_cost = float(pos.get("avg_cost") or 0)
+    lots = pos.get("buy_date_lots") or {}
+    today_qty = min(qty, int(lots.get(today_key(), 0) or 0))
+    historical_qty = max(0, qty - today_qty)
+    pnl = 0.0
+    base = 0.0
+
+    if historical_qty > 0:
+        if prev_close <= 0:
+            return None, None
+        pnl += (price - prev_close) * historical_qty
+        base += prev_close * historical_qty
+
+    if today_qty > 0:
+        if avg_cost <= 0:
+            return None, None
+        pnl += (price - avg_cost) * today_qty
+        base += avg_cost * today_qty
+
+    if base <= 0:
+        return None, None
+    return pnl, pnl / base * 100
+
+
+def calc_trade_fees(amount: float, side: str) -> dict[str, float]:
+    """Calculate A-share paper-trading fees for 万一免五 account."""
+    amount = float(amount or 0)
+    commission = max(amount * COMMISSION_RATE, COMMISSION_MIN)
+    transfer_fee = amount * TRANSFER_FEE_RATE
+    stamp_duty = amount * STAMP_DUTY_SELL_RATE if side.upper() == "SELL" else 0.0
+    total_fee = commission + transfer_fee + stamp_duty
+    return {
+        "commission": round(commission, 2),
+        "transfer_fee": round(transfer_fee, 2),
+        "stamp_duty": round(stamp_duty, 2),
+        "total_fee": round(total_fee, 2),
+    }
+
+
+def position_qty(pos: dict[str, Any]) -> int:
+    return int(pos.get("qty") or pos.get("shares") or 0)
+
+
+def record_equity(state: dict[str, Any]) -> None:
+    snap = enrich_portfolio(state)
+    history = state.setdefault("equity_history", [])
+    now = now_ts()
+    today = now[:10]
+    
+    # 获取今天已有的所有记录
+    today_records = [h for h in history if h.get("time", "").startswith(today)]
+    
+    # 获取每日结算净值历史（按天存储）
+    daily_history = state.setdefault("daily_equity_history", [])
+    
+    # 动态降采样保存日内点：
+    # 每2分钟保存一次，或者收盘(15:00)时强制保存
+    should_save = False
+    is_closing_point = False
+    
+    if not today_records:
+        should_save = True
+    else:
+        last_time_str = today_records[-1].get("time", "")
+        if last_time_str:
+            import datetime
+            try:
+                last_dt = datetime.datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
+                now_dt = datetime.datetime.strptime(now, "%Y-%m-%d %H:%M:%S")
+                if (now_dt - last_dt).total_seconds() >= 120:
+                    should_save = True
+                elif "15:00:" in now and "15:00:" not in last_time_str:
+                    should_save = True
+                    is_closing_point = True
+            except Exception:
+                should_save = True
+                
+    if should_save:
+        pt = {
+            "time": now,
+            "equity": snap["total_equity"],
+            "cash": snap["cash"],
+            "market_value": snap["market_value"],
+            "pnl_pct": snap["total_pnl_pct"],
+        }
+        history.append(pt)
+        state["equity_history"] = history[-2000:]
+        
+        # 每日结算逻辑：如果是 15:00 之后的第一个点，或者当天最后一次刷新
+        # 我们可以用当天的最后一条记录更新 daily_history
+        if daily_history and daily_history[-1].get("time", "").startswith(today):
+            # 如果今天已经有记录，覆盖为最新（收盘价）
+            daily_history[-1] = pt
+        else:
+            # 新的一天，添加记录
+            daily_history.append(pt)
+        
+        # 同步写入 SQLite
+        try:
+            from niuniu_db import record_daily_equity as _record_db
+            _record_db(pt)
+        except Exception:
+            pass
+
+
+def rebuild_intraday_equity_curve(state: dict[str, Any], today: str | None = None) -> bool:
+    """Rebuild today's account equity from per-position minute prices.
+
+    This keeps dashboard refreshes accurate without executing trades. It is most
+    useful after data repair, where sparse heartbeat points can otherwise make
+    the intraday curve look flat or jumpy.
+    """
+    today = today or today_key()
+    if any(str(t.get("time", "")).startswith(today) for t in state.get("trade_log", []) if isinstance(t, dict)):
+        return False
+    cash = float(state.get("cash") or 0)
+    initial_cash = float(state.get("initial_cash") or INITIAL_CASH)
+    positions = state.get("positions") or {}
+
+    minute_prices: dict[str, dict[int, tuple[str, float]]] = {}
+    for code, pos in positions.items():
+        if position_qty(pos) <= 0:
+            continue
+        series: dict[int, tuple[str, float]] = {}
+        for point in ((pos.get("intraday") or {}).get("points") or []):
+            minute = point.get("minute")
+            price = point.get("price")
+            time_text = point.get("time")
+            if isinstance(minute, int) and isinstance(price, (int, float)) and time_text:
+                series[int(minute)] = (str(time_text), float(price))
+        if series:
+            minute_prices[code] = series
+
+    if not minute_prices:
+        return False
+
+    last_price_by_code: dict[str, float] = {}
+    rebuilt: list[dict[str, Any]] = []
+    all_minutes = sorted(set().union(*(set(series.keys()) for series in minute_prices.values())))
+    for minute in all_minutes:
+        time_text = ""
+        for code, series in minute_prices.items():
+            if minute in series:
+                time_text, price = series[minute]
+                last_price_by_code[code] = price
+        if len(last_price_by_code) < len(minute_prices) or not time_text:
+            continue
+
+        market_value = 0.0
+        for code, pos in positions.items():
+            qty = position_qty(pos)
+            if qty <= 0:
+                continue
+            price = last_price_by_code.get(code)
+            if price is None:
+                break
+            market_value += qty * price
+        else:
+            equity = cash + market_value
+            rebuilt.append({
+                "time": f"{today} {time_text}:00",
+                "equity": round(equity, 2),
+                "cash": round(cash, 2),
+                "market_value": round(market_value, 2),
+                "pnl_pct": round((equity / initial_cash - 1) * 100, 2) if initial_cash > 0 else 0.0,
+            })
+
+    if len(rebuilt) < 2:
+        return False
+
+    for code, price in last_price_by_code.items():
+        if code in positions:
+            positions[code]["last_price"] = round(price, 3)
+
+    history = [h for h in state.get("equity_history", []) if not str(h.get("time", "")).startswith(today)]
+    history.extend(rebuilt)
+    state["equity_history"] = history[-2000:]
+
+    daily_history = [h for h in state.get("daily_equity_history", []) if not str(h.get("time", "")).startswith(today)]
+    daily_history.append(rebuilt[-1])
+    state["daily_equity_history"] = daily_history[-EQUITY_HISTORY_LIMIT:]
+
+    try:
+        from niuniu_db import record_daily_equity as _record_db
+        _record_db(rebuilt[-1])
+    except Exception:
+        pass
+    return True
+
+
+def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -> list[dict[str, Any]]:
+    """Aggregate today's SELL trades and refresh quotes for post-sale tracking."""
+    today = today or today_key()
+    sold: dict[str, dict[str, Any]] = {}
+    for trade in state.get("trade_log", []) or []:
+        if not isinstance(trade, dict):
+            continue
+        if str(trade.get("action") or "").upper() != "SELL":
+            continue
+        if not str(trade.get("time") or "").startswith(today):
+            continue
+        code = normalize_code(trade.get("code") or "")
+        shares = int(trade.get("shares") or 0)
+        if not code or shares <= 0:
+            continue
+        row = sold.setdefault(code, {
+            "code": code,
+            "name": trade.get("name") or "",
+            "shares": 0,
+            "sell_amount": 0.0,
+            "net_proceeds": 0.0,
+            "realized_pnl": 0.0,
+            "fee": 0.0,
+            "reasons": [],
+            "first_sell_time": trade.get("time") or "",
+            "last_sell_time": trade.get("time") or "",
+        })
+        amount = float(trade.get("amount") or (float(trade.get("price") or 0) * shares))
+        fee = float(trade.get("fee") or 0)
+        net_proceeds = float(trade.get("net_proceeds") or (amount - fee))
+        pnl = float(trade.get("pnl") or 0)
+        row["shares"] += shares
+        row["sell_amount"] += amount
+        row["net_proceeds"] += net_proceeds
+        row["realized_pnl"] += pnl
+        row["fee"] += fee
+        row["last_sell_time"] = max(str(row.get("last_sell_time") or ""), str(trade.get("time") or ""))
+        reason = str(trade.get("reason") or "").strip()
+        if reason and reason not in row["reasons"]:
+            row["reasons"].append(reason)
+
+    if not sold:
+        state["today_sold_stocks"] = []
+        state["today_sold_quote_refresh"] = {"quote_time": now_ts(), "updated": 0}
+        return []
+
+    quote_map: dict[str, dict[str, Any]] = {}
+    quote_meta: dict[str, Any] = {"quote_time": now_ts(), "updated": 0}
+    try:
+        quote_map, quote_meta = fetch_realtime_quotes(sorted(sold.keys()))
+    except Exception as exc:
+        quote_meta = {"quote_time": now_ts(), "updated": 0, "error": f"{type(exc).__name__}: {exc}"}
+
+    rows: list[dict[str, Any]] = []
+    for code, row in sold.items():
+        shares = int(row["shares"] or 0)
+        avg_sell_price = (float(row["sell_amount"]) / shares) if shares > 0 else 0.0
+        cost_basis = float(row["net_proceeds"]) - float(row["realized_pnl"])
+        quote = quote_map.get(code) or {}
+        current_price = quote.get("price") if isinstance(quote.get("price"), (int, float)) else None
+        change_after_sell = ((float(current_price) / avg_sell_price - 1) * 100) if current_price and avg_sell_price > 0 else None
+        after_sell_pnl = ((float(current_price) - avg_sell_price) * shares) if current_price and shares > 0 else None
+        realized_pnl = float(row["realized_pnl"])
+        rows.append({
+            "code": code,
+            "name": row.get("name") or quote.get("name") or "",
+            "shares": shares,
+            "avg_sell_price": round(avg_sell_price, 3),
+            "current_price": round(float(current_price), 3) if current_price else None,
+            "current_change_pct": quote.get("change_pct"),
+            "realized_pnl": round(realized_pnl, 2),
+            "realized_pnl_pct": round((realized_pnl / cost_basis * 100), 2) if cost_basis > 0 else 0,
+            "sell_amount": round(float(row["sell_amount"]), 2),
+            "net_proceeds": round(float(row["net_proceeds"]), 2),
+            "fee": round(float(row["fee"]), 2),
+            "change_after_sell_pct": round(change_after_sell, 2) if change_after_sell is not None else None,
+            "after_sell_pnl": round(after_sell_pnl, 2) if after_sell_pnl is not None else None,
+            "first_sell_time": row.get("first_sell_time") or "",
+            "last_sell_time": row.get("last_sell_time") or "",
+            "reason": "；".join(row.get("reasons") or []),
+            "quote_time": quote.get("quote_time") or quote_meta.get("quote_time") or "",
+            "quote_source": quote.get("source") or "",
+        })
+    rows.sort(key=lambda item: item.get("last_sell_time") or "", reverse=True)
+    state["today_sold_stocks"] = rows
+    state["today_sold_quote_refresh"] = quote_meta
+    return rows
+
+
+# ====== 自动止盈止损规则 ======
+
+STOP_LOSS_PCT = -6.0       # 止损线（基准值，会根据市场情绪自适应调整）
+TAKE_PROFIT_PCT = 12.0     # 止盈线（清仓）
+TAKE_PROFIT_PARTIAL_PCT = 8.0   # 第一批止盈（卖一半）
+TAKE_PROFIT_PARTIAL_RATIO = 0.5  # 第一批卖出的比例
+TRAILING_STOP_ACTIVATE_PCT = 5.0  # 移动止损激活线
+TRAILING_MIN_GIVEBACK_PCT = 3.0   # 盈利回撤最小容忍
+TRAILING_MAX_GIVEBACK_PCT = 6.5   # 盈利回撤最大容忍
+TRAILING_GIVEBACK_RATIO = 0.45    # 峰值盈利回撤比例
+S1_FAIL_BBI_PCT = -1.0            # S1/B1右侧确认失效：跌破BBI缓冲
+S1_FAIL_CONFIRM_DAYS = 2          # 连续跌破BBI天数确认
+DONCHIAN_EXIT_LOOKBACK_DAYS = 10  # 经典趋势系统：跌破近N日低点退出
+ATR_LOOKBACK_DAYS = 20
+ATR_CHANDELIER_MULT = 3.0
+ENTRY_STOP_TICK_BUFFER = 0.03     # Z哥“只输一根K线”：买入K低点下方3分钱缓冲
+NO_PROGRESS_HOLD_DAYS = 3         # 买入后没涨，最少观察天数
+NO_PROGRESS_MAX_PNL_PCT = 1.0
+LUZHU_MEDIUM_YANG_PCT = 2.0       # 卤煮：连续中/大阳线的保守量化阈值
+SELL_SCORE_REDUCE_THRESHOLD = 3
+SELL_SCORE_EXIT_THRESHOLD = 2
+S1_HIGH_ZONE_PCT = 0.90
+S1_UPTREND_MIN_PCT = 15.0
+S1_VOLUME_RATIO = 1.5
+S1_CLOSE_LOW_POSITION = 0.30
+MAX_HOLD_DAYS = 25         # 最大持仓天数
+BBI_BREAKDOWN_PCT = -2.0   # 收盘跌破BBI -2%触发
+DAILY_LOSS_BUDGET_PCT = -3.0  # 单日最大亏损预算
+CONSENSUS_POSITION_BOOST = 1.5  # 策略共识≥3时仓位放大系数
+SELF_OPTIMIZATION_COOLDOWN = 3600  # 自优化最小间隔（秒）
+HIGH_VOL_REDUCTION = 0.7  # 高波动率仓位缩小系数
+LOW_VOL_BOOST = 1.3       # 低波动率仓位放大系数
+
+
+def get_volatility_adjustment(code: str) -> float:
+    """根据个股20日波动率调整仓位。高波缩仓，低波加仓。"""
+    try:
+        import json, urllib.request as _ur
+        prefix = "sh" if code.startswith(("6","9")) else "sz"
+        url = f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{code},day,,,25,qfq"
+        req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with _ur.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8","ignore"))
+        kd = data.get("data",{}).get(f"{prefix}{code}",{}).get("day",[]) or \
+             data.get("data",{}).get(f"{prefix}{code}",{}).get("qfqday",[])
+        if len(kd) < 22: return 1.0
+        closes = [float(x[2]) for x in kd[-21:] if len(x) >= 6]
+        returns = [(closes[i]/closes[i-1]-1)*100 for i in range(1,len(closes))]
+        vol = statistics.stdev(returns) if len(returns) > 1 else 0
+        
+        if vol > 3.5: return HIGH_VOL_REDUCTION       # 高波(>3.5%)→仓位×0.7
+        elif vol < 1.5: return LOW_VOL_BOOST           # 低波(<1.5%)→仓位×1.3
+        return 1.0
+    except Exception:
+        return 1.0
+
+
+def classify_buy_strategy(reason: str = "", candidate: dict[str, Any] | None = None) -> str:
+    """Classify the entry tactic independently from the later exit rule."""
+    if candidate:
+        raw_strategy = str(candidate.get("buy_strategy") or candidate.get("best_strategy") or candidate.get("strategy") or "").strip()
+        if raw_strategy in {
+            "trend_pullback", "breakout", "shaofu_b1", "b2_confirm",
+            "b3_accelerate", "super_b1", "balanced_momentum", "legacy_b1",
+        }:
+            return raw_strategy
+        reason = " ".join([
+            reason,
+            str(candidate.get("score_basis") or ""),
+            str(candidate.get("best_strategy") or ""),
+            str(candidate.get("verdict") or ""),
+        ])
+
+    text = str(reason or "")
+    if "超级B1" in text or "super_b1" in text:
+        return "super_b1"
+    if "B3" in text or "b3_accelerate" in text:
+        return "b3_accelerate"
+    if "B2" in text or "b2_confirm" in text:
+        return "b2_confirm"
+    if "趋势回踩" in text or "trend_pullback" in text or ("回踩" in text and "卖出" not in text):
+        return "trend_pullback"
+    if "突破" in text or "breakout" in text:
+        return "breakout"
+    if "少妇B1" in text or "shaofu_b1" in text:
+        return "shaofu_b1"
+    if "中庸动量" in text:
+        return "balanced_momentum"
+    if "严格B1" in text or "高匹配B1" in text or "B1" in text:
+        return "legacy_b1"
+    return "unknown_buy"
+
+
+def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
+    """Classify why a position was closed, separate from the entry tactic."""
+    signal = str(exit_signal or "").strip()
+    if signal:
+        if signal in {"shaofu_entry_stop", "hard_stop"}:
+            return "stop_loss"
+        if signal in {"take_profit", "partial_take_profit", "luzhu_half"}:
+            return "take_profit"
+        if signal in {"profit_giveback", "atr_chandelier", "breakeven_trail", "profit_to_loss"}:
+            return "profit_protection"
+        if signal in {"s1_distribution", "s2_macd_divergence", "s3_last_escape", "chuhuo_wushi"}:
+            return "top_escape"
+        if signal in {
+            "z_dead_cross", "z_white_break", "s1_reclaim_failed", "s1_bbi_failed",
+            "bbi_breakdown", "donchian_low_break",
+        }:
+            return "technical_break"
+        if signal in {"sell_score_exit", "sell_score_reduce"}:
+            return "sell_score"
+        if signal in {"no_progress", "max_hold_days", "stale_loser", "stale_below_bbi"}:
+            return "no_progress"
+
+    text = str(reason or "")
+    if "止损" in text or "破入场止损" in text:
+        return "stop_loss"
+    if "止盈清仓" in text or "第一批止盈" in text or "卤煮止盈" in text:
+        return "take_profit"
+    if "峰值回撤" in text or "ATR吊灯" in text or "移动止损保本" in text or "盈转亏" in text:
+        return "profit_protection"
+    if "S1" in text or "S2" in text or "S3" in text or "逃顶" in text or "出货五式" in text:
+        return "top_escape"
+    if "卖出评分" in text or "防卖飞评分" in text:
+        return "sell_score"
+    if "BBI" in text or "白线" in text or "死叉" in text or "低点跌破" in text or "趋势确认失效" in text:
+        return "technical_break"
+    if "未兑现" in text or "低效持仓" in text or "持仓到期" in text or "次日不涨" in text:
+        return "no_progress"
+    if "调仓" in text or "仓位" in text or "硬约束" in text:
+        return "position_adjust"
+    if "模型卖出" in text:
+        return "model_sell"
+    return "other_exit"
+
+
+def _empty_perf_bucket() -> dict[str, Any]:
+    return {
+        "wins": 0, "losses": 0, "flats": 0, "total_pnl": 0.0, "trades": 0,
+        "open_wins": 0, "open_losses": 0, "open_flats": 0, "open_pnl": 0.0, "open_trades": 0,
+        "items": [],
+    }
+
+
+def _add_perf_trade(perf: dict[str, dict[str, Any]], key: str, pnl: float, item: dict[str, Any] | None = None) -> None:
+    bucket = perf.setdefault(key or "unknown", _empty_perf_bucket())
+    bucket["trades"] += 1
+    if pnl > 0:
+        bucket["wins"] += 1
+    elif pnl < 0:
+        bucket["losses"] += 1
+    else:
+        bucket["flats"] += 1
+    bucket["total_pnl"] += pnl
+    if item:
+        bucket.setdefault("items", []).append(item)
+
+
+def _add_perf_open_position(perf: dict[str, dict[str, Any]], key: str, pnl: float) -> None:
+    bucket = perf.setdefault(key or "unknown", _empty_perf_bucket())
+    bucket["open_trades"] += 1
+    if pnl > 0:
+        bucket["open_wins"] += 1
+    elif pnl < 0:
+        bucket["open_losses"] += 1
+    else:
+        bucket["open_flats"] += 1
+    bucket["open_pnl"] += pnl
+
+
+def _finalize_perf(perf: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    finalized: dict[str, dict[str, Any]] = {}
+    for key, bucket in perf.items():
+        total = int(bucket.get("trades") or 0)
+        wins = int(bucket.get("wins") or 0)
+        open_total = int(bucket.get("open_trades") or 0)
+        open_wins = int(bucket.get("open_wins") or 0)
+        row = dict(bucket)
+        row["total_pnl"] = round(float(row.get("total_pnl") or 0), 2)
+        row["open_pnl"] = round(float(row.get("open_pnl") or 0), 2)
+        row["combined_pnl"] = round(float(row.get("total_pnl") or 0) + float(row.get("open_pnl") or 0), 2)
+        row["trigger_count"] = total
+        row["win_rate"] = round(wins / total * 100, 1) if total > 0 else 0
+        row["open_win_rate"] = round(open_wins / open_total * 100, 1) if open_total > 0 else 0
+        row["avg_pnl"] = round(float(row["total_pnl"]) / total, 2) if total > 0 else 0
+        row["items"] = sorted(row.get("items") or [], key=lambda item: str(item.get("time") or ""), reverse=True)
+        finalized[key] = row
+    return finalized
+
+
+def latest_buy_strategy_for_code(state: dict[str, Any], code: str) -> str:
+    code = normalize_code(code)
+    for trade in reversed(state.get("trade_log", []) or []):
+        if str(trade.get("action") or "").upper() != "BUY":
+            continue
+        if normalize_code(trade.get("code") or "") != code:
+            continue
+        return str(trade.get("buy_strategy") or classify_buy_strategy(str(trade.get("reason") or "")))
+    return ""
+
+
+def track_strategy_performance(state: dict[str, Any]) -> dict[str, Any]:
+    """Track entry tactics with open P/L, and closed exits by rule."""
+    trade_log = sorted(
+        [t for t in (state.get("trade_log", []) or []) if isinstance(t, dict)],
+        key=lambda t: str(t.get("time") or ""),
+    )
+
+    entry_perf: dict[str, dict[str, Any]] = {}
+    exit_perf: dict[str, dict[str, Any]] = {}
+    latest_entry_by_code: dict[str, str] = {}
+    total_closed = 0
+    total_pnl = 0.0
+    total_open_positions = 0
+    total_open_pnl = 0.0
+
+    for trade in trade_log:
+        action = str(trade.get("action") or "").upper()
+        code = normalize_code(trade.get("code") or "")
+        reason = str(trade.get("reason") or "")
+        if action == "BUY":
+            latest_entry_by_code[code] = str(trade.get("buy_strategy") or classify_buy_strategy(reason))
+            continue
+        if action != "SELL":
+            continue
+
+        pnl = float(trade.get("pnl") or 0)
+        entry_strategy = str(trade.get("buy_strategy") or trade.get("entry_strategy") or latest_entry_by_code.get(code) or "")
+        if not entry_strategy:
+            entry_strategy = classify_buy_strategy(reason)
+        exit_rule = str(trade.get("exit_rule") or classify_exit_rule(reason, trade.get("exit_signal")))
+        exit_item = {
+            "time": trade.get("time") or "",
+            "code": code,
+            "name": trade.get("name") or "",
+            "shares": int(trade.get("shares") or 0),
+            "price": round(float(trade.get("price") or 0), 3),
+            "pnl": round(pnl, 2),
+            "pnl_pct": trade.get("pnl_pct"),
+            "reason": reason,
+            "buy_strategy": entry_strategy,
+        }
+
+        _add_perf_trade(entry_perf, entry_strategy, pnl)
+        _add_perf_trade(exit_perf, exit_rule, pnl, exit_item)
+        total_closed += 1
+        total_pnl += pnl
+
+    for code, pos in (state.get("positions") or {}).items():
+        if not isinstance(pos, dict):
+            continue
+        qty = position_qty(pos)
+        if qty <= 0:
+            continue
+        try:
+            avg_cost = float(pos.get("avg_cost") or 0)
+            price = float(pos.get("last_price") or pos.get("close") or avg_cost or 0)
+        except Exception:
+            continue
+        if avg_cost <= 0 or price <= 0:
+            continue
+        norm_code = normalize_code(code or pos.get("code") or "")
+        entry_strategy = str(
+            pos.get("buy_strategy")
+            or latest_entry_by_code.get(norm_code)
+            or classify_buy_strategy(str(pos.get("entry_reason") or ""))
+        )
+        open_pnl = (price - avg_cost) * qty
+        _add_perf_open_position(entry_perf, entry_strategy, open_pnl)
+        total_open_positions += 1
+        total_open_pnl += open_pnl
+
+    return {
+        "buy_strategy": _finalize_perf(entry_perf),
+        "exit_rule": _finalize_perf(exit_perf),
+        "summary": {
+            "closed_trades": total_closed,
+            "total_pnl": round(total_pnl, 2),
+            "open_positions": total_open_positions,
+            "open_pnl": round(total_open_pnl, 2),
+            "combined_pnl": round(total_pnl + total_open_pnl, 2),
+        },
+    }
+
+
+def get_adaptive_params() -> dict[str, float]:
+    """根据市场情绪自适应调整参数。"""
+    sent = check_market_sentiment()
+    if sent["sentiment"] == "hot":
+        return {"stop_loss": -7.0, "position_mult": 1.2, "label": "🔥热-积极"}
+    elif sent["sentiment"] == "cold":
+        return {"stop_loss": -4.0, "position_mult": 0.6, "label": "🥶冷-保守"}
+    else:
+        return {"stop_loss": STOP_LOSS_PCT, "position_mult": 1.0, "label": "中性"}
+
+
+def check_daily_loss_budget(state: dict[str, Any]) -> tuple[bool, float]:
+    """检查今日累计亏损是否超过预算。"""
+    trade_log = state.get("trade_log", [])
+    today = today_key()
+    today_pnl = sum(t.get("pnl", 0) or 0 for t in trade_log if t.get("time","").startswith(today) and t.get("action")=="SELL")
+    positions = state.get("positions") or {}
+    unrealized = sum(
+        (float(p.get("last_price") or p.get("avg_cost") or 0) - float(p.get("avg_cost") or 0))
+        * int(p.get("qty") or p.get("shares") or 0)
+        for p in positions.values()
+    )
+    total_eq = float(state.get("initial_cash") or INITIAL_CASH) + today_pnl + unrealized
+    pnl_pct = (total_eq / float(state.get("initial_cash") or INITIAL_CASH) - 1) * 100
+    return pnl_pct <= DAILY_LOSS_BUDGET_PCT, pnl_pct
+
+
+def holding_days(pos: dict[str, Any], today: str | None = None) -> int:
+    """Calendar holding days based on the earliest open lot."""
+    today = today or today_key()
+    lots = pos.get("buy_date_lots") or {}
+    open_dates = sorted(date for date, qty in lots.items() if int(qty or 0) > 0)
+    if not open_dates:
+        return 0
+    try:
+        return (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(open_dates[0], "%Y-%m-%d")).days
+    except Exception:
+        return 0
+
+
+def _compute_atr(rows: list[dict[str, Any]], lookback: int = ATR_LOOKBACK_DAYS) -> float | None:
+    if len(rows) < 2:
+        return None
+    ranges = []
+    for i in range(1, len(rows)):
+        high = float(rows[i].get("high") or 0)
+        low = float(rows[i].get("low") or 0)
+        prev_close = float(rows[i - 1].get("close") or 0)
+        if high <= 0 or low <= 0 or prev_close <= 0:
+            continue
+        ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+    if not ranges:
+        return None
+    return statistics.mean(ranges[-lookback:])
+
+
+def _compute_latest_kdj(rows: list[dict[str, Any]]) -> tuple[float | None, float | None, float | None]:
+    """Return latest J, previous J and 10-day minimum J."""
+    snap = _compute_kdj_snapshot(rows)
+    return snap.get("j"), snap.get("j_prev"), snap.get("min_j_10d")
+
+
+def _row_float(row: dict[str, Any], key: str, default: float = 0.0) -> float:
+    try:
+        return float(row.get(key) or default)
+    except Exception:
+        return default
+
+
+def _ma_last(values: list[float], n: int, end: int | None = None) -> float | None:
+    end = len(values) if end is None else end
+    if end < n:
+        return None
+    window = values[end - n:end]
+    return statistics.mean(window) if len(window) == n else None
+
+
+def _ema_series(values: list[float], n: int) -> list[float]:
+    if not values:
+        return []
+    k = 2 / (n + 1)
+    out = []
+    ema = values[0]
+    for value in values:
+        ema = value * k + ema * (1 - k)
+        out.append(ema)
+    return out
+
+
+def _compute_bbi_series(closes: list[float]) -> list[float | None]:
+    out: list[float | None] = []
+    for i in range(len(closes)):
+        end = i + 1
+        vals = [_ma_last(closes, n, end) for n in (3, 6, 12, 24)]
+        out.append(None if any(v is None for v in vals) else sum(float(v) for v in vals) / 4)
+    return out
+
+
+def _compute_kdj_snapshot(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    if len(rows) < 9:
+        return {"k": None, "d": None, "j": None, "k_prev": None, "d_prev": None, "j_prev": None, "min_j_10d": None}
+    k_vals: list[float | None] = []
+    d_vals: list[float | None] = []
+    j_vals: list[float | None] = []
+    for i in range(len(rows)):
+        if i < 8:
+            k_vals.append(None)
+            d_vals.append(None)
+            j_vals.append(None)
+            continue
+        window = rows[i - 8:i + 1]
+        low = min(float(r.get("low") or 0) for r in window)
+        high = max(float(r.get("high") or 0) for r in window)
+        close = float(rows[i].get("close") or 0)
+        rsv = ((close - low) / (high - low) * 100) if high > low else 50.0
+        if i == 8:
+            k = 50.0
+            d = 50.0
+        else:
+            k = (2 / 3) * float(k_vals[-1] or 50.0) + (1 / 3) * rsv
+            d = (2 / 3) * float(d_vals[-1] or 50.0) + (1 / 3) * k
+        j = 3 * k - 2 * d
+        k_vals.append(k)
+        d_vals.append(d)
+        j_vals.append(j)
+    valid = [j for j in j_vals[-10:] if j is not None]
+    return {
+        "k": k_vals[-1],
+        "d": d_vals[-1],
+        "j": j_vals[-1],
+        "k_prev": k_vals[-2] if len(k_vals) >= 2 else None,
+        "d_prev": d_vals[-2] if len(d_vals) >= 2 else None,
+        "j_prev": j_vals[-2] if len(j_vals) >= 2 else None,
+        "min_j_10d": min(valid) if valid else None,
+    }
+
+
+def _compute_macd_dif_series(rows: list[dict[str, Any]]) -> list[float]:
+    closes = [_row_float(r, "close") for r in rows if _row_float(r, "close") > 0]
+    if not closes:
+        return []
+    ema12 = _ema_series(closes, 12)
+    ema26 = _ema_series(closes, 26)
+    return [a - b for a, b in zip(ema12, ema26)]
+
+
+def _compute_z_lines(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    closes = [_row_float(r, "close") for r in rows if _row_float(r, "close") > 0]
+    if len(closes) < 10:
+        return {"white": None, "white_prev": None, "yellow": None, "yellow_prev": None, "dead_cross": False}
+
+    ema1 = _ema_series(closes, 10)
+    white_series = _ema_series(ema1, 10)
+
+    yellow_series: list[float | None] = []
+    for i in range(len(closes)):
+        end = i + 1
+        vals = [_ma_last(closes, n, end) for n in (14, 28, 57, 114)]
+        yellow_series.append(None if any(v is None for v in vals) else sum(float(v) for v in vals) / 4)
+
+    white = white_series[-1]
+    white_prev = white_series[-2] if len(white_series) >= 2 else None
+    yellow = yellow_series[-1]
+    yellow_prev = yellow_series[-2] if len(yellow_series) >= 2 else None
+    dead_cross = bool(
+        white is not None and white_prev is not None
+        and yellow is not None and yellow_prev is not None
+        and white_prev >= yellow_prev and white < yellow
+    )
+    return {"white": white, "white_prev": white_prev, "yellow": yellow, "yellow_prev": yellow_prev, "dead_cross": dead_cross}
+
+
+def _is_fangliang_yinxian(rows: list[dict[str, Any]], index: int) -> bool:
+    if index <= 0 or index >= len(rows):
+        return False
+    today = rows[index]
+    close = _row_float(today, "close")
+    open_price = _row_float(today, "open")
+    vol = _row_float(today, "volume")
+    prev_vol = _row_float(rows[index - 1], "volume")
+    start = max(0, index - 5)
+    avg_vol = statistics.mean([_row_float(r, "volume") for r in rows[start:index] if _row_float(r, "volume") > 0] or [prev_vol])
+    return close < open_price and vol >= max(prev_vol, avg_vol) * 1.3
+
+
+def _compute_sell_score(rows: list[dict[str, Any]], bbi: float | None) -> dict[str, Any]:
+    """Zettaranc 防卖飞 V1.4: 5-point hold/reduce/exit score."""
+    if len(rows) < 2:
+        return {"score": 3, "reason": "K线不足", "items": {}}
+    today = rows[-1]
+    yesterday = rows[-2]
+    closes = [_row_float(r, "close") for r in rows if _row_float(r, "close") > 0]
+    bbi_series = _compute_bbi_series(closes)
+    kdj = _compute_kdj_snapshot(rows)
+
+    score = 5
+    reasons = []
+    items: dict[str, bool] = {}
+
+    close_up = _row_float(today, "close") > (_row_float(yesterday, "close") or _row_float(today, "prev_close"))
+    items["close_up"] = close_up
+    if not close_up:
+        score -= 1
+        reasons.append("收盘不涨")
+
+    bbi_value = bbi if bbi else (bbi_series[-1] if bbi_series else None)
+    bbi_ok = _row_float(today, "close") >= float(bbi_value or 0) if bbi_value else True
+    items["above_bbi"] = bbi_ok
+    if not bbi_ok:
+        score -= 1
+        reasons.append("跌破BBI")
+
+    not_volume_bear = not _is_fangliang_yinxian(rows, len(rows) - 1)
+    items["not_volume_bear"] = not_volume_bear
+    if not not_volume_bear:
+        score -= 1
+        reasons.append("放量阴线")
+
+    ma5 = _ma_last(closes, 5)
+    ma5_prev = _ma_last(closes, 5, len(closes) - 1)
+    bbi_up = (
+        bbi_series[-1] is not None and len(bbi_series) >= 2 and bbi_series[-2] is not None
+        and float(bbi_series[-1]) >= float(bbi_series[-2])
+    )
+    trend_up = bool((ma5 is not None and ma5_prev is not None and ma5 >= ma5_prev) or bbi_up)
+    items["trend_up"] = trend_up
+    if not trend_up:
+        score -= 1
+        reasons.append("趋势走弱")
+
+    k_val, d_val, j_val = kdj.get("k"), kdj.get("d"), kdj.get("j")
+    j_ok = not (
+        isinstance(k_val, (int, float))
+        and isinstance(d_val, (int, float))
+        and isinstance(j_val, (int, float))
+        and float(j_val) < float(k_val)
+        and float(j_val) < float(d_val)
+    )
+    items["kdj_not_dead"] = j_ok
+    if not j_ok:
+        score -= 1
+        reasons.append("J处于死叉状态")
+
+    return {"score": max(0, score), "reason": "；".join(reasons) if reasons else "无扣分项", "items": items}
+
+
+def _detect_luzhu_half(rows: list[dict[str, Any]], bbi: float | None) -> dict[str, Any] | None:
+    """Zettaranc 卤煮：站上BBI后连续中/大阳，先放飞半仓。"""
+    if len(rows) < 2 or not bbi:
+        return None
+    today, yesterday = rows[-1], rows[-2]
+    close = _row_float(today, "close")
+    if close <= bbi:
+        return None
+    two_yang = close >= _row_float(today, "open") and _row_float(yesterday, "close") >= _row_float(yesterday, "open")
+    if not two_yang:
+        return None
+    today_pct = ((close / _row_float(yesterday, "close") - 1) * 100) if _row_float(yesterday, "close") > 0 else _row_float(today, "change_pct")
+    yday_base = _row_float(rows[-3], "close") if len(rows) >= 3 else _row_float(yesterday, "open")
+    yday_pct = ((_row_float(yesterday, "close") / yday_base - 1) * 100) if yday_base > 0 else _row_float(yesterday, "change_pct")
+    medium_yang = today_pct >= LUZHU_MEDIUM_YANG_PCT and yday_pct >= LUZHU_MEDIUM_YANG_PCT
+    volume_ok = _row_float(today, "volume") >= _row_float(yesterday, "volume") * 0.8 if _row_float(yesterday, "volume") > 0 else True
+    if medium_yang and volume_ok:
+        return {"today_pct": round(today_pct, 2), "yesterday_pct": round(yday_pct, 2)}
+    return None
+
+
+def _detect_chuhuo_wushi(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """主力出货五式：涨多后放量阴线/双头/阶梯/绿肥红瘦。"""
+    if len(rows) < 20:
+        return {"total_score": 0.0, "patterns": [], "is_selling": False}
+    today = rows[-1]
+    recent_20 = rows[-20:]
+    recent_10 = rows[-10:]
+    recent_high = max(_row_float(r, "high") for r in recent_20)
+    close = _row_float(today, "close")
+    if recent_high <= 0 or close < recent_high * 0.85:
+        return {"total_score": 0.0, "patterns": [], "is_selling": False}
+
+    patterns: list[dict[str, Any]] = []
+    vols = [_row_float(r, "volume") for r in recent_20 if _row_float(r, "volume") > 0]
+    avg_vol_5 = statistics.mean(vols[-5:]) if len(vols) >= 5 else (statistics.mean(vols) if vols else 0)
+    max_vol_20 = max(vols) if vols else 0
+    pct_chg = ((close / _row_float(rows[-2], "close") - 1) * 100) if len(rows) >= 2 and _row_float(rows[-2], "close") > 0 else 0
+
+    price_10_days_ago = _row_float(rows[-10], "close") if len(rows) >= 10 else close
+    up_pct_10 = (recent_high / price_10_days_ago - 1) * 100 if price_10_days_ago > 0 else 0
+    is_tianliang = _row_float(today, "volume") >= max_vol_20 * 0.8 or _row_float(today, "volume") >= avg_vol_5 * 2
+    if up_pct_10 > 20 and pct_chg < -5 and is_tianliang:
+        patterns.append({"type": "加速后单日放天量大阴", "confidence": 0.95})
+
+    high_5d = max(_row_float(r, "high") for r in recent_10[:5]) if len(recent_10) >= 5 else recent_high
+    if _row_float(today, "high") >= high_5d * 0.98 and pct_chg < -3 and close < _row_float(today, "open"):
+        if len(rows) >= 2 and _row_float(today, "volume") >= _row_float(rows[-2], "volume") * 1.5:
+            patterns.append({"type": "次高点巨量长阴", "confidence": 0.90})
+
+    consecutive_yin = 0
+    for i in range(1, min(6, len(rows))):
+        k = rows[-i]
+        if _row_float(k, "close") < _row_float(k, "open"):
+            consecutive_yin += 1
+        else:
+            break
+    if consecutive_yin >= 3:
+        yin_vols = [_row_float(rows[-i], "volume") for i in range(1, consecutive_yin + 1)]
+        if avg_vol_5 > 0 and statistics.mean(yin_vols) >= avg_vol_5 * 1.2:
+            patterns.append({"type": f"阶梯放量下跌({consecutive_yin}日)", "confidence": 0.85})
+
+    highs = sorted([(i, _row_float(r, "high")) for i, r in enumerate(recent_20)], key=lambda x: x[1], reverse=True)[:2]
+    if len(highs) == 2 and highs[0][1] > 0 and abs(highs[0][1] - highs[1][1]) / highs[0][1] < 0.05 and abs(highs[0][0] - highs[1][0]) >= 3:
+        def _has_volume_bear_after(idx: int) -> bool:
+            for j in range(idx + 1, min(idx + 4, len(recent_20))):
+                row = recent_20[j]
+                if _row_float(row, "close") < _row_float(row, "open") and avg_vol_5 > 0 and _row_float(row, "volume") >= avg_vol_5 * 1.3:
+                    return True
+            return False
+        if _has_volume_bear_after(highs[0][0]) and _has_volume_bear_after(highs[1][0]):
+            patterns.append({"type": "双头双放量巨阴", "confidence": 0.90})
+
+    yin_vol = sum(_row_float(r, "volume") for r in recent_10 if _row_float(r, "close") < _row_float(r, "open"))
+    yang_vol = sum(_row_float(r, "volume") for r in recent_10 if _row_float(r, "close") >= _row_float(r, "open"))
+    if yang_vol > 0 and yin_vol / yang_vol > 1.5:
+        patterns.append({"type": "顶部绿肥红瘦", "confidence": 0.80})
+
+    total_score = max([p["confidence"] for p in patterns], default=0.0) + 0.1 * max(0, len(patterns) - 1)
+    total_score = min(total_score, 1.0)
+    return {"total_score": round(total_score, 2), "patterns": patterns, "is_selling": total_score >= 0.80}
+
+
+def _detect_s1_s2_s3(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(rows) < 20:
+        return {"signal": "", "reason": ""}
+
+    def _is_s1_at(idx: int) -> bool:
+        if idx < 20:
+            return False
+        window = rows[idx - 19:idx + 1]
+        today = rows[idx]
+        prev = rows[idx - 1]
+        recent_high = max(_row_float(r, "high") for r in window)
+        recent_low = min(_row_float(r, "low") for r in window[:-1])
+        if recent_low <= 0:
+            return False
+        up_pct = (recent_high / recent_low - 1) * 100
+        if up_pct < S1_UPTREND_MIN_PCT or _row_float(today, "close") < recent_high * S1_HIGH_ZONE_PCT:
+            return False
+        day_range = _row_float(today, "high") - _row_float(today, "low")
+        close_pos = (_row_float(today, "close") - _row_float(today, "low")) / day_range if day_range > 0 else 0.5
+        jiayin = _row_float(today, "close") < _row_float(today, "open") and _row_float(today, "close") > _row_float(prev, "close")
+        ugly = _is_fangliang_yinxian(rows, idx) or (jiayin and _row_float(today, "volume") > _row_float(prev, "volume") * S1_VOLUME_RATIO)
+        return ugly and close_pos <= S1_CLOSE_LOW_POSITION
+
+    if _is_s1_at(len(rows) - 1):
+        return {"signal": "s1_distribution", "reason": "S1逃顶：流畅上涨后高位放量丑陋阴线"}
+
+    if len(rows) >= 30:
+        dif = _compute_macd_dif_series(rows)
+        if len(dif) == len([r for r in rows if _row_float(r, "close") > 0]):
+            prior_window = rows[-30:-5]
+            if prior_window:
+                prior_high = max(_row_float(r, "high") for r in prior_window)
+                prior_idx_rel = next((i for i, r in enumerate(prior_window) if _row_float(r, "high") == prior_high), None)
+                if prior_idx_rel is not None:
+                    prior_idx = len(rows) - 30 + prior_idx_rel
+                    if _row_float(rows[-1], "close") >= prior_high * 0.97 and _row_float(rows[-1], "close") > _row_float(rows[prior_idx], "close"):
+                        if dif[-1] < dif[prior_idx] * 0.98:
+                            return {"signal": "s2_macd_divergence", "reason": "S2逃顶：挑战前高但MACD DIF顶背离"}
+
+    for idx in range(max(20, len(rows) - 15), len(rows) - 1):
+        if not _is_s1_at(idx):
+            continue
+        s1 = rows[idx]
+        today = rows[-1]
+        if _row_float(s1, "volume") <= 0:
+            continue
+        near_s1_zone = _row_float(s1, "open") * 0.95 <= _row_float(today, "close") <= _row_float(s1, "high") * 1.02
+        weak_rebound = _row_float(today, "volume") < _row_float(s1, "volume") * 0.7
+        pct_chg = ((_row_float(today, "close") / _row_float(rows[-2], "close") - 1) * 100) if _row_float(rows[-2], "close") > 0 else 0
+        if near_s1_zone and weak_rebound and pct_chg <= 2:
+            return {"signal": "s3_last_escape", "reason": "S3逃顶：S1后反抽到下沿但量能不足"}
+
+    return {"signal": "", "reason": ""}
+
+
+def _sell_signal(reason: str, signal: str, sell_ratio: float = 1.0) -> dict[str, Any]:
+    return {"reason": reason, "signal": signal, "sell_ratio": sell_ratio}
+
+
+def evaluate_sell_signal(code: str, pos: dict[str, Any], today: str | None = None) -> dict[str, Any] | None:
+    """Evaluate the local sell rule stack for one open position.
+
+    The rule stack combines fixed risk control, S1/B1-style failed confirmation,
+    volatility/trailing exits, and time stops. It mutates lightweight per-position
+    tracking fields such as peak price and consecutive BBI-break days.
+    """
+    today = today or today_key()
+    price = float(pos.get("close") or pos.get("last_price") or pos.get("avg_cost") or 0)
+    avg_cost = float(pos.get("avg_cost") or 0)
+    if price <= 0 or avg_cost <= 0:
+        return None
+
+    pnl_pct = (price / avg_cost - 1) * 100
+    prior_high = float(pos.get("highest_price") or price)
+    highest_price = max(prior_high, price)
+    pos["highest_price"] = round(highest_price, 3)
+    prior_max = pos.get("max_pnl_pct")
+    try:
+        max_pnl_pct = max(float(prior_max), pnl_pct) if prior_max is not None else pnl_pct
+    except Exception:
+        max_pnl_pct = pnl_pct
+    pos["max_pnl_pct"] = round(max_pnl_pct, 2)
+
+    bbi = float(pos.get("bbi") or 0)
+    bbi_dist = ((price / bbi - 1) * 100) if bbi > 0 else None
+    if bbi_dist is not None:
+        pos["bbi_distance_pct"] = round(bbi_dist, 2)
+        if bbi_dist >= 0.3:
+            pos["s1_reclaim_seen"] = True
+        if bbi_dist <= S1_FAIL_BBI_PCT:
+            if pos.get("bbi_break_last_date") != today:
+                pos["bbi_break_days"] = int(pos.get("bbi_break_days") or 0) + 1
+                pos["bbi_break_last_date"] = today
+        else:
+            pos["bbi_break_days"] = 0
+            pos.pop("bbi_break_last_date", None)
+    else:
+        pos["bbi_break_days"] = 0
+
+    if pnl_pct >= TRAILING_STOP_ACTIVATE_PCT:
+        pos["trailing_stop_activated"] = True
+
+    hold_days = holding_days(pos, today)
+    j_now = pos.get("kdj_j")
+    j_prev = pos.get("kdj_j_prev")
+    j_turning_down = (
+        isinstance(j_now, (int, float))
+        and isinstance(j_prev, (int, float))
+        and float(j_now) < float(j_prev) - 3
+    )
+
+    shaofu_stop = float(pos.get("shaofu_stop_price") or pos.get("entry_stop_price") or 0)
+    if shaofu_stop > 0 and price < shaofu_stop:
+        return _sell_signal(f"收盘价破入场止损 (收盘{price:.2f} < 止损{shaofu_stop:.2f})", "shaofu_entry_stop")
+
+    if pnl_pct <= STOP_LOSS_PCT:
+        return _sell_signal(f"止损触发 (盈亏{pnl_pct:.1f}% ≤ {STOP_LOSS_PCT}%)", "hard_stop")
+
+    chuhuo = pos.get("chuhuo_wushi") or {}
+    if chuhuo.get("is_selling"):
+        patterns = chuhuo.get("patterns") or []
+        top = patterns[0].get("type") if patterns and isinstance(patterns[0], dict) else "出货五式"
+        return _sell_signal(f"出货五式触发 ({top}，评分{chuhuo.get('total_score')})", "chuhuo_wushi")
+
+    s123_signal = str(pos.get("s123_signal") or "")
+    if s123_signal:
+        return _sell_signal(str(pos.get("s123_reason") or "S1/S2/S3逃顶信号触发"), s123_signal)
+
+    if pos.get("z_dead_cross"):
+        return _sell_signal("白线死叉黄线 (牛绳断，按Z哥双线纪律清仓)", "z_dead_cross")
+    if int(pos.get("z_white_break_days") or 0) >= S1_FAIL_CONFIRM_DAYS:
+        return _sell_signal(f"白线两日破位 (连续{pos.get('z_white_break_days')}日收盘低于白线)", "z_white_break")
+
+    if bbi_dist is not None:
+        if pos.get("s1_reclaim_seen") and bbi_dist <= S1_FAIL_BBI_PCT and max_pnl_pct >= 0:
+            return _sell_signal(
+                f"S1反抽失败 (重新站上BBI后又跌至{bbi_dist:.1f}%，退出等待新买点)",
+                "s1_reclaim_failed",
+            )
+        if int(pos.get("bbi_break_days") or 0) >= S1_FAIL_CONFIRM_DAYS and (pnl_pct < TAKE_PROFIT_PARTIAL_PCT or j_turning_down):
+            return _sell_signal(
+                f"S1趋势确认失效 (连续{pos.get('bbi_break_days')}日低于BBI，距BBI {bbi_dist:.1f}%)",
+                "s1_bbi_failed",
+            )
+        if bbi_dist <= BBI_BREAKDOWN_PCT:
+            return _sell_signal(
+                f"BBI跌破触发 (距BBI {bbi_dist:.1f}% ≤ {BBI_BREAKDOWN_PCT}%)",
+                "bbi_breakdown",
+            )
+
+    if max_pnl_pct > 0.8 and pnl_pct <= 0:
+        return _sell_signal(f"盈转亏退出 (最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)", "profit_to_loss")
+    if hold_days >= NO_PROGRESS_HOLD_DAYS and max_pnl_pct < NO_PROGRESS_MAX_PNL_PCT and pnl_pct <= 0:
+        return _sell_signal(f"买入后{hold_days}日未兑现 (最高盈利{max_pnl_pct:.1f}%，先收队)", "no_progress")
+
+    sell_score = pos.get("sell_score")
+    if isinstance(sell_score, (int, float)):
+        if sell_score <= SELL_SCORE_EXIT_THRESHOLD:
+            return _sell_signal(
+                f"防卖飞评分过低 ({sell_score}/5，{pos.get('sell_score_reason','')})",
+                "sell_score_exit",
+            )
+        if sell_score <= SELL_SCORE_REDUCE_THRESHOLD and not pos.get("sell_score_half_done") and not pos.get("partial_tp_done"):
+            return _sell_signal(
+                f"防卖飞评分中性 ({sell_score}/5，先减半观察BBI两日破位)",
+                "sell_score_reduce",
+                TAKE_PROFIT_PARTIAL_RATIO,
+            )
+
+    low10 = float(pos.get("low10") or 0)
+    if low10 > 0 and hold_days >= 3 and price <= low10 * 0.995:
+        return _sell_signal(
+            f"{DONCHIAN_EXIT_LOOKBACK_DAYS}日低点跌破 (现价{price:.2f} < 低点{low10:.2f})",
+            "donchian_low_break",
+        )
+
+    if max_pnl_pct >= TRAILING_STOP_ACTIVATE_PCT:
+        giveback = max_pnl_pct - pnl_pct
+        trailing_gap = max(
+            TRAILING_MIN_GIVEBACK_PCT,
+            min(TRAILING_MAX_GIVEBACK_PCT, max_pnl_pct * TRAILING_GIVEBACK_RATIO),
+        )
+        pos["trailing_gap_pct"] = round(trailing_gap, 2)
+        if giveback >= trailing_gap:
+            return _sell_signal(
+                f"峰值回撤止盈 (最高盈利{max_pnl_pct:.1f}%，回撤{giveback:.1f}% ≥ {trailing_gap:.1f}%)",
+                "profit_giveback",
+            )
+        atr20 = float(pos.get("atr20") or 0)
+        if atr20 > 0:
+            chandelier_stop = highest_price - ATR_CHANDELIER_MULT * atr20
+            pos["chandelier_stop"] = round(chandelier_stop, 3)
+            if chandelier_stop > avg_cost * 0.99 and price <= chandelier_stop:
+                return _sell_signal(
+                    f"ATR吊灯止盈 (现价{price:.2f} ≤ {ATR_CHANDELIER_MULT:.0f}ATR止损{chandelier_stop:.2f})",
+                    "atr_chandelier",
+                )
+        if pos.get("trailing_stop_activated") and pnl_pct < 1.0:
+            return _sell_signal(f"移动止损保本 (曾盈利>5%，回落至{pnl_pct:.1f}%)", "breakeven_trail")
+
+    if pos.get("luzhu_half_signal") and not pos.get("partial_tp_done"):
+        return _sell_signal(
+            "卤煮止盈 (站上BBI后连续中/大阳，按Z哥纪律放飞半仓)",
+            "luzhu_half",
+            TAKE_PROFIT_PARTIAL_RATIO,
+        )
+
+    if pnl_pct >= TAKE_PROFIT_PARTIAL_PCT and pnl_pct < TAKE_PROFIT_PCT and not pos.get("partial_tp_done"):
+        return _sell_signal(
+            f"第一批止盈 (盈亏{pnl_pct:.1f}% ≥ {TAKE_PROFIT_PARTIAL_PCT}%，卖一半)",
+            "partial_take_profit",
+            TAKE_PROFIT_PARTIAL_RATIO,
+        )
+
+    if pnl_pct >= TAKE_PROFIT_PCT:
+        return _sell_signal(f"止盈清仓 (盈亏{pnl_pct:.1f}% ≥ {TAKE_PROFIT_PCT}%)", "take_profit")
+
+    if hold_days >= MAX_HOLD_DAYS:
+        return _sell_signal(f"持仓到期 ({hold_days}d ≥ {MAX_HOLD_DAYS}d)", "max_hold_days")
+    if hold_days > 12 and pnl_pct < -3.0:
+        return _sell_signal(f"信号未兑现 ({hold_days}d 仍亏{pnl_pct:.1f}%，离场等新信号)", "stale_loser")
+    if hold_days >= 10 and pnl_pct < 1.0 and bbi_dist is not None and bbi_dist < 0:
+        return _sell_signal(f"低效持仓退出 ({hold_days}d 盈亏{pnl_pct:.1f}%，且未站回BBI)", "stale_below_bbi")
+
+    return None
+
+
+def _refresh_position_bbi(state: dict[str, Any]) -> None:
+    """Fetch daily K-lines for open positions and cache sell-rule indicators."""
+    positions = state.get("positions") or {}
+    if not positions:
+        return
+    import statistics as _st
+    for code, pos in positions.items():
+        try:
+            script = STOCK_TOOLS_SCRIPT
+            proc = subprocess.run(
+                [sys.executable, str(script), "kline", code, "130"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                continue
+            data = json.loads(proc.stdout)
+            closes = data.get("closes") or []
+            if len(closes) < 24:
+                continue
+            # Compute BBI from closes
+            def _ma(vals, n):
+                return [None] * (n - 1) + [_st.mean(vals[i - n + 1:i + 1]) for i in range(n - 1, len(vals))]
+            ma3, ma6, ma12, ma24 = _ma(closes, 3), _ma(closes, 6), _ma(closes, 12), _ma(closes, 24)
+            bbi_val = None
+            for i in range(len(closes) - 1, -1, -1):
+                if all(m[i] is not None for m in [ma3, ma6, ma12, ma24]):
+                    bbi_val = (ma3[i] + ma6[i] + ma12[i] + ma24[i]) / 4
+                    break
+            if bbi_val:
+                pos["bbi"] = round(bbi_val, 2)
+                pos["close"] = closes[-1]
+            rows = data.get("rows") or []
+            if rows:
+                rows = [r for r in rows if isinstance(r, dict) and r.get("close")]
+                if rows:
+                    pos["close"] = float(rows[-1].get("close") or pos.get("close") or 0)
+                    pos["last_kline_date"] = rows[-1].get("date") or ""
+                    if not pos.get("shaofu_stop_price") or pos.get("shaofu_stop_source") == "fallback_pct":
+                        lots = pos.get("buy_date_lots") or {}
+                        open_dates = sorted(date for date, qty in lots.items() if int(qty or 0) > 0)
+                        entry_date = open_dates[0] if open_dates else ""
+                        entry_idx = next((idx for idx, row in enumerate(rows) if str(row.get("date") or "") == entry_date), None)
+                        if entry_idx is not None:
+                            entry_low = _row_float(rows[entry_idx], "low")
+                            if entry_low > 0:
+                                pos["entry_kline_low"] = round(entry_low, 3)
+                                pos["shaofu_stop_price"] = round(max(0.01, entry_low - ENTRY_STOP_TICK_BUFFER), 3)
+                                pos["shaofu_stop_source"] = "entry_kline_low"
+                        elif pos.get("avg_cost"):
+                            pos["shaofu_stop_price"] = round(float(pos.get("avg_cost") or 0) * (1 + STOP_LOSS_PCT / 100), 3)
+                            pos["shaofu_stop_source"] = "fallback_pct"
+                if len(rows) >= DONCHIAN_EXIT_LOOKBACK_DAYS + 1:
+                    prev_rows = rows[-(DONCHIAN_EXIT_LOOKBACK_DAYS + 1):-1]
+                    lows = [float(r.get("low") or 0) for r in prev_rows if float(r.get("low") or 0) > 0]
+                    if lows:
+                        pos["low10"] = round(min(lows), 3)
+                if len(rows) >= 20:
+                    highs = [float(r.get("high") or 0) for r in rows[-20:] if float(r.get("high") or 0) > 0]
+                    if highs:
+                        pos["high20"] = round(max(highs), 3)
+                atr = _compute_atr(rows)
+                if atr:
+                    pos["atr20"] = round(atr, 3)
+                kdj = _compute_kdj_snapshot(rows)
+                for key, dest in [
+                    ("k", "kdj_k"), ("d", "kdj_d"), ("j", "kdj_j"),
+                    ("k_prev", "kdj_k_prev"), ("d_prev", "kdj_d_prev"), ("j_prev", "kdj_j_prev"),
+                    ("min_j_10d", "kdj_min_j_10d"),
+                ]:
+                    val = kdj.get(key)
+                    if val is not None:
+                        pos[dest] = round(float(val), 2)
+
+                z_lines = _compute_z_lines(rows)
+                for key, dest in [
+                    ("white", "z_white"), ("white_prev", "z_white_prev"),
+                    ("yellow", "z_yellow"), ("yellow_prev", "z_yellow_prev"),
+                ]:
+                    val = z_lines.get(key)
+                    if val is not None:
+                        pos[dest] = round(float(val), 3)
+                pos["z_dead_cross"] = bool(z_lines.get("dead_cross"))
+                z_white = z_lines.get("white")
+                if z_white and _row_float(rows[-1], "close") < float(z_white) * (1 + S1_FAIL_BBI_PCT / 100):
+                    if pos.get("z_white_break_last_date") != pos.get("last_kline_date"):
+                        pos["z_white_break_days"] = int(pos.get("z_white_break_days") or 0) + 1
+                        pos["z_white_break_last_date"] = pos.get("last_kline_date")
+                else:
+                    pos["z_white_break_days"] = 0
+                    pos.pop("z_white_break_last_date", None)
+
+                score = _compute_sell_score(rows, float(pos.get("bbi") or 0) or None)
+                pos["sell_score"] = score.get("score")
+                pos["sell_score_reason"] = score.get("reason")
+                pos["sell_score_items"] = score.get("items")
+
+                chuhuo = _detect_chuhuo_wushi(rows)
+                pos["chuhuo_wushi"] = chuhuo
+                s123 = _detect_s1_s2_s3(rows)
+                if s123.get("signal"):
+                    pos["s123_signal"] = s123.get("signal")
+                    pos["s123_reason"] = s123.get("reason")
+                else:
+                    pos.pop("s123_signal", None)
+                    pos.pop("s123_reason", None)
+                luzhu = _detect_luzhu_half(rows, float(pos.get("bbi") or 0) or None)
+                pos["luzhu_half_signal"] = bool(luzhu)
+                if luzhu:
+                    pos["luzhu_half_detail"] = luzhu
+        except Exception:
+            continue
+
+def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[dict[str, Any]]:
+    """检查所有持仓是否触发自动止盈/止损/技术退出条件。
+    
+    退出优先级由 evaluate_sell_signal 统一维护：
+    硬止损、S1/BBI失效、10日低点、峰值回撤/ATR吊灯、
+    分批止盈、目标止盈、持仓时间止损。
+    """
+    trade_allowed, _ = is_a_share_execution_time(dt)
+    if not trade_allowed:
+        return []
+
+    positions = state.get("positions") or {}
+    if not positions:
+        return []
+    
+    today = today_key()
+    executed = []
+    cash = float(state.get("cash") or 0)
+    
+    for code in list(positions.keys()):
+        pos = positions[code]
+        sellable = available_to_sell(pos)
+        if sellable <= 0:
+            continue
+        
+        price = pos.get("last_price") or pos.get("avg_cost") or 0
+        if price <= 0:
+            continue
+        
+        avg_cost = float(pos.get("avg_cost") or 0)
+        if avg_cost <= 0:
+            continue
+        
+        exit_signal = evaluate_sell_signal(code, pos, today)
+        if not exit_signal:
+            continue
+        exit_reason = str(exit_signal.get("reason") or "")
+        entry_strategy = str(
+            pos.get("buy_strategy")
+            or latest_buy_strategy_for_code(state, code)
+            or classify_buy_strategy(str(pos.get("entry_reason") or ""))
+        )
+        exit_rule = classify_exit_rule(exit_reason, str(exit_signal.get("signal") or ""))
+        sell_ratio = float(exit_signal.get("sell_ratio") or 1.0)
+        
+        # 执行卖出
+        qty = min(sellable, position_qty(pos))
+        if sell_ratio < 1.0:
+            qty = max(100, int(qty * sell_ratio) // 100 * 100)
+            if exit_signal.get("signal") == "sell_score_reduce":
+                pos["sell_score_half_done"] = True
+            if exit_signal.get("signal") == "luzhu_half":
+                pos["luzhu_half_done"] = True
+            pos["partial_tp_done"] = True
+        qty = qty // 100 * 100
+        if qty <= 0:
+            continue
+        
+        gross = qty * price
+        fees = calc_trade_fees(gross, "SELL")
+        net_proceeds = gross - fees["total_fee"]
+        cost_basis = qty * avg_cost
+        realized_pnl = net_proceeds - cost_basis
+        realized_pnl_pct = (realized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+        
+        pos["qty"] = position_qty(pos) - qty
+        pos.pop("shares", None)
+        
+        # FIFO式消耗买入批次
+        remaining = qty
+        lots = pos.get("buy_date_lots") or {}
+        for date in sorted(list(lots.keys())):
+            if date == today or remaining <= 0:
+                continue
+            use = min(int(lots.get(date) or 0), remaining)
+            lots[date] = int(lots.get(date) or 0) - use
+            remaining -= use
+            if lots[date] <= 0:
+                lots.pop(date, None)
+        
+        if pos["qty"] <= 0:
+            positions.pop(code, None)
+        cash += net_proceeds
+        
+        executed.append({
+            "time": now_ts(),
+            "action": "SELL",
+            "code": code,
+            "name": pos.get("name") or "",
+            "shares": qty,
+            "price": round(price, 3),
+            "amount": round(gross, 2),
+            "commission": fees["commission"],
+            "transfer_fee": fees["transfer_fee"],
+            "stamp_duty": fees["stamp_duty"],
+            "fee": fees["total_fee"],
+            "net_proceeds": round(net_proceeds, 2),
+            "pnl": round(realized_pnl, 2),
+            "pnl_pct": round(realized_pnl_pct, 2),
+            "exit_signal": exit_signal.get("signal") or "",
+            "buy_strategy": entry_strategy,
+            "exit_rule": exit_rule,
+            "reason": exit_reason,
+        })
+    
+    if executed:
+        state["cash"] = round(cash, 2)
+        state.setdefault("trade_log", []).extend(executed)
+        del state["trade_log"][:-TRADE_LOG_LIMIT]
+        # 同步写入 DB
+        for e in executed:
+            try:
+                from niuniu_db import record_trade as _rt
+                _rt(e)
+            except Exception: pass
+        try:
+            from niuniu_db import snapshot_positions as _sp
+            _sp(state.get("positions", {}))
+        except Exception: pass
+        # 记录系统自动退出决策
+        log_entry = {
+            "time": now_ts(),
+            "b1_generated_at": "",
+            "trade_allowed": True,
+            "trade_reason": "系统自动止盈止损检查",
+            "decision": {
+                "summary": f"自动止盈止损：{len(executed)}笔卖出",
+                "actions": [{"action": "SELL", "code": e["code"], "shares": e["shares"], "reason": e["reason"]} for e in executed],
+                "model": "SYSTEM_AUTO_EXIT",
+                "provider": "local_rule",
+            },
+            "executed": executed,
+        }
+        state.setdefault("decision_log", []).append(log_entry)
+        _sync_decision_to_db(log_entry)
+    
+    return executed
+
+
+def maybe_record_session_equity_heartbeat(min_interval_seconds: int = EQUITY_HEARTBEAT_MIN_SECONDS) -> bool:
+    """Record account equity during the full 09:30-15:00 dashboard session, independent of trades/B1 candidates."""
+    now = datetime.now()
+    if not is_a_share_session_clock(now):
+        return False
+    state = load_state()
+    history = state.setdefault("equity_history", [])
+    last_dt = None
+    for item in reversed(history):
+        last_dt = parse_ts(item.get("time", ""))
+        if last_dt:
+            break
+    if last_dt and (now - last_dt).total_seconds() < min_interval_seconds:
+        return False
+    # Keep current holdings marked-to-market before taking a snapshot.
+    try:
+        refresh_position_quotes(state)
+    except Exception as exc:
+        state["last_quote_refresh"] = {"time": now_ts(), "updated": 0, "error": f"{type(exc).__name__}: {exc}"}
+    record_equity(state)
+    save_state(state)
+    return True
+
+
+def load_crossdesk_config(base_url_env: str = "", api_key_env: str = "") -> tuple[str, str]:
+    env_base_url = os.environ.get(base_url_env) if base_url_env else ""
+    env_api_key = os.environ.get(api_key_env) if api_key_env else ""
+    env_base_url = env_base_url or os.environ.get("CROSSDESK_BASE_URL")
+    env_api_key = env_api_key or os.environ.get("CROSSDESK_API_KEY")
+    if env_base_url and env_api_key:
+        return env_base_url.rstrip("/"), env_api_key
+    if yaml is None:
+        raise RuntimeError("PyYAML is required")
+    cfg = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+    providers = cfg.get("custom_providers") or []
+    for provider in providers:
+        if isinstance(provider, dict) and str(provider.get("name") or "").lower() == CROSSDESK_PROVIDER_NAME.lower():
+            base_url = (provider.get("base_url") or "").rstrip("/")
+            api_key = provider.get("api_key") or ""
+            if base_url and api_key:
+                return base_url, api_key
+    raise RuntimeError(f"Missing custom provider {CROSSDESK_PROVIDER_NAME}")
+
+
+def extract_json(text: str) -> Any:
+    text = (text or "").strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    decoder = json.JSONDecoder()
+    try:
+        obj, _ = decoder.raw_decode(text)
+        return obj
+    except Exception:
+        m = re.search(r"[\[{]", text)
+        if not m:
+            raise
+        obj, _ = decoder.raw_decode(text[m.start():])
+        return obj
+
+
+def clip_text(text: str, limit: int = 600) -> str:
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def format_http_error(exc: urllib.error.HTTPError, model_name: str) -> RuntimeError:
+    try:
+        body = exc.read().decode("utf-8", "ignore")
+    except Exception:
+        body = ""
+    detail = ""
+    if body.strip():
+        try:
+            obj = json.loads(body)
+            err = obj.get("error") if isinstance(obj, dict) else None
+            if isinstance(err, dict):
+                detail = err.get("message") or json.dumps(err, ensure_ascii=False)
+            else:
+                detail = json.dumps(obj, ensure_ascii=False)
+        except Exception:
+            detail = body
+    message = f"model={model_name} HTTP {exc.code}: {detail or exc.reason or 'Service Unavailable'}"
+    return RuntimeError(clip_text(message, 900))
+
+
+def parse_chat_completion_content(raw: str) -> tuple[str, str]:
+    """Return visible assistant content plus compact response metadata."""
+    if not (raw or "").strip():
+        raise ValueError("空响应")
+
+    if raw.lstrip().startswith("data:"):
+        parts = []
+        finish_reasons = []
+        usage = None
+        chunks = 0
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if not chunk or chunk == "[DONE]":
+                continue
+            try:
+                obj = json.loads(chunk)
+            except Exception:
+                continue
+            chunks += 1
+            if obj.get("usage"):
+                usage = obj.get("usage")
+            choice = (obj.get("choices") or [{}])[0]
+            if choice.get("finish_reason"):
+                finish_reasons.append(str(choice.get("finish_reason")))
+            delta = choice.get("delta") or {}
+            message = choice.get("message") or {}
+            parts.append(delta.get("content") or message.get("content") or "")
+        detail_bits = [f"sse_chunks={chunks}"]
+        if finish_reasons:
+            detail_bits.append(f"finish_reason={finish_reasons[-1]}")
+        if usage:
+            detail_bits.append(f"usage={usage}")
+        return "".join(parts), ", ".join(detail_bits)
+
+    data = json.loads(raw)
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    content = message.get("content") or ""
+    detail_bits = []
+    if choice.get("finish_reason"):
+        detail_bits.append(f"finish_reason={choice.get('finish_reason')}")
+    if data.get("usage"):
+        detail_bits.append(f"usage={data.get('usage')}")
+    return content, ", ".join(detail_bits)
+
+
+def request_chat_content(base_url: str, api_key: str, payload: dict, model_name: str,
+                         max_retries: int = 3, timeout: int = 60) -> str:
+    """Call chat/completions and require non-empty visible assistant content."""
+    import time as _time
+    last_err: Exception | None = None
+    request_payload = {**payload, "model": model_name}
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(
+                base_url + "/chat/completions",
+                data=json.dumps(request_payload).encode("utf-8"),
+                headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", "ignore")
+            content, detail = parse_chat_completion_content(raw)
+            if not (content or "").strip():
+                if "finish_reason=length" in detail:
+                    current_max = int(request_payload.get("max_tokens") or 0)
+                    if current_max > 0:
+                        request_payload["max_tokens"] = min(12000, max(current_max + 2000, current_max * 2))
+                raise RuntimeError(f"model={model_name} returned empty content ({detail or 'no response metadata'})")
+            return content
+        except urllib.error.HTTPError as exc:
+            last_err = format_http_error(exc, model_name)
+        except Exception as exc:
+            last_err = exc
+        if attempt < max_retries - 1:
+            _time.sleep(2 ** attempt)
+    raise last_err or RuntimeError(f"model={model_name} request failed")
+
+
+def api_call_with_retry(base_url: str, api_key: str, payload: dict, max_retries: int = 3, timeout: int = 60) -> dict:
+    """带重试的 API 调用。空响应/JSON解析失败时自动重试。"""
+    import time as _time
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(
+                base_url + "/chat/completions",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", "ignore")
+            if not raw.strip():
+                raise ValueError("空响应")
+            return json.loads(raw)
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                _time.sleep(2 ** attempt)  # 1s, 2s, 4s 退避
+    raise last_err
+
+
+GROK_MODEL = os.environ.get("DASHBOARD_GROK_MODEL") or "grok-4.20-multi-agent-xhigh"
+
+
+def compact_portfolio_for_decision(portfolio: dict[str, Any]) -> dict[str, Any]:
+    """Keep only account fields that can affect the next trading decision."""
+    compact_positions = []
+    for pos in portfolio.get("positions", []) or []:
+        exit_state = pos.get("exit_state") or {}
+        compact_positions.append({
+            "code": pos.get("code"),
+            "name": pos.get("name"),
+            "qty": pos.get("qty"),
+            "available_qty": pos.get("available_qty"),
+            "avg_cost": pos.get("avg_cost"),
+            "last_price": pos.get("last_price"),
+            "prev_close": pos.get("prev_close"),
+            "change_pct": pos.get("change_pct"),
+            "today_pnl": pos.get("today_pnl"),
+            "today_pnl_pct": pos.get("today_pnl_pct"),
+            "day_high_pct": pos.get("day_high_pct"),
+            "day_low_pct": pos.get("day_low_pct"),
+            "market_value": pos.get("market_value"),
+            "pnl": pos.get("pnl"),
+            "pnl_pct": pos.get("pnl_pct"),
+            "buy_date_lots": pos.get("buy_date_lots") or {},
+            "exit_state": {
+                key: exit_state.get(key)
+                for key in [
+                    "highest_price", "max_pnl_pct", "bbi", "bbi_distance_pct",
+                    "bbi_break_days", "atr20", "low10", "chandelier_stop",
+                    "trailing_gap_pct", "shaofu_stop_price", "sell_score",
+                    "sell_score_reason", "z_white", "z_yellow",
+                    "z_white_break_days", "z_dead_cross", "s123_signal",
+                    "s123_reason", "chuhuo_wushi", "luzhu_half_signal",
+                ]
+                if exit_state.get(key) not in (None, "", [])
+            },
+        })
+    return {
+        "generated_at": portfolio.get("generated_at"),
+        "initial_cash": portfolio.get("initial_cash"),
+        "cash": portfolio.get("cash"),
+        "market_value": portfolio.get("market_value"),
+        "total_equity": portfolio.get("total_equity"),
+        "total_pnl": portfolio.get("total_pnl"),
+        "total_pnl_pct": portfolio.get("total_pnl_pct"),
+        "positions": compact_positions,
+        "recent_trades": (portfolio.get("trade_log") or [])[:8],
+        "last_b1_generated_at": portfolio.get("last_b1_generated_at"),
+        "last_decision_at": portfolio.get("last_decision_at"),
+        "last_quote_refresh": portfolio.get("last_quote_refresh"),
+        "last_intraday_refresh": portfolio.get("last_intraday_refresh"),
+        "last_error": portfolio.get("last_error"),
+    }
+
+
+def check_candidate_news_grok(candidates: list[dict[str, Any]]) -> str:
+    """用 Grok 实时搜索 top5 候选股的最新消息面，返回结构化摘要。
+    
+    Returns: 格式化的消息面文本，供决策 prompt 使用。
+    """
+    if not candidates:
+        return ""
+    
+    base_url, api_key = load_crossdesk_config("DASHBOARD_GROK_BASE_URL", "DASHBOARD_GROK_API_KEY")
+    stock_list = "、".join(f"{c.get('code','')} {c.get('name','')}" for c in candidates[:5])
+    
+    prompt = f"""搜索以下A股最近3天的重大消息（利好/利空/中性），每只一句话：
+{stock_list}
+
+格式：
+- 代码 名称：一句话总结（利好/利空/中性）
+只输出有明确消息的股，无消息的省略。"""
+    
+    payload = {
+        "model": GROK_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 600,
+    }
+    data = api_call_with_retry(base_url, api_key, payload, max_retries=2, timeout=45)
+    content = data["choices"][0]["message"]["content"]
+    return f"【消息面预检（Grok实时搜索）】\n{content.strip()}"
+
+
+def call_deepseek_decision(candidates: list[dict[str, Any]], portfolio: dict[str, Any],
+                           trade_allowed: bool, trade_reason: str) -> dict[str, Any]:
+    # 根据 MODEL 选择 provider
+    if MODEL == "deepseek-v4-flash-free":
+        # 使用 OpenCode Zen
+        base_url = "https://opencode.ai/zen/v1"
+        if yaml is None:
+            raise RuntimeError("PyYAML is required")
+        cfg = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+        api_key = cfg.get("model", {}).get("api_key", "")
+        if not api_key:
+            raise RuntimeError("Missing OpenCode Zen API key in config.yaml")
+    else:
+        # 使用 Crossdesk
+        base_url, api_key = load_crossdesk_config("DASHBOARD_DECISION_BASE_URL", "DASHBOARD_DECISION_API_KEY")
+    market_env = check_market_environment()
+    market_sent = check_market_sentiment()
+    sentiment_note = ""
+    if market_sent.get("sentiment") == "cold":
+        sentiment_note = f"⚠️市场情绪偏冷({market_sent.get('detail','')})，建议仓位减半"
+    
+    # === Grok 实时消息面预检（top5候选） ===
+    news_context = ""
+    try:
+        top5 = candidates[:5]
+        if top5:
+            news_context = check_candidate_news_grok(top5)
+    except Exception as e:
+        news_context = f"（消息面预检失败: {e}）"
+    
+    compact_candidates = candidates[:15]
+    # 自适应参数（市场情绪驱动）
+    adaptive = get_adaptive_params()
+    # 多战法上下文：统计战法分布，给每个候选标注最优战法
+    strategy_labels = {
+        "trend_pullback": "趋势回踩（强趋势股回踩BBI/EMA不破）",
+        "breakout": "突破确认（平台/前高突破后回踩站稳）",
+        "shaofu_b1": "少妇B1（J≤12最好负值+N型上移+缩量回调+牛绳约束）",
+        "b2_confirm": "B2确认（B1后放量中/大阳，J未过热，趋势确认）",
+        "b3_accelerate": "B3中继（B2后小阳/十字星，分歧转一致）",
+        "super_b1": "超级B1（放量破位洗盘后缩量企稳，J值仍负）",
+    }
+    # Build compact candidate list with strategy context
+    cand_lines = []
+    for c in compact_candidates:
+        strat = c.get("best_strategy", "")
+        strat_label = strategy_labels.get(strat, strat)
+        cand_lines.append(
+            f"  {c.get('code')} {c.get('name')} 现价{c.get('price')} "
+            f"涨跌{c.get('change_pct')}% "
+            f"战法:{strat_label} "
+            f"评分:{c.get('best_score')}/{c.get('score_total',10)} "
+            f"基准:{c.get('entry_threshold','-')} "
+            f"定位:{c.get('score_basis','-')} "
+            f"仓位纪律:{c.get('position_hint','-')} "
+            f"时间纪律:{c.get('time_stop','-')} "
+            f"共识:{c.get('consensus_count',1)}/多战法 "
+            f"距BBI:{c.get('distance_pct')}% "
+            f"风险:{','.join(c.get('risk_flags',[]) or ['无'])}"
+        )
+    candidates_section = "\n".join(cand_lines) if cand_lines else "（无候选股）"
+    decision_portfolio = compact_portfolio_for_decision(portfolio)
+
+    prompt = f"""你是A股模拟账户交易决策器。账户初始资金100万，只做A股模拟交易，不是真实下单。
+必须遵守：
+- A股模拟成交窗口：09:30-11:30、13:00-15:00；09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30为静默期，不得直接按参考价记成交。
+- T+1：今日买入的股票今日不可卖；只能卖available_qty。
+- 买入必须100股整数倍；不能融资、不能做空、现金不能为负。
+- 单次决策最多给5条操作；单票目标仓位原则上不超过总资产20%；保留至少5%现金。
+- 首次建仓不超过总资金50%；尾盘(14:30后)买入更保守。
+- 突破确认战法单票仓位15%，趋势回踩和Z哥B1类战法单票仓位10%
+- 自动卖出规则：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出
+- 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出
+- 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场
+- 同板块持仓不超过2只（避免集中风险）
+- 必须按候选自带的“基准”判断是否达标；未达各自基准只能观察，不能因为裸分接近8就买
+- 策略共识≥3个战法时仓位可放大1.5x，共识=1时仓位缩到基准的0.7x
+- 当前自适应模式：{adaptive.get('label','中性')}（止损{adaptive.get('stop_loss',STOP_LOSS_PCT)}% 仓位{adaptive.get('position_mult',1.0)}x） ← 新增
+- 盈亏比过滤：优先选盈亏比≥2:1的票（上涨空间/下跌空间），盈亏比<1.5自动标记风险 ← 新增
+- 波动率仓位：20日波动>3.5%→仓位×0.7，波动<1.5%→仓位×1.3 ← 新增
+- 融资+大宗信号：优先买入融资净买入+大宗溢价的票，谨慎对待融资偿还+大宗折价的票 ← 新增
+
+【多战法选股原则 — 回测优化版(v4，含Z哥买入体系)】
+基于50只主板票×120天历史回测数据优化：
+
+硬性准入规则（全部战法通用）：
+- 距BBI > 6.5% → 不买（回测显示追高胜率骤降）
+- 评分 < 8 → 不买（min_score从7提到8后，假信号减少40%+）
+- 止损线统一设为 -4%（回测显示-5%止损吃掉太多利润）
+- 止盈设在 +12%~15%（回测显示突破确认能吃到9.6%平均盈利）
+- 单票仓位 ≤ 总资金15%（回测显示持仓<5只时最大回撤控制在8%以内）
+
+Z哥买入体系评分基准（永不套牢优先）：
+1. B3中继：确定性最高但盈亏比最低，基准最高；只做贴近B2、振幅小、不过热的箭在弦上，次日不涨开盘走
+2. B2确认：看放量长阳、一阳穿多线、J<55、B1后3日内最好；偏滞后或离BBI远就是追高，降级
+3. 少妇B1：胜率/盈亏比优先，但必须止损空间近、黄线/BBI附近、N型上移、上方压力不重；3天不涨走
+4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑
+
+非Z哥补充策略：
+- 突破确认 — 优先看有效突破和回踩不破
+- 趋势回踩 — 需要趋势确认后再买
+
+⚠️ 突破确认信号虽然少但质量高，不要因为它频率低就忽略。
+⚠️ 有风险标记的候选股，请结合其近期消息面（利空/减持/监管）综合判断，不要只看技术面。
+
+当前是否允许交易：{trade_allowed}，原因：{trade_reason}
+大盘环境：{market_env.get('detail', '未知')}
+市场情绪：{market_sent.get('detail', '未知')}
+{sentiment_note}
+热门板块(涨停集中)：{', '.join(market_sent.get('hot_sectors', [])[:5]) or '无数据'}
+
+当前账户JSON：
+{json.dumps(decision_portfolio, ensure_ascii=False)}
+
+{news_context}
+
+本次多战法候选股（每只标注最优战法+评分）：
+{candidates_section}
+
+严格返回JSON，不要markdown，不要解释，格式：
+{{
+  "summary":"一句中文结论（含战法偏好+总体判断）",
+  "actions":[
+    {{"action":"BUY|SELL|HOLD","code":"600000","name":"股票名","shares":100,"reason":"中文理由（含战法名）"}}
+  ]
+}}
+如果不适合交易，返回 actions 为空或 HOLD。
+"""
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": DECISION_MAX_TOKENS,
+    }
+
+    content = request_chat_content(base_url, api_key, payload, MODEL, max_retries=3, timeout=DECISION_REQUEST_TIMEOUT)
+
+    result = extract_json(content)
+    if not isinstance(result, dict):
+        raise RuntimeError("model did not return object")
+    result["model"] = MODEL
+    result["provider"] = PROVIDER_DISPLAY_NAME
+    return result
+
+
+def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates: list[dict[str, Any]],
+                    trade_allowed: bool, trade_reason: str) -> list[dict[str, Any]]:
+    executed = []
+    cand_by_code = {normalize_code(c.get("code", "")): c for c in candidates}
+    positions = state.setdefault("positions", {})
+    cash = float(state.get("cash") or 0)
+    if not trade_allowed:
+        return executed
+    for action in (decision.get("actions") or [])[:5]:
+        current_allowed, current_reason = is_a_share_execution_time()
+        if not current_allowed:
+            decision["execution_blocked_reason"] = f"执行前复核失败：{current_reason}"
+            break
+        act = str(action.get("action") or "HOLD").upper()
+        code = normalize_code(action.get("code") or "")
+        if not code or act == "HOLD":
+            continue
+        q = execution_quote(code)
+        price = q.get("price") if isinstance(q.get("price"), (int, float)) else None
+        if not price or price <= 0:
+            continue
+        price_source = q.get("execution_price_source") or q.get("source") or "quote"
+        candidate = cand_by_code.get(code) or {}
+        name = action.get("name") or q.get("name") or candidate.get("name") or ""
+        reason = _fallback_action_reason(action, candidate, act, name)
+        action["reason"] = reason
+        shares = int(action.get("shares") or 0)
+        shares = max(0, shares // 100 * 100)
+        if shares <= 0:
+            continue
+        if act == "BUY":
+            buy_strategy = classify_buy_strategy(reason, candidate)
+            # Max affordable includes buy-side fees; keep the existing 5% cash buffer discipline.
+            per_lot_gross = price * 100
+            per_lot_fees = calc_trade_fees(per_lot_gross, "BUY")["total_fee"]
+            max_affordable = int((cash * 0.95) // (per_lot_gross + per_lot_fees)) * 100
+            qty = min(shares, max_affordable)
+            if qty <= 0:
+                continue
+            gross = qty * float(price)
+            fees = calc_trade_fees(gross, "BUY")
+            total_cost = gross + fees["total_fee"]
+            if total_cost > cash:
+                continue
+            pos = positions.setdefault(code, {"code": code, "name": name, "qty": 0, "avg_cost": 0.0, "buy_date_lots": {}, "last_price": price})
+            old_qty = position_qty(pos)
+            old_cost = old_qty * float(pos.get("avg_cost") or 0)
+            new_qty = old_qty + qty
+            pos["qty"] = new_qty
+            pos.pop("shares", None)
+            # Avg cost includes buy-side transaction fees.
+            pos["avg_cost"] = round((old_cost + total_cost) / new_qty, 4)
+            pos["name"] = name
+            pos["last_price"] = price
+            if old_qty <= 0 or not pos.get("buy_strategy"):
+                pos["buy_strategy"] = buy_strategy
+                pos["entry_reason"] = reason
+            elif pos.get("buy_strategy") != buy_strategy:
+                pos["buy_strategy"] = "mixed"
+                pos["entry_reason"] = "多批次买入：" + str(pos.get("entry_reason") or reason)
+            pos["highest_price"] = round(max(float(pos.get("highest_price") or price), float(price)), 3)
+            current_pnl_pct = ((float(price) / float(pos["avg_cost"]) - 1) * 100) if pos.get("avg_cost") else 0.0
+            prior_max_pnl = float(pos.get("max_pnl_pct") or current_pnl_pct)
+            pos["max_pnl_pct"] = round(max(prior_max_pnl, current_pnl_pct), 2)
+            if not pos.get("shaofu_stop_price"):
+                pos["shaofu_stop_price"] = round(float(price) * (1 + STOP_LOSS_PCT / 100), 3)
+                pos["shaofu_stop_source"] = "fallback_pct"
+            lots = pos.setdefault("buy_date_lots", {})
+            lots[today_key()] = int(lots.get(today_key(), 0)) + qty
+            cash -= total_cost
+            executed.append({"time": now_ts(), "action": "BUY", "code": code, "name": name,
+                             "shares": qty, "price": round(price, 3), "amount": round(gross, 2),
+                             "commission": fees["commission"], "transfer_fee": fees["transfer_fee"],
+                             "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
+                             "total_cost": round(total_cost, 2), "price_source": price_source,
+                             "trade_reason": current_reason, "reason": reason,
+                             "buy_strategy": buy_strategy})
+        elif act == "SELL":
+            pos = positions.get(code)
+            if not pos:
+                continue
+            avg_cost = float(pos.get("avg_cost") or 0)
+            qty = min(shares, available_to_sell(pos))
+            qty = qty // 100 * 100
+            if qty <= 0:
+                continue
+            gross = qty * float(price)
+            fees = calc_trade_fees(gross, "SELL")
+            net_proceeds = gross - fees["total_fee"]
+            cost_basis = qty * avg_cost
+            realized_pnl = net_proceeds - cost_basis
+            realized_pnl_pct = (realized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+            entry_strategy = str(
+                pos.get("buy_strategy")
+                or latest_buy_strategy_for_code(state, code)
+                or classify_buy_strategy(str(pos.get("entry_reason") or ""))
+            )
+            exit_rule = classify_exit_rule(reason)
+            pos["qty"] = position_qty(pos) - qty
+            pos.pop("shares", None)
+            pos["last_price"] = price
+            # consume non-today lots FIFO-ish
+            remaining = qty
+            lots = pos.get("buy_date_lots") or {}
+            for date in sorted(list(lots.keys())):
+                if date == today_key() or remaining <= 0:
+                    continue
+                use = min(int(lots.get(date) or 0), remaining)
+                lots[date] = int(lots.get(date) or 0) - use
+                remaining -= use
+                if lots[date] <= 0:
+                    lots.pop(date, None)
+            if pos["qty"] <= 0:
+                positions.pop(code, None)
+            cash += net_proceeds
+            executed.append({"time": now_ts(), "action": "SELL", "code": code, "name": pos.get("name") or name,
+                             "shares": qty, "price": round(price, 3), "amount": round(gross, 2),
+                             "commission": fees["commission"], "transfer_fee": fees["transfer_fee"],
+                             "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
+                             "net_proceeds": round(net_proceeds, 2), "pnl": round(realized_pnl, 2),
+                             "pnl_pct": round(realized_pnl_pct, 2), "price_source": price_source,
+                             "trade_reason": current_reason, "reason": reason,
+                             "buy_strategy": entry_strategy, "exit_rule": exit_rule})
+    state["cash"] = round(cash, 2)
+    state.setdefault("trade_log", []).extend(executed)
+    del state["trade_log"][:-TRADE_LOG_LIMIT]
+    return executed
+
+
+def _sync_decision_to_db(log_entry: dict):
+    """将决策日志同步写入 SQLite。"""
+    try:
+        from niuniu_db import record_decision as _rd
+        _rd(log_entry)
+    except Exception: pass
+
+
+def _sync_trades_to_db(executed: list[dict[str, Any]]):
+    """将已成交记录同步写入 SQLite。"""
+    if not executed:
+        return
+    try:
+        from niuniu_db import record_trade as _rt
+        for item in executed:
+            _rt(item)
+    except Exception: pass
+
+
+def _sync_positions_to_db(state: dict[str, Any]):
+    """将当前持仓快照同步写入 SQLite。"""
+    try:
+        from niuniu_db import snapshot_positions as _sp
+        _sp(state.get("positions", {}))
+    except Exception: pass
+
+
+def record_decision_log_entry(log_entry: dict[str, Any], *, mark_b1_done: bool = False) -> None:
+    """Append a visible practice decision/event log and sync it to SQLite."""
+    state = load_state()
+    generated_at = log_entry.get("b1_generated_at") or ""
+    state.setdefault("decision_log", []).append(log_entry)
+    del state["decision_log"][:-50]
+    state["last_decision_at"] = log_entry.get("time") or now_ts()
+    if log_entry.get("decision", {}).get("error"):
+        state["last_error"] = log_entry["decision"]["error"]
+    if mark_b1_done and generated_at:
+        state["last_b1_generated_at"] = generated_at
+    _sync_decision_to_db(log_entry)
+    save_state(state)
+
+
+def _fallback_action_reason(action: dict[str, Any], candidate: dict[str, Any] | None, act: str, name: str) -> str:
+    """Build a non-empty trade reason when the model omits one."""
+    explicit = str(action.get("reason") or "").strip()
+    if explicit:
+        return explicit
+    if act == "BUY" and candidate:
+        strategy = candidate.get("score_basis") or candidate.get("best_strategy") or "候选战法"
+        score = candidate.get("best_score", candidate.get("score"))
+        threshold = candidate.get("entry_threshold")
+        dist = candidate.get("distance_pct")
+        risk_flags = ",".join(candidate.get("risk_flags") or []) or "无"
+        parts = [f"{strategy}达标"]
+        if score is not None:
+            parts.append(f"评分{score}")
+        if threshold is not None:
+            parts.append(f"基准{threshold}")
+        if dist is not None:
+            parts.append(f"距BBI{dist}%")
+        parts.append(f"风险标记{risk_flags}")
+        return "模型买入：" + "，".join(parts)
+    if act == "SELL":
+        return f"模型卖出：{name or action.get('code') or '持仓'}风控/调仓，模型未返回详细理由"
+    return "模型操作：模型未返回详细理由，按组合规则执行"
+
+
+def parse_schedule_slot_minute(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(str(value or ""), "%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
+
+def deferred_execution_due_at(schedule_slot: str, now: datetime | None = None) -> str:
+    """Return the next execution timestamp for a morning schedule that completed during lunch."""
+    now = now or datetime.now()
+    slot_dt = parse_schedule_slot_minute(schedule_slot)
+    if not slot_dt or slot_dt.date() != now.date():
+        return ""
+    if not (dtime(9, 30) <= slot_dt.time() <= dtime(11, 30)):
+        return ""
+    if dtime(11, 30) < now.time() < dtime(13, 0):
+        return now.replace(hour=13, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+    return ""
+
+
+def decision_has_executable_actions(decision: dict[str, Any]) -> bool:
+    for action in decision.get("actions") or []:
+        act = str(action.get("action") or "HOLD").upper()
+        code = normalize_code(action.get("code") or "")
+        shares = int(action.get("shares") or 0)
+        if act in {"BUY", "SELL"} and code and shares > 0:
+            return True
+    return False
+
+
+def _json_safe_copy(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False))
+    except Exception:
+        return value
+
+
+def queue_deferred_decision(
+    state: dict[str, Any],
+    *,
+    generated_at: str,
+    schedule_slot: str,
+    schedule_run_kind: str,
+    schedule_triggered_at: str,
+    due_at: str,
+    decision: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    reason: str,
+) -> dict[str, Any]:
+    pending_id = f"{schedule_slot or 'unscheduled'}|{generated_at}"
+    pending = state.setdefault("pending_decisions", [])
+    entry = {
+        "id": pending_id,
+        "status": "pending",
+        "created_at": now_ts(),
+        "due_at": due_at,
+        "b1_generated_at": generated_at,
+        "schedule_slot": schedule_slot,
+        "schedule_run_kind": schedule_run_kind,
+        "schedule_triggered_at": schedule_triggered_at,
+        "reason": reason,
+        "decision": _json_safe_copy(decision),
+        "candidates": _json_safe_copy(candidates[:20]),
+    }
+    for idx, old in enumerate(pending):
+        if isinstance(old, dict) and old.get("id") == pending_id:
+            if old.get("status") == "pending":
+                pending[idx] = {**old, **entry}
+                return pending[idx]
+            return old
+    pending.append(entry)
+    state["pending_decisions"] = pending[-30:]
+    return entry
+
+
+def execute_due_pending_decisions(now: datetime | None = None) -> dict[str, Any]:
+    """Execute queued model decisions once the next A-share executable window opens."""
+    now = now or datetime.now()
+    trade_allowed, trade_reason = is_a_share_execution_time(now)
+    if not trade_allowed:
+        return {"executed": [], "attempted": 0, "reason": trade_reason}
+    state = load_state()
+    pending = state.get("pending_decisions") or []
+    if not pending:
+        return {"executed": [], "attempted": 0}
+
+    all_executed: list[dict[str, Any]] = []
+    attempted = 0
+    changed = False
+    for entry in pending:
+        if not isinstance(entry, dict) or entry.get("status") != "pending":
+            continue
+        due_dt = parse_ts(entry.get("due_at") or "")
+        if due_dt and now < due_dt:
+            continue
+        if due_dt and now.date() > due_dt.date():
+            entry["status"] = "expired"
+            entry["expired_at"] = now_ts()
+            changed = True
+            continue
+        if now.time() > dtime(15, 0):
+            entry["status"] = "expired"
+            entry["expired_at"] = now_ts()
+            changed = True
+            continue
+
+        attempted += 1
+        decision = _json_safe_copy(entry.get("decision") or {})
+        original_summary = str(decision.get("summary") or "").strip()
+        decision["summary"] = f"延迟成交执行：{original_summary}" if original_summary else "延迟成交执行"
+        decision["deferred_execution"] = {
+            "source": "pending_decision",
+            "created_at": entry.get("created_at") or "",
+            "due_at": entry.get("due_at") or "",
+            "schedule_slot": entry.get("schedule_slot") or "",
+        }
+        candidates = entry.get("candidates") or []
+        executed = execute_actions(
+            state,
+            decision,
+            candidates if isinstance(candidates, list) else [],
+            True,
+            f"延迟成交触发：原计划{entry.get('schedule_slot') or '-'}，{trade_reason}",
+        )
+        entry["status"] = "executed"
+        entry["executed_at"] = now_ts()
+        entry["executed_count"] = len(executed)
+        changed = True
+        all_executed.extend(executed)
+        log_entry = {
+            "time": now_ts(),
+            "b1_generated_at": entry.get("b1_generated_at") or "",
+            "trade_allowed": True,
+            "trade_reason": f"延迟成交触发：原计划{entry.get('schedule_slot') or '-'}，{trade_reason}",
+            "decision": decision,
+            "executed": executed,
+        }
+        for key in ("schedule_slot", "schedule_run_kind", "schedule_triggered_at"):
+            if entry.get(key):
+                log_entry[key] = entry.get(key)
+        state.setdefault("decision_log", []).append(log_entry)
+        del state["decision_log"][:-50]
+        state["last_decision_at"] = log_entry["time"]
+        _sync_decision_to_db(log_entry)
+
+    if changed:
+        if all_executed:
+            _sync_trades_to_db(all_executed)
+            _sync_positions_to_db(state)
+        record_equity(state)
+        save_state(state)
+    return {"executed": all_executed, "attempted": attempted}
+
+
+def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> dict[str, Any]:
+    state = load_state()
+    generated_at = b1_payload.get("generated_at") or now_ts()
+    schedule_slot = b1_payload.get("schedule_slot") or ""
+    schedule_run_kind = b1_payload.get("schedule_run_kind") or ""
+    schedule_triggered_at = b1_payload.get("schedule_triggered_at") or ""
+    if not force and state.get("last_b1_generated_at") == generated_at:
+        return {"skipped": True, "reason": "already_decided_for_this_b1", "state": enrich_portfolio(state)}
+    
+    # 日内亏损预算检查
+    budget_exceeded, today_pnl = check_daily_loss_budget(state)
+    if budget_exceeded and not force:
+        decision = {"summary": f"🛑 日内亏损预算触发（今日累计{today_pnl:.1f}% ≤ {DAILY_LOSS_BUDGET_PCT}%），暂停当日开仓", "actions": [], "model": "SYSTEM_RISK_BUDGET", "provider": "local_rule"}
+        state["trading_paused"] = True
+        state["pause_reason"] = f"日内亏损预算({today_pnl:.1f}%)"
+        state["pause_since"] = now_ts()
+        # 触发自优化
+        try:
+            from self_optimizer import run_optimization
+            run_optimization()
+        except Exception: pass
+        log_entry = {
+            "time": now_ts(), "b1_generated_at": generated_at,
+            "trade_allowed": False, "trade_reason": f"日内亏损预算({today_pnl:.1f}%)",
+            "decision": decision, "executed": [],
+        }
+        if schedule_slot:
+            log_entry["schedule_slot"] = schedule_slot
+            log_entry["schedule_run_kind"] = schedule_run_kind
+            log_entry["schedule_triggered_at"] = schedule_triggered_at
+        state.setdefault("decision_log", []).append(log_entry)
+        _sync_decision_to_db(log_entry)
+        save_state(state)
+        return {"decision": decision, "executed": [], "portfolio": enrich_portfolio(state)}
+    
+    # 自适应参数
+    adaptive = get_adaptive_params()
+    
+    candidates = b1_payload.get("items") or []
+    
+    # 本轮允许交易 → 清除之前的暂停标记
+    if "trading_paused" in state:
+        del state["trading_paused"]
+        if "pause_reason" in state:
+            del state["pause_reason"]
+        if "pause_since" in state:
+            del state["pause_since"]
+    
+    trade_allowed, trade_reason = is_a_share_execution_time()
+    deferred_due_at = "" if trade_allowed else deferred_execution_due_at(schedule_slot)
+    market_env = check_market_environment()
+    market_sent = check_market_sentiment()
+    # 市场情绪过冷时降低仓位上限（模型自行判断，此处仅提示）
+    sentiment_note = ""
+    if market_sent["sentiment"] == "cold" and trade_allowed:
+        sentiment_note = f"⚠️市场情绪偏冷({market_sent['detail']})，建议仓位减半或不建仓"
+    portfolio = enrich_portfolio(state)
+    try:
+        if not trade_allowed and deferred_due_at:
+            model_trade_reason = (
+                f"计划{schedule_slot[-5:]}选股属于上午连续竞价时段；当前{trade_reason}。"
+                f"请正常生成买卖策略，系统会在{deferred_due_at[-8:-3]}开盘后复核并成交。"
+            )
+            decision = call_deepseek_decision(candidates, portfolio, True, model_trade_reason)
+            execution_allowed, execution_reason = is_a_share_execution_time()
+            if execution_allowed:
+                trade_allowed = True
+                trade_reason = execution_reason
+                executed = execute_actions(state, decision, candidates, execution_allowed, execution_reason)
+            else:
+                trade_allowed = False
+                trade_reason = f"{trade_reason}；已生成买卖策略，等待{deferred_due_at[-8:-3]}成交"
+                executed = []
+                if decision_has_executable_actions(decision):
+                    pending = queue_deferred_decision(
+                        state,
+                        generated_at=generated_at,
+                        schedule_slot=schedule_slot,
+                        schedule_run_kind=schedule_run_kind,
+                        schedule_triggered_at=schedule_triggered_at,
+                        due_at=deferred_due_at,
+                        decision=decision,
+                        candidates=candidates,
+                        reason=trade_reason,
+                    )
+                    decision["deferred_execution"] = {
+                        "status": pending.get("status"),
+                        "due_at": pending.get("due_at"),
+                        "schedule_slot": pending.get("schedule_slot"),
+                    }
+                else:
+                    decision["deferred_execution"] = {
+                        "status": "not_queued",
+                        "reason": "模型未给出可执行BUY/SELL动作",
+                        "due_at": deferred_due_at,
+                    }
+        elif not trade_allowed:
+            decision = {"summary": f"{trade_reason}，本轮只记录候选，不执行买卖", "actions": [], "model": MODEL, "provider": PROVIDER_DISPLAY_NAME}
+            executed = []
+        else:
+            decision = call_deepseek_decision(candidates, portfolio, trade_allowed, trade_reason)
+            execution_allowed, execution_reason = is_a_share_execution_time()
+            if not execution_allowed:
+                decision["decision_trade_reason"] = trade_reason
+                decision["execution_blocked_reason"] = f"模型返回后复核失败：{execution_reason}"
+                trade_allowed = False
+                trade_reason = execution_reason
+                executed = []
+            else:
+                if execution_reason != trade_reason:
+                    decision["decision_trade_reason"] = trade_reason
+                    trade_reason = execution_reason
+                executed = execute_actions(state, decision, candidates, execution_allowed, execution_reason)
+        state["last_error"] = ""
+    except Exception as exc:
+        decision = {"summary": "模型决策失败，本轮不交易", "actions": [], "model": MODEL, "provider": PROVIDER_DISPLAY_NAME, "error": f"{type(exc).__name__}: {exc}"}
+        executed = []
+        state["last_error"] = decision["error"]
+    state["last_b1_generated_at"] = generated_at
+    state["last_decision_at"] = now_ts()
+    log_entry = {
+        "time": now_ts(),
+        "b1_generated_at": generated_at,
+        "trade_allowed": trade_allowed,
+        "trade_reason": trade_reason,
+        "decision": decision,
+        "executed": executed,
+    }
+    if schedule_slot:
+        log_entry["schedule_slot"] = schedule_slot
+        log_entry["schedule_run_kind"] = schedule_run_kind
+        log_entry["schedule_triggered_at"] = schedule_triggered_at
+    state.setdefault("decision_log", []).append(log_entry)
+    del state["decision_log"][:-50]
+    _sync_decision_to_db(log_entry)
+    if executed:
+        _sync_trades_to_db(executed)
+        _sync_positions_to_db(state)
+    record_equity(state)
+    save_state(state)
+    return {"decision": decision, "executed": executed, "portfolio": enrich_portfolio(state)}
+
+
+def resume_trading() -> dict[str, Any]:
+    """手动恢复交易（清除所有暂停标记）。"""
+    state = load_state()
+    cleared = []
+    for key in ["trading_paused", "pause_reason", "pause_since"]:
+        if key in state:
+            del state[key]
+            cleared.append(key)
+    state.setdefault("decision_log", []).append({
+        "time": now_ts(), "b1_generated_at": "",
+        "trade_allowed": True, "trade_reason": "手动恢复交易",
+        "decision": {"summary": "🔄 手动恢复交易", "actions": [], "model": "MANUAL_RESUME", "provider": "local_rule"},
+        "executed": [],
+    })
+    save_state(state)
+    return {"resumed": True, "cleared": cleared, "state": enrich_portfolio(state)}
+
+
+def get_dashboard_payload() -> dict[str, Any]:
+    state = load_state()
+    # 看板读取必须是无交易副作用的：只刷新行情/指标和权益曲线。
+    # 自动止盈止损只能由明确的交易调度流程触发，避免页面刷新造成非预定成交。
+    refresh_realtime_prices(state)
+    refresh_position_intraday(state)
+    _refresh_position_bbi(state)
+    refresh_today_sold_stocks(state)
+    if not rebuild_intraday_equity_curve(state):
+        record_equity(state)
+    _sync_positions_to_db(state)
+    save_state(state)
+    
+    payload = enrich_portfolio(state)
+    payload["equity_history"] = state.get("equity_history", [])
+    payload["daily_equity_history"] = state.get("daily_equity_history", [])
+    # 补充从 DB 读取的每日资金快照（作为兜底）
+    try:
+        from niuniu_db import query_daily_equity as _qde
+        db_daily = _qde()
+        if db_daily and not payload["daily_equity_history"]:
+            payload["daily_equity_history"] = db_daily
+    except Exception: pass
+    payload["market_environment"] = check_market_environment()
+    payload["market_sentiment"] = check_market_sentiment()
+    payload["trading_paused"] = state.get("trading_paused", False)
+    payload["pause_reason"] = state.get("pause_reason", "")
+    payload["pause_since"] = state.get("pause_since", "")
+    payload["strategy_performance"] = track_strategy_performance(state)
+    payload["trade_rule_note"] = "A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。系统自动卖出：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。买入按万一免五计费。"
+    payload["fee_rule"] = {
+        "commission_rate": COMMISSION_RATE,
+        "commission_min": COMMISSION_MIN,
+        "stamp_duty_sell_rate": STAMP_DUTY_SELL_RATE,
+        "transfer_fee_rate": TRANSFER_FEE_RATE,
+        "label": "万一免五；买入=佣金+过户费，卖出=佣金+过户费+印花税",
+    }
+    payload["decision_model"] = MODEL
+    payload["decision_provider"] = PROVIDER_DISPLAY_NAME
+    return payload
+
+
+if __name__ == "__main__":
+    print(json.dumps(get_dashboard_payload(), ensure_ascii=False, indent=2))
