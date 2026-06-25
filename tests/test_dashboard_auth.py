@@ -359,6 +359,7 @@ class DashboardAuthTests(unittest.TestCase):
                 'DASHBOARD_B1_SCHEDULE_TIMES': '09:25, 10:00, 14:50',
                 'DASHBOARD_US_RATING_CRON': '10:30',
                 'DASHBOARD_MARKET_AUCTION_CRON': '09:26',
+                'X_WATCHLIST_ACCOUNTS': '@Foo, bar, foo',
                 'X_WATCHLIST_DAEMON_INTERVAL_SECONDS': '900',
             }
             updates = dashboard.normalize_business_updates(updates)
@@ -382,10 +383,12 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
+        self.assertEqual(parsed['X_WATCHLIST_ACCOUNTS'], 'foo,bar')
         self.assertEqual(parsed['X_WATCHLIST_DAEMON_INTERVAL_SECONDS'], '900')
         payload_text = json.dumps(payload, ensure_ascii=False)
         self.assertIn('09:25、10:00、14:50', payload_text)
         self.assertIn('北京时间 09:26', payload_text)
+        self.assertIn('@foo、@bar', payload_text)
         self.assertNotIn('26 9 * * 1-5', payload_text)
         self.assertFalse(any('LaunchAgent' in item.get('source', '') for item in payload['items']))
 
@@ -529,6 +532,7 @@ class DashboardAuthTests(unittest.TestCase):
                 'env__DASHBOARD_INDICES_TTL_SECONDS': '20',
                 'env__DASHBOARD_MARKET_AUCTION_CRON': '09:26',
                 'env__DASHBOARD_US_RATING_CRON': '10:30',
+                'env__X_WATCHLIST_ACCOUNTS': ['', '@Foo', 'bar', 'foo'],
                 'env__DASHBOARD_HOME': '/tmp/should-not-be-written',
             }, doseq=True).encode('utf-8')
             handler = FakeHandler(
@@ -574,6 +578,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(parsed['DASHBOARD_INDICES_TTL_SECONDS'], '20')
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
+        self.assertEqual(parsed['X_WATCHLIST_ACCOUNTS'], 'foo,bar')
         self.assertEqual(runtime_b1_times, ('09:25', '10:00', '14:50'))
         self.assertEqual(runtime_indices_ttl, 20)
         self.assertNotIn('DASHBOARD_HOME', parsed)

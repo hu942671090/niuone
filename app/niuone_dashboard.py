@@ -147,6 +147,18 @@ SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|credential|(?:^|[_-])token(?:$|[_-]))",
     re.I,
 )
+DEFAULT_X_WATCHLIST_ACCOUNTS = (
+    "wallstreet0name",
+    "hoyooyoo",
+    "freearkshaw",
+    "aleabitoreddit",
+    "ululazmi27",
+    "xiaomustock",
+    "johnsonz91127",
+    "oldk_gillis",
+    "dmjk001",
+)
+DEFAULT_X_WATCHLIST_ACCOUNTS_TEXT = ",".join(DEFAULT_X_WATCHLIST_ACCOUNTS)
 
 ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_HOME", "label": "运行数据目录", "group": "基础路径", "kind": "path", "default": str(LOCAL_DATA_DIR / "runtime"), "effect": "restart"},
@@ -209,6 +221,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_MARKET_AUCTION_CRON", "label": "盘前竞价监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "25 9 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_MIDDAY_CRON", "label": "午盘监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "40 11 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_CLOSE_CRON", "label": "盘后监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "10 15 * * 1-5", "effect": "next_run"},
+    {"name": "X_WATCHLIST_ACCOUNTS", "label": "推文监控作者", "group": "推文监控作者", "kind": "handle_list", "default": DEFAULT_X_WATCHLIST_ACCOUNTS_TEXT, "effect": "next_run"},
     {"name": "X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "label": "推文监控间隔", "group": "推文监控周期", "kind": "int", "default": "1200", "effect": "next_run"},
     {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "美股买入评级周期", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
     {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "美股买入评级周期", "kind": "int", "default": "240", "effect": "next_run"},
@@ -247,6 +260,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
     "DASHBOARD_MARKET_CLOSE_CRON",
+    "X_WATCHLIST_ACCOUNTS",
     "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
     "DASHBOARD_US_RATING_CRON",
     "US_RATING_DEADLINE_SECONDS",
@@ -270,6 +284,7 @@ ENV_GROUP_ORDER = [
     "买卖决策模型",
     "选股及买卖决策时间点",
     "盘面监控生产时间点",
+    "推文监控作者",
     "推文监控周期",
     "美股买入评级周期",
     "指数行情更新周期",
@@ -1413,6 +1428,8 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         int(value)
     if kind == "time_list":
         return normalize_time_list_update(value)
+    if kind == "handle_list":
+        return normalize_handle_list_update(value)
     return value
 
 
@@ -1575,6 +1592,7 @@ ADMIN_GROUP_NOTES = {
     "买卖决策模型": "推荐使用 deepseek-v4-pro；用于选股结果后的买卖决策。",
     "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；盘面监控在 A 股交易日触发。",
+    "推文监控作者": "填写 X/Twitter handle；支持带 @ 或不带 @，保存后下一轮推文监控使用。",
     "推文监控周期": "单位为秒，保存后从下一轮监控开始使用。",
     "美股买入评级周期": "直接填写北京时间 HH:MM；默认每天触发。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
@@ -1624,6 +1642,38 @@ def split_hhmm_values(value: str) -> list[str]:
     return values
 
 
+def normalize_x_handle(value: str) -> str:
+    handle = str(value or "").strip().lstrip("@").lower()
+    if not handle:
+        return ""
+    if not re.fullmatch(r"[a-z0-9_]{1,15}", handle):
+        return ""
+    return handle
+
+
+def split_handle_values(value: str) -> list[str]:
+    handles: list[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"[,，;\s]+", str(value or "")):
+        handle = normalize_x_handle(raw)
+        if not handle or handle in seen:
+            continue
+        seen.add(handle)
+        handles.append(handle)
+    return handles
+
+
+def normalize_handle_list_update(value: str) -> str:
+    handles = split_handle_values(value)
+    if not handles and str(value or "").strip():
+        raise ValueError("推文监控作者请使用 X handle，例如 wallstreet0name 或 @wallstreet0name")
+    return ",".join(handles)
+
+
+def friendly_handle_list_text(value: str) -> str:
+    return "、".join("@" + handle for handle in split_handle_values(value))
+
+
 def normalize_time_list_update(value: str) -> str:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1668,6 +1718,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_cron_update(name, normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "time_list":
             normalized[name] = normalize_time_list_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "handle_list":
+            normalized[name] = normalize_handle_list_update(normalized[name])
     return normalized
 
 
@@ -1697,6 +1749,8 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             validate_cron_expr(normalize_cron_update(name, value))
         elif name == "DASHBOARD_B1_SCHEDULE_TIMES":
             normalize_time_list_update(value)
+        elif name == "X_WATCHLIST_ACCOUNTS":
+            normalize_handle_list_update(value)
         elif name in {"X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "DASHBOARD_INDICES_TTL_SECONDS"} and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
@@ -1817,6 +1871,14 @@ def build_admin_config_payload() -> dict[str, Any]:
                 "default": friendly_time_list_text(default_value),
                 "time_values": split_hhmm_values(str(file_value or "")),
             })
+        if schema.get("kind") == "handle_list" and not secret:
+            item.update({
+                "effective": friendly_handle_list_text(effective),
+                "file_value": normalize_handle_list_update(str(file_value or "")),
+                "file_state": friendly_handle_list_text(env_values.get(name) or fallback_value or default_value),
+                "default": friendly_handle_list_text(default_value),
+                "handle_values": split_handle_values(str(file_value or "")),
+            })
         items.append(item)
     return {
         "items": items,
@@ -1880,8 +1942,13 @@ document.addEventListener('click', function(event) {
     var item = document.createElement('div');
     item.className = 'time-list-item';
     var input = document.createElement('input');
-    input.type = 'time';
+    input.type = control.getAttribute('data-input-type') || 'time';
     input.name = fieldName;
+    input.placeholder = control.getAttribute('data-placeholder') || '';
+    if (input.type === 'text') {
+      input.autocapitalize = 'off';
+      input.spellcheck = false;
+    }
     var removeButton = document.createElement('button');
     removeButton.type = 'button';
     removeButton.className = 'time-list-remove';
@@ -4856,13 +4923,34 @@ def render_env_input(item: dict[str, Any]) -> str:
                 "</div>"
             )
         return (
-            f"<div class='time-list-control' data-time-list data-field-name='{field_name}'>"
+            f"<div class='time-list-control' data-time-list data-field-name='{field_name}' data-input-type='time'>"
             f"<input type='hidden' name='{field_name}' value=''>"
             "<div class='time-list-grid' data-time-list-items>"
             + "".join(inputs)
             + "</div><button type='button' class='time-list-add' data-time-list-add "
             "aria-label='添加时间点' title='添加时间点'>+</button></div>"
             "<div class='config-meta'>北京时间</div>"
+        )
+    if kind == "handle_list":
+        values = list(item.get("handle_values") or split_handle_values(value))
+        field_name = f"env__{escaped_name}"
+        inputs = []
+        for handle in values:
+            inputs.append(
+                "<div class='time-list-item'>"
+                f"<input type='text' name='{field_name}' value='@{html.escape(handle)}' placeholder='@handle' autocapitalize='off' spellcheck='false'>"
+                "<button type='button' class='time-list-remove' data-time-list-remove "
+                "aria-label='删除作者' title='删除作者'>x</button>"
+                "</div>"
+            )
+        return (
+            f"<div class='time-list-control' data-time-list data-field-name='{field_name}' data-input-type='text' data-placeholder='@handle'>"
+            f"<input type='hidden' name='{field_name}' value=''>"
+            "<div class='time-list-grid' data-time-list-items>"
+            + "".join(inputs)
+            + "</div><button type='button' class='time-list-add' data-time-list-add "
+            "aria-label='添加作者' title='添加作者'>+</button></div>"
+            "<div class='config-meta'>X/Twitter handle</div>"
         )
     input_type = "number" if kind == "int" else "text"
     return f"<input type='{input_type}' name='env__{escaped_name}' value='{html.escape(value)}'>"
@@ -5164,7 +5252,7 @@ class Handler(BaseHTTPRequestHandler):
         for key, values in parsed.items():
             env_name = key[len("env__"):] if key.startswith("env__") else ""
             schema = ENV_CONFIG_BY_NAME.get(env_name, {})
-            if schema.get("kind") == "time_list":
+            if schema.get("kind") in {"time_list", "handle_list"}:
                 result[key] = ",".join(v.strip() for v in values if v.strip())
             else:
                 result[key] = values[-1] if values else ""

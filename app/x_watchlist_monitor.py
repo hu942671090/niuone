@@ -27,6 +27,7 @@ def load_dashboard_env() -> None:
         "X_WATCHLIST_MODEL",
         "X_WATCHLIST_BASE_URL",
         "X_WATCHLIST_API_KEY",
+        "X_WATCHLIST_ACCOUNTS",
         "CROSSDESK_BASE_URL",
         "CROSSDESK_API_KEY",
     }
@@ -58,7 +59,7 @@ try:
 except Exception:
     yaml = None
 
-ACCOUNTS = [
+DEFAULT_ACCOUNTS = (
     "wallstreet0name",
     "hoyooyoo",
     "freearkshaw",
@@ -68,7 +69,27 @@ ACCOUNTS = [
     "johnsonz91127",
     "oldk_gillis",
     "dmjk001",
-]
+)
+
+
+def parse_watchlist_accounts(value: str | None) -> list[str]:
+    if not value:
+        return list(DEFAULT_ACCOUNTS)
+    accounts: list[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"[,，;\s]+", str(value or "")):
+        handle = raw.strip().lstrip("@").lower()
+        if not handle:
+            continue
+        if not re.fullmatch(r"[a-z0-9_]{1,15}", handle):
+            continue
+        if handle not in seen:
+            seen.add(handle)
+            accounts.append(handle)
+    return accounts or list(DEFAULT_ACCOUNTS)
+
+
+ACCOUNTS = parse_watchlist_accounts(os.environ.get("X_WATCHLIST_ACCOUNTS"))
 MODEL = os.environ.get("X_WATCHLIST_MODEL") or os.environ.get("DASHBOARD_GROK_MODEL") or "grok-4.20-multi-agent-xhigh"
 CROSSDESK_PROVIDER_NAME = "Crossdesk.ccwu.cc"
 CROSSDESK_PROVIDER_NAME_LOWER = CROSSDESK_PROVIDER_NAME.lower()

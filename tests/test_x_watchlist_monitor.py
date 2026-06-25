@@ -39,6 +39,27 @@ print(json.dumps({{
             self.assertEqual(data['archive_dir'], str(Path(tmp) / 'cron' / 'output' / 'x_watchlist_direct'))
             self.assertFalse(data['has_telegram_delivery'])
 
+    def test_accounts_can_be_overridden_from_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['X_WATCHLIST_ACCOUNTS'] = '@Foo, bar;Foo invalid-handle-too-long'
+            code = f"""
+import importlib.util, json, sys
+sys.path.insert(0, {str(SRC)!r})
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+print(json.dumps({{
+  'accounts': m.ACCOUNTS,
+  'parsed_default_len': len(m.parse_watchlist_accounts('')),
+}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            self.assertEqual(data['accounts'], ['foo', 'bar'])
+            self.assertGreater(data['parsed_default_len'], 1)
+
     def test_send_ready_items_archives_to_dashboard_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
