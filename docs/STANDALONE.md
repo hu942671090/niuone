@@ -31,6 +31,18 @@ http://127.0.0.1:8787/
 
 `run.sh` 和 `run.ps1` 的本地首次运行默认关闭访问认证，只适合监听 `127.0.0.1` 的个人使用。如果要部署到非本机环境，请先在设置页或 `.local-data/dashboard.env` 中开启访问认证并设置管理密码。
 
+也可以在一键启动时设置管理员密码，脚本会保存到 `.local-data/dashboard.env`：
+
+```bash
+./run.sh --admin-password "change-this-to-a-strong-password"
+```
+
+Windows PowerShell：
+
+```powershell
+.\run.ps1 --admin-password "change-this-to-a-strong-password"
+```
+
 ## 隔离启动
 
 调试或验收时可以使用独立端口和临时运行目录，避免污染真实数据：

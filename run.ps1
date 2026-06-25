@@ -1,11 +1,10 @@
-[CmdletBinding()]
-param(
-    [switch]$NoBrowser,
-    [switch]$SkipInstall,
-    [switch]$Help
-)
-
 $ErrorActionPreference = "Stop"
+
+$NoBrowser = $false
+$SkipInstall = $false
+$Help = $false
+$AdminPassword = ""
+$AdminPasswordSet = $false
 
 function Show-Usage {
     @"
@@ -15,16 +14,47 @@ Usage:
   .\run.ps1 [options]
 
 Options:
-  -NoBrowser     Do not open the browser automatically
-  -SkipInstall   Skip dependency installation
-  -Help          Show this help
+  --no-browser            Do not open the browser automatically
+  --skip-install          Skip dependency installation
+  --admin-password VALUE  Save the admin password to dashboard.env before starting
+  -h, --help              Show this help
 
 Environment:
   NIUONE_LOCAL_DATA_DIR  Private runtime directory, default: .local-data
   DASHBOARD_HOST         Dashboard host, default: 127.0.0.1
   DASHBOARD_PORT         Dashboard port, default: 8787
   DASHBOARD_AUTH_ENABLED Local auth switch, default on first run: 0
+  DASHBOARD_ADMIN_PASSWORD
+                         Admin password default on first run
 "@
+}
+
+$ScriptArgs = @($args)
+for ($i = 0; $i -lt $ScriptArgs.Count; $i++) {
+    $Arg = [string]$ScriptArgs[$i]
+    if ($Arg -eq "--no-browser") {
+        $NoBrowser = $true
+    } elseif ($Arg -eq "--skip-install") {
+        $SkipInstall = $true
+    } elseif ($Arg -eq "--admin-password") {
+        if ($i + 1 -ge $ScriptArgs.Count) {
+            [Console]::Error.WriteLine("--admin-password requires a value")
+            Show-Usage
+            exit 2
+        }
+        $i++
+        $AdminPassword = [string]$ScriptArgs[$i]
+        $AdminPasswordSet = $true
+    } elseif ($Arg.StartsWith("--admin-password=")) {
+        $AdminPassword = $Arg.Substring("--admin-password=".Length)
+        $AdminPasswordSet = $true
+    } elseif ($Arg -eq "-h" -or $Arg -eq "--help") {
+        $Help = $true
+    } else {
+        [Console]::Error.WriteLine("Unknown option: $Arg")
+        Show-Usage
+        exit 2
+    }
 }
 
 if ($Help) {
@@ -61,6 +91,41 @@ function New-EnvLine {
         [AllowNull()][string]$Value
     )
     return $Name + "=" + (ConvertTo-EnvValue $Value)
+}
+
+function Set-EnvFileValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][string]$Value
+    )
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+
+    $NewLine = New-EnvLine $Name $Value
+    $UpdatedLines = [System.Collections.Generic.List[string]]::new()
+    $Written = $false
+    $Pattern = "^" + [regex]::Escape($Name) + "="
+
+    if (Test-Path $Path) {
+        foreach ($Line in Get-Content -Path $Path -Encoding UTF8) {
+            if ($Line -match $Pattern) {
+                if (-not $Written) {
+                    $UpdatedLines.Add($NewLine)
+                    $Written = $true
+                }
+            } else {
+                $UpdatedLines.Add($Line)
+            }
+        }
+    }
+
+    if (-not $Written) {
+        $UpdatedLines.Add($NewLine)
+    }
+
+    $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllLines($Path, $UpdatedLines.ToArray(), $Utf8NoBom)
 }
 
 function New-DefaultEnvFile {
@@ -168,6 +233,11 @@ $EnvFile = Get-EnvOrDefault "DASHBOARD_ENV_FILE" (Join-Path $LocalDataDir "dashb
 if (-not (Test-Path $EnvFile)) {
     Write-Host "== First run: creating private runtime files =="
     New-DefaultEnvFile -Path $EnvFile -LocalDataDir $LocalDataDir -VenvDir $VenvDir
+}
+
+if ($AdminPasswordSet) {
+    Set-EnvFileValue -Path $EnvFile -Name "DASHBOARD_ADMIN_PASSWORD" -Value $AdminPassword
+    Write-Host "== Saved admin password to $EnvFile =="
 }
 
 Import-DashboardEnv $EnvFile

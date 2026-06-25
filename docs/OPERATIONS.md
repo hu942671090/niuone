@@ -50,6 +50,14 @@
 ./run.sh
 ```
 
+如需在启动时设置并保存管理员密码：
+
+```bash
+./run.sh --admin-password "change-this-to-a-strong-password"
+```
+
+Windows PowerShell 使用 `.\run.ps1 --admin-password "change-this-to-a-strong-password"`。
+
 首次运行会创建 `.local-data/.venv`、安装依赖、生成 `.local-data/dashboard.env`，然后启动：
 
 ```text

@@ -14,6 +14,8 @@ Usage:
 Options:
   --no-browser     Do not open the browser automatically
   --skip-install   Skip dependency installation
+  --admin-password VALUE
+                  Save the admin password to dashboard.env before starting
   -h, --help       Show this help
 
 Environment:
@@ -21,11 +23,15 @@ Environment:
   DASHBOARD_HOST         Dashboard host, default: 127.0.0.1
   DASHBOARD_PORT         Dashboard port, default: 8787
   DASHBOARD_AUTH_ENABLED Local auth switch, default on first run: 0
+  DASHBOARD_ADMIN_PASSWORD
+                         Admin password default on first run
 EOF
 }
 
 OPEN_BROWSER="${NIUONE_OPEN_BROWSER:-1}"
 INSTALL_DEPS="${NIUONE_INSTALL_DEPS:-1}"
+ADMIN_PASSWORD_ARG=""
+ADMIN_PASSWORD_ARG_SET=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,6 +40,20 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-install)
       INSTALL_DEPS=0
+      ;;
+    --admin-password)
+      if [[ $# -lt 2 ]]; then
+        echo "--admin-password requires a value" >&2
+        usage >&2
+        exit 2
+      fi
+      ADMIN_PASSWORD_ARG="$2"
+      ADMIN_PASSWORD_ARG_SET=1
+      shift
+      ;;
+    --admin-password=*)
+      ADMIN_PASSWORD_ARG="${1#*=}"
+      ADMIN_PASSWORD_ARG_SET=1
       ;;
     -h|--help)
       usage
@@ -54,6 +74,37 @@ ENV_FILE="${DASHBOARD_ENV_FILE:-$LOCAL_DATA_DIR/dashboard.env}"
 
 write_env_value() {
   printf '%s=%q\n' "$1" "$2"
+}
+
+save_env_value() {
+  local name="$1"
+  local value="$2"
+  local tmp line existing found
+  mkdir -p "$(dirname "$ENV_FILE")"
+  tmp="$(mktemp "${ENV_FILE}.tmp.XXXXXX")"
+  chmod 600 "$tmp" 2>/dev/null || true
+  line="$(write_env_value "$name" "$value")"
+  found=0
+
+  if [[ -f "$ENV_FILE" ]]; then
+    while IFS= read -r existing || [[ -n "$existing" ]]; do
+      if [[ "$existing" == "$name="* ]]; then
+        if [[ "$found" == "0" ]]; then
+          printf '%s\n' "$line" >> "$tmp"
+          found=1
+        fi
+      else
+        printf '%s\n' "$existing" >> "$tmp"
+      fi
+    done < "$ENV_FILE"
+  fi
+
+  if [[ "$found" == "0" ]]; then
+    printf '%s\n' "$line" >> "$tmp"
+  fi
+
+  mv "$tmp" "$ENV_FILE"
+  chmod 600 "$ENV_FILE" 2>/dev/null || true
 }
 
 create_default_env() {
@@ -87,6 +138,11 @@ create_default_env() {
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "== First run: creating private runtime files =="
   create_default_env
+fi
+
+if [[ "$ADMIN_PASSWORD_ARG_SET" == "1" ]]; then
+  save_env_value DASHBOARD_ADMIN_PASSWORD "$ADMIN_PASSWORD_ARG"
+  echo "== Saved admin password to $ENV_FILE =="
 fi
 
 set -a
