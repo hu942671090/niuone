@@ -133,10 +133,10 @@ AUTH_TOUCH_LOCK = threading.Lock()
 VISIT_STATS_LOCK = threading.Lock()
 API_TTLS = {
     "messages": 10,
-    "b1_screen": 5,
-    "niuniu_practice": 5,
+    "b1_screen": int(os.environ.get("DASHBOARD_B1_SCREEN_TTL_SECONDS", "15") or "15"),
+    "niuniu_practice": int(os.environ.get("DASHBOARD_PRACTICE_TTL_SECONDS", "15") or "15"),
     "practice_benchmarks": 30,
-    "indices": int(os.environ.get("DASHBOARD_INDICES_TTL_SECONDS", "15") or "15"),
+    "indices": int(os.environ.get("DASHBOARD_INDICES_TTL_SECONDS", "60") or "60"),
     "sectors": 60,
     "hot_stocks": 60,
     "money_flow": 60,
@@ -219,7 +219,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "牛牛美股", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
     {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "牛牛美股", "kind": "int", "default": "240", "effect": "next_run"},
     {"name": "US_RATING_REQUEST_TIMEOUT_SECONDS", "label": "美股评级单次请求超时秒数", "group": "牛牛美股", "kind": "int", "default": "120", "effect": "next_run"},
-    {"name": "DASHBOARD_INDICES_TTL_SECONDS", "label": "指数行情更新间隔", "group": "指数行情更新周期", "kind": "int", "default": "15", "effect": "runtime"},
+    {"name": "DASHBOARD_INDICES_TTL_SECONDS", "label": "指数行情更新间隔", "group": "指数行情更新周期", "kind": "int", "default": "60", "effect": "runtime"},
 
     {"name": "X_WATCHLIST_STRICT_CONTEXT_HOLD", "label": "X 上下文缺失时暂缓发送", "group": "X 监控", "kind": "bool", "default": "0", "effect": "next_run"},
     {"name": "X_WATCHLIST_DEADLINE_SECONDS", "label": "X 总截止秒数", "group": "X 监控", "kind": "int", "default": "135", "effect": "next_run"},
@@ -594,18 +594,85 @@ def get_practice_payload() -> dict[str, Any]:
                 "total_pnl": 0, "total_pnl_pct": 0, "trade_log": [], "decision_log": [],
                 "equity_history": [], "last_error": str(exc), "decision_model": "", "decision_provider": ""}
 
+def downsample_sequence(items: list[Any], max_points: int) -> list[Any]:
+    items = list(items or [])
+    if max_points <= 0 or len(items) <= max_points:
+        return items
+    last_idx = len(items) - 1
+    selected: list[Any] = []
+    seen: set[int] = set()
+    for i in range(max_points):
+        idx = int(i * last_idx / max(1, max_points - 1))
+        if idx in seen:
+            continue
+        seen.add(idx)
+        selected.append(items[idx])
+    if selected and selected[-1] is not items[-1]:
+        selected[-1] = items[-1]
+    return selected
+
+
+def compact_intraday_equity_history(history: list[dict[str, Any]], *, max_points: int = 120) -> list[dict[str, Any]]:
+    points = [p for p in (history or []) if isinstance(p, dict)]
+    if not points:
+        return []
+    latest_day = ""
+    for point in reversed(points):
+        ts = str(point.get("time") or "")
+        if len(ts) >= 10:
+            latest_day = ts[:10]
+            break
+    day_points = [p for p in points if str(p.get("time") or "").startswith(latest_day)] if latest_day else points
+    return downsample_sequence(day_points, max_points)
+
+
+def compact_daily_equity_history(history: list[dict[str, Any]], *, max_days: int = 260) -> list[dict[str, Any]]:
+    by_date: dict[str, dict[str, Any]] = {}
+    for point in history or []:
+        if not isinstance(point, dict):
+            continue
+        date = str(point.get("time") or "")[:10]
+        if date:
+            by_date[date] = point
+    return [by_date[date] for date in sorted(by_date.keys())][-max_days:]
+
+
+def compact_strategy_performance(perf: dict[str, Any], *, max_exit_items: int = 12) -> dict[str, Any]:
+    if not isinstance(perf, dict):
+        return {}
+    result = dict(perf)
+    exit_rules = perf.get("exit_rule")
+    if isinstance(exit_rules, dict):
+        compact_rules: dict[str, Any] = {}
+        for key, value in exit_rules.items():
+            if not isinstance(value, dict):
+                compact_rules[key] = value
+                continue
+            next_value = dict(value)
+            items = next_value.get("items")
+            if isinstance(items, list) and len(items) > max_exit_items:
+                next_value["items"] = items[-max_exit_items:]
+                next_value["items_truncated"] = len(items) - max_exit_items
+            compact_rules[key] = next_value
+        result["exit_rule"] = compact_rules
+    return result
+
+
 def get_practice_payload_fast() -> dict[str, Any]:
     """Return a local portfolio snapshot without network quote refresh or auto trading checks."""
     try:
         trader = get_trader_module()
         state = trader.load_state()
         payload = trader.enrich_portfolio(state)
-        payload["equity_history"] = state.get("equity_history", [])
-        payload["daily_equity_history"] = state.get("daily_equity_history", [])
+        payload["equity_history"] = compact_intraday_equity_history(state.get("equity_history", []))
+        payload["daily_equity_history"] = compact_daily_equity_history(state.get("daily_equity_history", []))
+        payload["trade_log"] = (payload.get("trade_log") or [])[:20]
+        payload["decision_log"] = (payload.get("decision_log") or [])[:3]
         payload["trading_paused"] = state.get("trading_paused", False)
         payload["pause_reason"] = state.get("pause_reason", "")
         payload["pause_since"] = state.get("pause_since", "")
-        payload["strategy_performance"] = trader.track_strategy_performance(state) if hasattr(trader, "track_strategy_performance") else {}
+        strategy_performance = trader.track_strategy_performance(state) if hasattr(trader, "track_strategy_performance") else {}
+        payload["strategy_performance"] = compact_strategy_performance(strategy_performance)
         payload["trade_rule_note"] = "A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。系统自动卖出：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。"
         payload["snapshot_mode"] = "fast"
         return payload
@@ -5889,7 +5956,7 @@ class Handler(BaseHTTPRequestHandler):
             if params.get("force", ["0"])[0].lower() in {"1", "true", "yes"}:
                 self.send_method_not_allowed("POST")
             else:
-                self.send_json_cached("b1_screen", API_TTLS["b1_screen"], load_b1_cache, edge_ttl=API_TTLS["b1_screen"], browser_ttl=3)
+                self.send_json_cached("b1_screen", API_TTLS["b1_screen"], load_b1_cache, edge_ttl=API_TTLS["b1_screen"], browser_ttl=10)
             return
         if parsed.path == "/api/b1_screen/trigger":
             self.send_method_not_allowed("POST")
@@ -5898,9 +5965,9 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             fast = params.get("fast", ["0"])[0].lower() in {"1", "true", "yes"}
             if fast:
-                self.send_json_cached("niuniu_practice_fast", API_TTLS["niuniu_practice"], get_practice_payload_fast, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=3)
+                self.send_json_cached("niuniu_practice_fast", API_TTLS["niuniu_practice"], get_practice_payload_fast, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=10)
             else:
-                self.send_json_cached("niuniu_practice", API_TTLS["niuniu_practice"], get_practice_payload, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=3)
+                self.send_json_cached("niuniu_practice", API_TTLS["niuniu_practice"], get_practice_payload, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=10)
             return
         if parsed.path == "/api/niuniu_practice/resume":
             self.send_method_not_allowed("POST")
@@ -5938,7 +6005,7 @@ class Handler(BaseHTTPRequestHandler):
                     return {"items": []}
                 except Exception as exc:
                     return {"items": [], "error": str(exc)}
-            self.send_json_cached("indices", API_TTLS["indices"], produce_indices, edge_ttl=API_TTLS["indices"], browser_ttl=5)
+            self.send_json_cached("indices", API_TTLS["indices"], produce_indices, edge_ttl=API_TTLS["indices"], browser_ttl=15)
             return
         if parsed.path == "/api/sectors":
             self.send_json_cached("sectors", API_TTLS["sectors"], lambda: run_dashboard_helper("sectors_dashboard_api.py", {"sectors": [], "items": [], "gain_top": [], "loss_top": []}, timeout=120), edge_ttl=API_TTLS["sectors"], browser_ttl=15)

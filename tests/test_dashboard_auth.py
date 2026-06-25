@@ -135,6 +135,42 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(last_ip, '1.1.1.1')
         self.assertEqual(user_agent, 'first')
 
+    def test_compact_intraday_equity_history_keeps_latest_day_endpoints(self):
+        old_points = [
+            {'time': f'2026-06-24 09:{i:02d}:00', 'equity': 1000000 + i, 'pnl_pct': i / 100}
+            for i in range(30)
+        ]
+        latest_points = [
+            {'time': f'2026-06-25 10:{i:02d}:00', 'equity': 1000100 + i, 'pnl_pct': i / 100}
+            for i in range(40)
+        ]
+
+        compacted = dashboard.compact_intraday_equity_history(old_points + latest_points, max_points=12)
+
+        self.assertEqual(len(compacted), 12)
+        self.assertTrue(all(p['time'].startswith('2026-06-25') for p in compacted))
+        self.assertEqual(compacted[0], latest_points[0])
+        self.assertEqual(compacted[-1], latest_points[-1])
+
+    def test_compact_strategy_performance_truncates_exit_details(self):
+        perf = {
+            'summary': {'total_pnl': 100},
+            'exit_rule': {
+                'stop_loss': {
+                    'trades': 20,
+                    'items': [{'code': f'{i:06d}', 'pnl': i} for i in range(20)],
+                },
+            },
+        }
+
+        compacted = dashboard.compact_strategy_performance(perf, max_exit_items=5)
+        items = compacted['exit_rule']['stop_loss']['items']
+
+        self.assertEqual(len(items), 5)
+        self.assertEqual(items[0]['code'], '000015')
+        self.assertEqual(items[-1]['code'], '000019')
+        self.assertEqual(compacted['exit_rule']['stop_loss']['items_truncated'], 15)
+
     def test_admin_token_redirect_sets_secure_cookie_and_security_headers(self):
         token = dashboard.get_or_create_admin_token()
         handler = FakeHandler(

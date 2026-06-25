@@ -2,10 +2,11 @@
 """indices_dashboard_api.py — 综合指数行情 + 全球夜盘 + 黄金/外汇
 供牛牛大作手主服务的 /api/indices 动态导入。
 
-输出: {"items": [...], "groups": {domestic/global/commodity: [...]}}
+输出: {"items": [...], "generated_at": "..."}
 """
 
 import json
+import os
 import re
 import ssl
 import time
@@ -52,6 +53,49 @@ NY_TZ = ZoneInfo("America/New_York")
 
 _CACHE = {"ts": 0, "data": None}
 CACHE_TTL = 45
+
+
+def _env_int(name, default):
+    try:
+        return max(2, int(os.environ.get(name, str(default)) or str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+MINUTE_LINE_MAX_POINTS = _env_int("DASHBOARD_INDEX_MINUTE_MAX_POINTS", 96)
+INCLUDE_LEGACY_GROUPS = os.environ.get("DASHBOARD_INDICES_INCLUDE_GROUPS", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _downsample(items, max_points):
+    items = list(items or [])
+    if len(items) <= max_points:
+        return items
+    last_idx = len(items) - 1
+    selected = []
+    seen = set()
+    for i in range(max_points):
+        idx = int(i * last_idx / max(1, max_points - 1))
+        if idx in seen:
+            continue
+        seen.add(idx)
+        selected.append(items[idx])
+    if selected[-1] is not items[-1]:
+        selected[-1] = items[-1]
+    return selected
+
+
+def _compact_price(value):
+    try:
+        return round(float(value), 4)
+    except Exception:
+        return value
+
+
+def _compact_minute_line(points):
+    compacted = []
+    for point in _downsample(points, MINUTE_LINE_MAX_POINTS):
+        compacted.append({**point, "price": _compact_price(point.get("price"))})
+    return compacted
 
 
 def _open(url, timeout=8, headers=None):
@@ -304,7 +348,8 @@ def fetch_indices_data():
         minute_line = _fetch_minute_line(code)
         if not minute_line and market_type == "us_index":
             minute_line = _fetch_yahoo_minute_line(YAHOO_US_INDEX_SYMBOLS.get(code, ""))
-        sparkline = [p["price"] for p in minute_line] or _fetch_kline(code)
+        minute_line = _compact_minute_line(minute_line)
+        sparkline = [] if minute_line else [_compact_price(p) for p in _downsample(_fetch_kline(code), MINUTE_LINE_MAX_POINTS)]
         return {
             "key": key, "code": code, "name": name, "group": group, "market_type": market_type,
             "price": q.get("price", 0),
@@ -322,13 +367,14 @@ def fetch_indices_data():
         key, code, name, group, market_type, minute_symbol = defn
         q = sina_data.get(code, {})
         minute_line = _fetch_sina_global_minute_line(minute_symbol) if minute_symbol else []
+        minute_line = _compact_minute_line(minute_line)
         return {
             "key": key, "code": code, "name": name, "group": group, "market_type": market_type,
             "price": q.get("price", 0),
             "prev_close": q.get("prev_close", 0),
             "change": q.get("change", 0),
             "change_pct": q.get("change_pct", 0),
-            "sparkline": [p["price"] for p in minute_line],
+            "sparkline": [],
             "minute_line": minute_line,
             "sparkline_type": "minute" if minute_line else None,
             "time": q.get("time") or time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -340,18 +386,19 @@ def fetch_indices_data():
     items = index_items + sina_items
 
     data = {"items": items, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    data["groups"] = {
-        "domestic": [x for x in items if x.get("group") == "domestic"],
-        "global": [x for x in items if x.get("group") == "global"],
-        "commodity": [x for x in items if x.get("group") == "commodity"],
-    }
-    data["market_groups"] = {
-        "a_index": [x for x in items if x.get("market_type") == "a_index"],
-        "us_index": [x for x in items if x.get("market_type") == "us_index"],
-        "a_futures": [x for x in items if x.get("market_type") == "a_futures"],
-        "us_futures": [x for x in items if x.get("market_type") == "us_futures"],
-        "commodity": [x for x in items if x.get("market_type") == "commodity"],
-    }
+    if INCLUDE_LEGACY_GROUPS:
+        data["groups"] = {
+            "domestic": [x for x in items if x.get("group") == "domestic"],
+            "global": [x for x in items if x.get("group") == "global"],
+            "commodity": [x for x in items if x.get("group") == "commodity"],
+        }
+        data["market_groups"] = {
+            "a_index": [x for x in items if x.get("market_type") == "a_index"],
+            "us_index": [x for x in items if x.get("market_type") == "us_index"],
+            "a_futures": [x for x in items if x.get("market_type") == "a_futures"],
+            "us_futures": [x for x in items if x.get("market_type") == "us_futures"],
+            "commodity": [x for x in items if x.get("market_type") == "commodity"],
+        }
     _CACHE.update({"ts": now, "data": data})
     return data
 
