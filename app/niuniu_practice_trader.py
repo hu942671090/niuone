@@ -28,6 +28,15 @@ from pathlib import Path
 from typing import Any
 
 from niuone_paths import get_dashboard_home
+from strategy_registry import (
+    PERSONA_STRATEGY_ENV,
+    STRATEGY_DEFINITIONS,
+    STRATEGY_POSITION_LIMIT_PCT,
+    classify_strategy_text,
+    enabled_strategy_ids,
+    known_strategy_ids,
+    strategy_prompt_labels,
+)
 
 try:
     import yaml  # type: ignore
@@ -83,6 +92,7 @@ def load_dashboard_env() -> None:
         "DASHBOARD_B3_EXIT_TIME",
         "DASHBOARD_TIME_EXIT_TIME",
         "DASHBOARD_TIME_STOP_EXIT_TIME",
+        PERSONA_STRATEGY_ENV,
         "CROSSDESK_BASE_URL",
         "CROSSDESK_API_KEY",
     }
@@ -967,6 +977,7 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
     positions = state.get("positions") or {}
     total_mv = 0.0
     rows = []
+    today = today_key()
     for code, pos in positions.items():
         # Use last_price from portfolio state first to avoid network hangs
         price = pos.get("last_price") or pos.get("avg_cost") or 0
@@ -996,6 +1007,8 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
             day_low_float = 0.0
         day_high_pct = (day_high_float / prev_close_float - 1) * 100 if day_high_float > 0 and prev_close_float > 0 else None
         day_low_pct = (day_low_float / prev_close_float - 1) * 100 if day_low_float > 0 and prev_close_float > 0 else None
+        buy_date_lots = pos.get("buy_date_lots") or {}
+        today_buy_qty = min(qty, int(buy_date_lots.get(today, 0) or 0)) if isinstance(buy_date_lots, dict) else 0
         total_mv += mv
         row = {
             "code": code,
@@ -1017,7 +1030,11 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
             "market_value": round(mv, 2),
             "pnl": round(pnl, 2),
             "pnl_pct": round((pnl / cost * 100), 2) if cost > 0 else 0,
-            "buy_date_lots": pos.get("buy_date_lots") or {},
+            "buy_date_lots": buy_date_lots,
+            "today_buy_qty": today_buy_qty,
+            "bought_today": today_buy_qty > 0,
+            "buy_strategy": pos.get("buy_strategy") or "",
+            "entry_reason": pos.get("entry_reason") or "",
             "exit_state": {
                 "highest_price": pos.get("highest_price"),
                 "max_pnl_pct": pos.get("max_pnl_pct"),
@@ -1380,6 +1397,8 @@ def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -
             "realized_pnl": 0.0,
             "fee": 0.0,
             "reasons": [],
+            "exit_rules": [],
+            "buy_strategies": [],
             "first_sell_time": trade.get("time") or "",
             "last_sell_time": trade.get("time") or "",
         })
@@ -1396,6 +1415,12 @@ def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -
         reason = str(trade.get("reason") or "").strip()
         if reason and reason not in row["reasons"]:
             row["reasons"].append(reason)
+        exit_rule = str(trade.get("exit_rule") or classify_exit_rule(reason, trade.get("exit_signal"))).strip()
+        if exit_rule and exit_rule not in row["exit_rules"]:
+            row["exit_rules"].append(exit_rule)
+        buy_strategy = str(trade.get("buy_strategy") or trade.get("entry_strategy") or "").strip()
+        if buy_strategy and buy_strategy not in row["buy_strategies"]:
+            row["buy_strategies"].append(buy_strategy)
 
     if not sold:
         state["today_sold_stocks"] = []
@@ -1436,6 +1461,10 @@ def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -
             "first_sell_time": row.get("first_sell_time") or "",
             "last_sell_time": row.get("last_sell_time") or "",
             "reason": "；".join(row.get("reasons") or []),
+            "exit_rule": ",".join(row.get("exit_rules") or []),
+            "exit_rules": row.get("exit_rules") or [],
+            "buy_strategy": ",".join(row.get("buy_strategies") or []),
+            "buy_strategies": row.get("buy_strategies") or [],
             "quote_time": quote.get("quote_time") or quote_meta.get("quote_time") or "",
             "quote_source": quote.get("source") or "",
         })
@@ -1489,14 +1518,6 @@ MAX_SINGLE_POSITION_PCT = env_float("DASHBOARD_MAX_SINGLE_POSITION_PCT", 10.0)
 MAX_TOTAL_POSITION_PCT = env_float("DASHBOARD_MAX_TOTAL_POSITION_PCT", 80.0)
 MIN_CASH_RESERVE_PCT = env_float("DASHBOARD_MIN_CASH_RESERVE_PCT", 20.0)
 COMMON_MAX_BBI_DISTANCE_PCT = 6.5
-STRATEGY_POSITION_LIMIT_PCT = {
-    "b3_accelerate": 10.0,
-    "b2_confirm": 10.0,
-    "breakout": 10.0,
-    "shaofu_b1": 8.0,
-    "super_b1": 6.0,
-    "trend_pullback": 8.0,
-}
 
 
 def get_volatility_adjustment(code: str) -> float:
@@ -1526,10 +1547,7 @@ def classify_buy_strategy(reason: str = "", candidate: dict[str, Any] | None = N
     """Classify the entry tactic independently from the later exit rule."""
     if candidate:
         raw_strategy = str(candidate.get("buy_strategy") or candidate.get("best_strategy") or candidate.get("strategy") or "").strip()
-        if raw_strategy in {
-            "trend_pullback", "breakout", "shaofu_b1", "b2_confirm",
-            "b3_accelerate", "super_b1",
-        }:
+        if raw_strategy in known_strategy_ids():
             return raw_strategy
         reason = " ".join([
             reason,
@@ -1539,18 +1557,11 @@ def classify_buy_strategy(reason: str = "", candidate: dict[str, Any] | None = N
         ])
 
     text = str(reason or "")
-    if "超级B1" in text or "super_b1" in text:
-        return "super_b1"
-    if "B3" in text or "b3_accelerate" in text:
-        return "b3_accelerate"
-    if "B2" in text or "b2_confirm" in text:
-        return "b2_confirm"
-    if "趋势回踩" in text or "trend_pullback" in text or ("回踩" in text and "卖出" not in text):
+    matched = classify_strategy_text(text)
+    if matched:
+        return matched
+    if "回踩" in text and "卖出" not in text:
         return "trend_pullback"
-    if "突破" in text or "breakout" in text:
-        return "breakout"
-    if "少妇B1" in text or "shaofu_b1" in text:
-        return "shaofu_b1"
     return "unknown_buy"
 
 
@@ -2940,14 +2951,8 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
     # 自适应参数（市场情绪驱动）
     adaptive = get_adaptive_params()
     # 多战法上下文：统计战法分布，给每个候选标注最优战法
-    strategy_labels = {
-        "trend_pullback": "趋势回踩（强趋势股回踩BBI/EMA不破）",
-        "breakout": "突破确认（平台/前高突破后回踩站稳）",
-        "shaofu_b1": "少妇B1（J≤12最好负值+N型上移+缩量回调+牛绳约束）",
-        "b2_confirm": "B2确认（B1后放量中/大阳，J未过热，趋势确认）",
-        "b3_accelerate": "B3中继（B2后小阳/十字星，分歧转一致）",
-        "super_b1": "超级B1（放量破位洗盘后缩量企稳，J值仍负）",
-    }
+    active_strategy_ids = enabled_strategy_ids(os.environ.get(PERSONA_STRATEGY_ENV))
+    strategy_labels = strategy_prompt_labels(active_strategy_ids)
     # Build compact candidate list with strategy context
     cand_lines = []
     for c in compact_candidates:
@@ -2968,6 +2973,35 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
             f"风险:{','.join(c.get('risk_flags',[]) or ['无'])}"
         )
     candidates_section = "\n".join(cand_lines) if cand_lines else "（无候选股）"
+    position_limit_desc = "、".join(
+        f"{strategy_labels.get(strategy_id, strategy_id).split('（', 1)[0]}≤{limit:g}%"
+        for strategy_id, limit in sorted(
+            STRATEGY_POSITION_LIMIT_PCT.items(),
+            key=lambda item: int(STRATEGY_DEFINITIONS.get(item[0], {}).get("display_order", 999)),
+        )
+        if strategy_id in active_strategy_ids
+    )
+    persona_strategy_lines = []
+    for strategy_id, definition in sorted(
+        STRATEGY_DEFINITIONS.items(),
+        key=lambda item: int(item[1].get("display_order", 999)),
+    ):
+        if definition.get("family") != "persona" or definition.get("persona") == "zettaranc" or strategy_id not in active_strategy_ids:
+            continue
+        profile = definition.get("profile") or {}
+        persona_strategy_lines.append(
+            f"- {definition.get('label')} — {definition.get('desc')}；定位：{profile.get('score_basis', '-')}"
+        )
+    zettaranc_enabled = any(
+        STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona") == "zettaranc"
+        for strategy_id in active_strategy_ids
+    )
+    zettaranc_strategy_section = f"""Z哥评分基准（永不套牢优先）：
+1. B3中继：确定性最高但盈亏比最低，只做贴近B2、振幅小、J不过热的箭在弦上，T+1 {B3_EXIT_HHMM}开盘不涨走
+2. B2确认：必须放量长阳、一阳穿多线、J<55、B1后3日内；偏滞后或离BBI远就是追高，不买；T+2 {TIME_EXIT_HHMM}尾盘不延续走
+3. 少妇B1：交易级B1按J≤-10执行；J≤12但未到负值只观察。必须缩量、N型上移、黄线/BBI附近、上方压力不重；3天不涨走
+4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑，未兑现到窗口日{TIME_EXIT_HHMM}尾盘走""" if zettaranc_enabled else "Z哥：本轮设置页未启用。"
+    persona_strategy_section = "\n".join(persona_strategy_lines) or "- 暂无启用的拟人化扩展策略"
     decision_portfolio = compact_portfolio_for_decision(portfolio)
 
     prompt = f"""你是A股模拟账户交易决策器。账户初始资金100万，只做A股模拟交易，不是真实下单。
@@ -2977,7 +3011,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 - 买入必须100股整数倍；不能融资、不能做空、现金不能为负。
 - 单次决策最多给2条新买入；当前持仓达到{MAX_OPEN_POSITIONS}只时只允许卖出/持有，不能继续开新仓，避免“开超市”。
 - 单票目标仓位不超过总资产{MAX_SINGLE_POSITION_PCT:g}%；总持仓不超过{MAX_TOTAL_POSITION_PCT:g}%；至少保留{MIN_CASH_RESERVE_PCT:g}%现金。
-- 首次建仓必须小仓试错；B3/B2/突破≤10%，少妇B1/趋势回踩≤8%，超级B1≤6%；尾盘(14:30后)原则上不新开仓。
+- 首次建仓必须小仓试错；按注册策略仓位上限执行：{position_limit_desc}；尾盘(14:30后)原则上不新开仓。
 - 自动卖出规则：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、B3仅在{B3_EXIT_HHMM}做开盘离场检查，B2/超级B1仅在{TIME_EXIT_HHMM}做尾盘离场检查、持仓超25日退出
 - 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出
 - 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场
@@ -2989,7 +3023,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 - 波动率仓位：20日波动>3.5%→仓位×0.7，波动<1.5%→仓位×1.3 ← 新增
 - 融资+大宗信号：优先买入融资净买入+大宗溢价的票，谨慎对待融资偿还+大宗折价的票 ← 新增
 
-【多战法选股原则 — 回测优化版(v4，含Z哥买入体系)】
+【多战法选股原则 — 回测优化版(v4，含Z哥)】
 基于50只主板票×120天历史回测数据优化：
 
 硬性准入规则（全部战法通用）：
@@ -2999,15 +3033,14 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 - 止盈设在 +12%~15%（回测显示突破确认能吃到9.6%平均盈利）
 - 单票仓位 ≤ 总资金15%（回测显示持仓<5只时最大回撤控制在8%以内）
 
-Z哥买入体系评分基准（永不套牢优先）：
-1. B3中继：确定性最高但盈亏比最低，只做贴近B2、振幅小、J不过热的箭在弦上，T+1 {B3_EXIT_HHMM}开盘不涨走
-2. B2确认：必须放量长阳、一阳穿多线、J<55、B1后3日内；偏滞后或离BBI远就是追高，不买；T+2 {TIME_EXIT_HHMM}尾盘不延续走
-3. 少妇B1：交易级B1按J≤-10执行；J≤12但未到负值只观察。必须缩量、N型上移、黄线/BBI附近、上方压力不重；3天不涨走
-4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑，未兑现到窗口日{TIME_EXIT_HHMM}尾盘走
+{zettaranc_strategy_section}
 
 非Z哥补充策略：
 - 突破确认 — 优先看有效突破和回踩不破
 - 趋势回踩 — 需要趋势确认后再买
+
+拟人化扩展策略（风格化量化代理，不代表本人观点）：
+{persona_strategy_section}
 
 ⚠️ 突破确认信号虽然少但质量高，不要因为它频率低就忽略。
 ⚠️ 有风险标记的候选股，请结合其近期消息面（利空/减持/监管）综合判断，不要只看技术面。

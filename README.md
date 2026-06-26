@@ -158,7 +158,7 @@ NiuOne 当前接入的是 Z 哥战法体系。
 
 ### Z 哥战法体系
 
-NiuOne 的 A 股策略筛选和模拟交易规则中，参考并实现了 [zettaranc-skill](https://github.com/lululu811/zettaranc-skill) 中整理的 Z 哥选股战法思想。当前归属于 Z 哥体系的买入战法包括：
+NiuOne 的 A 股策略筛选和模拟交易规则中，参考并实现了 [zettaranc-skill](https://github.com/lululu811/zettaranc-skill) 中整理的 Z 哥选股战法思想。当前归属于 Z 哥的买入战法包括：
 
 - **少妇B1**：J值低位、N型上移、缩量回调、牛绳/BBI约束，强调试错仓和近止损。
 - **B2确认**：B1后放量中/大阳确认趋势，拒绝偏滞后或离BBI过远的追高。
@@ -166,6 +166,10 @@ NiuOne 的 A 股策略筛选和模拟交易规则中，参考并实现了 [zetta
 - **超级B1**：放量破位洗盘后缩量企稳，J值仍负，只赌一次，未兑现则离场。
 - **突破确认**：平台或前高突破后回踩站稳，再作为确认仓处理。
 - **趋势回踩**：强趋势股回踩BBI/EMA不破，按低吸仓处理。
+
+策略元数据集中在 `app/strategy_registry.py`。新增拟人化策略时，优先在注册表里增加 `label/color/desc/scorer/profile/position_limit_pct/aliases`，再在 `app/multi_strategy_screen.py` 中实现对应 `score_xxx(rows)` 评分函数。扫描器会自动遍历注册表里的 scorer，并把 `strategy_meta` 输出给 dashboard 和模拟交易模块。设置页的“选股策略”一次只启用一个人格，当前可在 Z哥和拟人化扩展策略之间切换。当前已内置一个风格化扩展示例：
+
+- **李大霄**：用高流动性、低位区、缩量企稳和低波动作为“蓝筹底部”代理信号。
 
 卖出侧包含买入K线/前低止损、硬止损、防卖飞评分、卤煮半仓、S1/S2/S3逃顶、出货五式、白线/BBI破位、峰值回撤/ATR吊灯保护，以及 B3、B2、超级B1 的时间离场纪律。
 

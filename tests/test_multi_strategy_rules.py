@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -54,6 +55,73 @@ class MultiStrategyRuleTests(unittest.TestCase):
         }
 
         self.assertEqual(screen.select_trade_candidates([blocked, good]), [good])
+
+    def test_persona_strategies_are_registered(self):
+        old = os.environ.get(screen.PERSONA_STRATEGY_ENV)
+        try:
+            os.environ.pop(screen.PERSONA_STRATEGY_ENV, None)
+            self.assertIn("li_daxiao_bottom", screen.STRATEGY_META)
+            self.assertNotIn("buffett_value", screen.STRATEGY_META)
+            self.assertIn("li_daxiao_bottom", screen.STRATEGY_SCORERS)
+            self.assertNotIn("buffett_value", screen.STRATEGY_SCORERS)
+            self.assertEqual(screen.STRATEGY_META["shaofu_b1"]["family"], "persona")
+            self.assertEqual(screen.enabled_persona_strategy_ids(), {"zettaranc"})
+        finally:
+            if old is None:
+                os.environ.pop(screen.PERSONA_STRATEGY_ENV, None)
+            else:
+                os.environ[screen.PERSONA_STRATEGY_ENV] = old
+
+    def test_active_strategy_scorers_follow_persona_setting(self):
+        old = os.environ.get(screen.PERSONA_STRATEGY_ENV)
+        try:
+            os.environ[screen.PERSONA_STRATEGY_ENV] = "buffett_value"
+            active = screen.active_strategy_scorers()
+            self.assertNotIn("buffett_value", active)
+            self.assertNotIn("li_daxiao_bottom", active)
+            self.assertNotIn("shaofu_b1", active)
+            self.assertIn("trend_pullback", active)
+
+            os.environ[screen.PERSONA_STRATEGY_ENV] = "zettaranc,li_daxiao_bottom,buffett_value"
+            active = screen.active_strategy_scorers()
+            self.assertNotIn("buffett_value", active)
+            self.assertNotIn("li_daxiao_bottom", active)
+            self.assertIn("shaofu_b1", active)
+            self.assertIn("b3_accelerate", active)
+
+            os.environ[screen.PERSONA_STRATEGY_ENV] = "li_daxiao_bottom,zettaranc"
+            active = screen.active_strategy_scorers()
+            self.assertIn("li_daxiao_bottom", active)
+            self.assertNotIn("shaofu_b1", active)
+            self.assertNotIn("b3_accelerate", active)
+
+            os.environ[screen.PERSONA_STRATEGY_ENV] = ""
+            active = screen.active_strategy_scorers()
+            self.assertNotIn("buffett_value", active)
+            self.assertNotIn("li_daxiao_bottom", active)
+            self.assertNotIn("shaofu_b1", active)
+            self.assertIn("trend_pullback", active)
+        finally:
+            if old is None:
+                os.environ.pop(screen.PERSONA_STRATEGY_ENV, None)
+            else:
+                os.environ[screen.PERSONA_STRATEGY_ENV] = old
+
+    def test_li_daxiao_profile_applies_hard_blockers(self):
+        payload = screen.with_strategy_profile("li_daxiao_bottom", {
+            "score": 9.0,
+            "distance_pct": 1.0,
+            "bottom_zone": False,
+            "stabilizing": False,
+            "bluechip_liquidity_proxy": True,
+            "breakdown_risk": False,
+            "volatility_20d_pct": 2.0,
+            "risk_flags": [],
+        })
+
+        self.assertFalse(payload["actionable"])
+        self.assertIn("未处低位区", payload["hard_blockers"])
+        self.assertIn("底部未企稳", payload["hard_blockers"])
 
 
 if __name__ == "__main__":

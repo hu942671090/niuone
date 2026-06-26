@@ -59,7 +59,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.original_cron_state_dir = dashboard.CRON_STATE_DIR
         self.saved_env = {
             name: os.environ.get(name)
-            for name in ('X_WATCHLIST_ACCOUNTS', 'DASHBOARD_X_WATCHLIST_STATE')
+            for name in ('X_WATCHLIST_ACCOUNTS', 'DASHBOARD_X_WATCHLIST_STATE', dashboard.PERSONA_STRATEGY_ENV)
         }
         for name in self.saved_env:
             os.environ.pop(name, None)
@@ -198,6 +198,19 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(items[0]['code'], '000015')
         self.assertEqual(items[-1]['code'], '000019')
         self.assertEqual(compacted['exit_rule']['stop_loss']['items_truncated'], 15)
+
+    def test_index_template_inlines_trade_reasons_on_stock_cards(self):
+        self.assertNotIn('买入战法绩效', dashboard.INDEX_HTML)
+        self.assertNotIn('BUY_COLORS', dashboard.INDEX_HTML)
+        self.assertNotIn('renderStrategyPerformance', dashboard.INDEX_HTML)
+        self.assertNotIn('practice-perf', dashboard.INDEX_HTML)
+        self.assertNotIn('exit-rule-row', dashboard.INDEX_HTML)
+        self.assertIn('x.bought_today', dashboard.INDEX_HTML)
+        self.assertIn('买入理由', dashboard.INDEX_HTML)
+        self.assertIn('卖出归因', dashboard.INDEX_HTML)
+        self.assertIn('仓位占比', dashboard.INDEX_HTML)
+        self.assertIn('可卖/持有', dashboard.INDEX_HTML)
+        self.assertNotIn('${esc(x.qty)}股', dashboard.INDEX_HTML)
 
     def test_admin_token_redirect_sets_secure_cookie_and_security_headers(self):
         token = dashboard.get_or_create_admin_token()
@@ -416,6 +429,21 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('<h2>美股买入评级周期</h2>', body)
         self.assertIn('买卖决策模型', body)
         self.assertIn('选股及买卖决策时间点', body)
+        self.assertIn('选股策略', body)
+        self.assertIn('当前人格策略', body)
+        self.assertIn("name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
+        self.assertIn("type='radio' name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
+        self.assertNotIn("type='checkbox' name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
+        self.assertIn("value='zettaranc'", body)
+        self.assertIn('Z哥', body)
+        self.assertNotIn('Z哥体系', body)
+        self.assertNotIn('Z 哥体系', body)
+        self.assertIn("value='li_daxiao_bottom'", body)
+        self.assertIn('李大霄', body)
+        self.assertNotIn('李大霄底部', body)
+        self.assertNotIn("value='buffett_value'", body)
+        self.assertNotIn('巴菲特价值', body)
+        self.assertIn('每次只启用一个人格策略', body)
         self.assertIn('盘面监控生产时间点', body)
         self.assertIn('指数行情更新周期', body)
         self.assertIn("class='settings-group'", body)
@@ -725,6 +753,7 @@ class DashboardAuthTests(unittest.TestCase):
                 'env__DASHBOARD_MARKET_AUCTION_CRON': '09:26',
                 'env__DASHBOARD_US_RATING_CRON': '10:30',
                 'env__X_WATCHLIST_ACCOUNTS': ['', '@Foo', 'bar', 'foo'],
+                'env__DASHBOARD_ENABLED_PERSONA_STRATEGIES': ['', 'li_daxiao_bottom'],
                 'env__DASHBOARD_HOME': '/tmp/should-not-be-written',
             }, doseq=True).encode('utf-8')
             handler = FakeHandler(
@@ -765,6 +794,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertTrue(response['runtime']['ok'])
         self.assertIn('b1_schedule_times', response['runtime']['applied'])
         self.assertIn('indices_ttl', response['runtime']['applied'])
+        self.assertIn('persona_strategies', response['runtime']['applied'])
+        self.assertIn('trader_runtime', response['runtime']['applied'])
         self.assertEqual(parsed['DASHBOARD_US_FEATURES_ENABLED'], '1')
         self.assertEqual(parsed['DASHBOARD_GROK_MODEL'], 'grok-test')
         self.assertEqual(parsed['DASHBOARD_NEWS_MODEL'], 'search-model')
@@ -775,6 +806,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
         self.assertEqual(parsed['X_WATCHLIST_ACCOUNTS'], 'foo,bar')
+        self.assertEqual(parsed['DASHBOARD_ENABLED_PERSONA_STRATEGIES'], 'li_daxiao_bottom')
         self.assertEqual(runtime_b1_times, ('09:25', '10:00', '14:50'))
         self.assertEqual(runtime_indices_ttl, 20)
         self.assertNotIn('DASHBOARD_HOME', parsed)

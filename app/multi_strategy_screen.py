@@ -2,7 +2,7 @@
 """
 牛牛大作手 · 多战法扫描器 — A股主板全市场综合评分。
 
-评估多战法（趋势/突破策略 + Z哥买入体系），每只票输出多战法分数
+评估多战法（趋势/突破策略 + Z哥），每只票输出多战法分数
 + 最优战法标签，供牛牛实战模型决策时参考。
 
 数据源（全部绕过Eastmoney代理封锁）：
@@ -35,19 +35,33 @@
 """
 import json
 import os
+import shlex
 import statistics
 import sys
 import time
 import urllib.request
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
-from niuone_paths import get_dashboard_home
+from niuone_paths import get_dashboard_env_file, get_dashboard_home
+from strategy_registry import (
+    DISPLAY_STRATEGY_ORDER,
+    PERSONA_STRATEGY_ENV,
+    STRATEGY_DEFINITIONS,
+    STRATEGY_META,
+    STRATEGY_SCORE_PROFILES,
+    enabled_persona_strategy_ids,
+    enabled_strategy_ids,
+    enabled_strategy_meta,
+    enabled_strategy_score_profiles,
+)
 
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 TENCENT_QUOTE = "https://qt.gtimg.cn/q="
 TENCENT_KLINE = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
 DASHBOARD_HOME = get_dashboard_home(Path(__file__).resolve().parents[1])
+DASHBOARD_ENV_FILE = get_dashboard_env_file(Path(__file__).resolve().parents[1])
 B1_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 B1_CACHE_FILE = B1_OUTPUT_DIR / "b1_screen_latest.json"
 MULTI_STRATEGY_CACHE = B1_OUTPUT_DIR / "multi_strategy_latest.json"
@@ -55,87 +69,10 @@ B1_HISTORY_DIR = B1_OUTPUT_DIR / "b1_history"
 MULTI_STRATEGY_HISTORY = B1_OUTPUT_DIR / "multi_strategy_history"
 DISPLAY_CANDIDATE_LIMIT = 16
 DISPLAY_HEAD_LIMIT = 8
-DISPLAY_STRATEGY_ORDER = [
-    "shaofu_b1",
-    "b2_confirm",
-    "b3_accelerate",
-    "super_b1",
-    "breakout",
-    "trend_pullback",
-]
 TRADE_CANDIDATE_LIMIT = 8
 COMMON_MAX_BBI_DISTANCE_PCT = 6.5
 B1_CORE_J_CEILING = -10.0
 B1_WATCH_J_CEILING = 12.0
-
-# 战法标签与颜色（供 dashboard 使用）
-STRATEGY_META = {
-    "trend_pullback": {"label": "趋势回踩",  "color": "#60a5fa", "desc": "趋势股回踩BBI/EMA不破"},
-    "breakout":       {"label": "突破确认",  "color": "#ec4899", "desc": "平台/前高突破后回踩站稳"},
-    "shaofu_b1":      {"label": "少妇B1",    "color": "#f97316", "desc": "J≤12(最好负值)+N型上移+缩量回调+牛绳约束"},
-    "b2_confirm":     {"label": "B2确认",    "color": "#22c55e", "desc": "B1后3日内放量中/大阳确认趋势"},
-    "b3_accelerate":  {"label": "B3中继",    "color": "#a78bfa", "desc": "B2后小阳/十字星分歧转一致"},
-    "super_b1":       {"label": "超级B1",    "color": "#fb7185", "desc": "放量破位洗盘后缩量企稳且J值仍负"},
-}
-
-# Scoring profiles encode the Zettaranc "never get trapped" discipline:
-# different buy points have different certainty, risk/reward, and time exits.
-STRATEGY_SCORE_PROFILES = {
-    "b3_accelerate": {
-        "priority": 90,
-        "entry_threshold": 8.5,
-        "score_basis": "确定性最高/盈亏比最低",
-        "position_hint": "快进快出，次日09:30不涨走",
-        "time_stop": "T+1开盘09:30不涨退出",
-        "certainty_rank": 1,
-        "risk_reward_rank": 4,
-    },
-    "b2_confirm": {
-        "priority": 82,
-        "entry_threshold": 8.0,
-        "score_basis": "趋势确认/放量长阳",
-        "position_hint": "确认仓，拒绝追高",
-        "time_stop": "T+2尾盘14:45不延续退出",
-        "certainty_rank": 2,
-        "risk_reward_rank": 3,
-    },
-    "shaofu_b1": {
-        "priority": 72,
-        "entry_threshold": 8.0,
-        "score_basis": "胜率与盈亏比优先",
-        "position_hint": "试错仓，止损必须近",
-        "time_stop": "3天不涨走",
-        "certainty_rank": 3,
-        "risk_reward_rank": 1,
-    },
-    "super_b1": {
-        "priority": 58,
-        "entry_threshold": 8.5,
-        "score_basis": "洗盘反转/只赌一次",
-        "position_hint": "小仓试错，破洗盘低点走",
-        "time_stop": "14:45检查未兑现则退出",
-        "certainty_rank": 4,
-        "risk_reward_rank": 2,
-    },
-    "breakout": {
-        "priority": 76,
-        "entry_threshold": 8.0,
-        "score_basis": "突破确认",
-        "position_hint": "确认仓",
-        "time_stop": "跌回平台内降预期",
-        "certainty_rank": 2,
-        "risk_reward_rank": 3,
-    },
-    "trend_pullback": {
-        "priority": 68,
-        "entry_threshold": 8.0,
-        "score_basis": "趋势回踩",
-        "position_hint": "低吸仓",
-        "time_stop": "跌破BBI/EMA支撑走",
-        "certainty_rank": 3,
-        "risk_reward_rank": 2,
-    },
-}
 
 
 # ========== helpers ==========
@@ -152,6 +89,50 @@ def safe_round(v, n=2):
     if v is None:
         return None
     return round(v, n)
+
+
+def dashboard_env_value(name: str) -> str | None:
+    if name in os.environ:
+        return os.environ.get(name)
+    try:
+        lines = DASHBOARD_ENV_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        if key.strip() != name:
+            continue
+        try:
+            parsed = shlex.split(raw_value.strip(), posix=True)
+            return parsed[0] if parsed else ""
+        except ValueError:
+            return raw_value.strip().strip("\"'")
+    return None
+
+
+def enabled_persona_strategy_setting() -> str | None:
+    return dashboard_env_value(PERSONA_STRATEGY_ENV)
+
+
+def active_strategy_scorers() -> dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | None]]:
+    enabled = enabled_strategy_ids(enabled_persona_strategy_setting())
+    return {strategy_id: scorer for strategy_id, scorer in STRATEGY_SCORERS.items() if strategy_id in enabled}
+
+
+def active_strategy_meta() -> dict[str, dict[str, Any]]:
+    return enabled_strategy_meta(enabled_persona_strategy_setting())
+
+
+def active_strategy_score_profiles() -> dict[str, dict[str, Any]]:
+    return enabled_strategy_score_profiles(enabled_persona_strategy_setting())
+
 
 def with_strategy_profile(strategy_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     profile = STRATEGY_SCORE_PROFILES.get(strategy_name, {})
@@ -237,6 +218,18 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
             blockers.append("趋势未确认")
         if not payload.get("pullback_held"):
             blockers.append("回踩未守住")
+    elif strategy_name == "li_daxiao_bottom":
+        if not payload.get("bottom_zone"):
+            blockers.append("未处低位区")
+        if not payload.get("stabilizing"):
+            blockers.append("底部未企稳")
+        if not payload.get("bluechip_liquidity_proxy"):
+            blockers.append("蓝筹流动性代理不足")
+        if payload.get("breakdown_risk"):
+            blockers.append("仍有破位风险")
+        vol = safe_float(payload.get("volatility_20d_pct"))
+        if vol is not None and vol > 3.8:
+            blockers.append("底部波动过高")
 
     return blockers
 
@@ -324,6 +317,31 @@ def candle_body_pct(row):
 def candle_amplitude_pct(row):
     prev_close = row.get("prev_close") or row.get("open") or 0
     return (row["high"] - row["low"]) / prev_close * 100 if prev_close else 0
+
+
+def return_pct(current: float | None, base: float | None) -> float | None:
+    if current is None or base is None or base == 0:
+        return None
+    return (current / base - 1) * 100
+
+
+def pct_returns(rows, lookback=20) -> list[float]:
+    window = rows[-(lookback + 1):]
+    out: list[float] = []
+    for idx in range(1, len(window)):
+        prev_close = window[idx - 1].get("close")
+        close = window[idx].get("close")
+        ret = return_pct(close, prev_close)
+        if ret is not None:
+            out.append(ret)
+    return out
+
+
+def volatility_pct(rows, lookback=20) -> float | None:
+    vals = pct_returns(rows, lookback)
+    if len(vals) < 2:
+        return None
+    return statistics.stdev(vals)
 
 
 def is_yang(row):
@@ -1013,8 +1031,112 @@ def score_super_b1(rows) -> dict[str, Any] | None:
     })
 
 
+def score_li_daxiao_bottom(rows) -> dict[str, Any] | None:
+    """李大霄风格代理：高流动性蓝筹低位、缩量、企稳后再试。"""
+    if len(rows) < 80:
+        return None
+
+    recent = rows[-1]
+    close = recent["close"]
+    bbi_r = recent.get("bbi")
+    ema20_r = recent.get("ema20")
+    ema50_r = recent.get("ema50")
+    if bbi_r is None or ema20_r is None or ema50_r is None:
+        return None
+
+    window120 = rows[-min(120, len(rows)):]
+    high120 = max(r["high"] for r in window120)
+    low120 = min(r["low"] for r in window120)
+    low20 = min(r["low"] for r in rows[-20:])
+    drawdown_from_high = return_pct(close, high120) or 0
+    distance_from_low = return_pct(close, low120) or 0
+    dist_bbi = (close / bbi_r - 1) * 100 if bbi_r else 99
+    vol20 = volatility_pct(rows, 20)
+    recent5_vol = statistics.mean(r["volume"] for r in rows[-5:])
+    prior20_vol = statistics.mean(r["volume"] for r in rows[-25:-5]) if len(rows) >= 25 else recent5_vol
+    avg60_vol = statistics.mean(r["volume"] for r in rows[-60:])
+    volume_shrink = prior20_vol > 0 and recent5_vol <= prior20_vol * 0.9
+    bluechip_liquidity_proxy = avg60_vol > 0 and recent5_vol >= avg60_vol * 0.35
+    bbi_flattening = len(rows) >= 5 and bbi_r >= min((r.get("bbi") or bbi_r) for r in rows[-5:]) * 0.995
+    stabilizing = close >= bbi_r * 0.98 and close >= ema20_r * 0.97 and recent["low"] >= low20 * 0.985
+    bottom_zone = -45 <= drawdown_from_high <= -12 and distance_from_low <= 18
+    breakdown_risk = close < low20 * 1.02 and (recent.get("change_pct") or 0) < -1.5
+    low_volatility = vol20 is not None and vol20 <= 3.8
+
+    score = 0.0
+    if bottom_zone:
+        score += 2.5
+    elif -55 <= drawdown_from_high <= -8 and distance_from_low <= 25:
+        score += 1.4
+    if stabilizing:
+        score += 2.0
+    elif close >= bbi_r * 0.96:
+        score += 1.0
+    if volume_shrink:
+        score += 1.3
+    if low_volatility:
+        score += 1.3 if vol20 is not None and vol20 <= 2.8 else 0.8
+    if bbi_flattening:
+        score += 1.0
+    if bluechip_liquidity_proxy:
+        score += 0.9
+    if not breakdown_risk:
+        score += 0.7
+    if close >= ema50_r * 0.94:
+        score += 0.8
+    if distance_from_low > 25:
+        score = min(score, 7.2)
+    if breakdown_risk:
+        score = min(score, 6.8)
+    if vol20 is not None and vol20 > 4.5:
+        score = min(score, 6.5)
+    score = min(10, score)
+
+    risk_flags = []
+    if not bottom_zone:
+        risk_flags.append("低位区不充分")
+    if not stabilizing:
+        risk_flags.append("企稳不足")
+    if not volume_shrink:
+        risk_flags.append("未缩量")
+    if breakdown_risk:
+        risk_flags.append("仍贴近破位低点")
+    if vol20 is not None and vol20 > 3.8:
+        risk_flags.append("底部波动偏高")
+
+    verdict = ("高匹配李大霄" if score >= 8 else
+               "中等匹配李大霄" if score >= 6 else
+               "弱匹配李大霄" if score >= 4 else "不匹配")
+    return with_strategy_profile("li_daxiao_bottom", {
+        "score": score, "score_total": 10, "verdict": verdict,
+        "bbi": safe_round(bbi_r, 2), "distance_pct": safe_round(dist_bbi, 2),
+        "above_bbi": close >= bbi_r,
+        "bbi_upward": bbi_flattening,
+        "bottom_zone": bottom_zone,
+        "stabilizing": stabilizing,
+        "volume_shrink": volume_shrink,
+        "bluechip_liquidity_proxy": bluechip_liquidity_proxy,
+        "breakdown_risk": breakdown_risk,
+        "drawdown_from_high_pct": safe_round(drawdown_from_high, 2),
+        "distance_from_low_pct": safe_round(distance_from_low, 2),
+        "volatility_20d_pct": safe_round(vol20, 2),
+        "ema20": safe_round(ema20_r, 2),
+        "ema50": safe_round(ema50_r, 2),
+        "risk_flags": risk_flags,
+        "recent_close": safe_round(close, 2),
+        "change_pct": safe_round(recent.get("change_pct"), 2),
+    })
+
+
+STRATEGY_SCORERS: dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | None]] = {
+    strategy_id: globals()[str(definition["scorer"])]
+    for strategy_id, definition in STRATEGY_DEFINITIONS.items()
+    if str(definition.get("scorer") or "") in globals()
+}
+
+
 def analyze_all_strategies(symbol, tencent_key):
-    """Fetch K-lines once, enrich once, run all local + Z哥 strategies. Returns dict or None."""
+    """Fetch K-lines once, enrich once, run all registered strategies. Returns dict or None."""
     try:
         rows = tencent_klines(tencent_key, 120)
     except Exception:
@@ -1025,21 +1147,12 @@ def analyze_all_strategies(symbol, tencent_key):
     # Enrich once (BBI, J, EMA20, EMA50, change_pct)
     enrich_rows(rows)
 
-    # Shallow-copy rows so each scorer can add its own annotations if needed
-    tp  = score_trend_pullback([dict(r) for r in rows])
-    bo  = score_breakout([dict(r) for r in rows])
-    sf  = score_shaofu_b1([dict(r) for r in rows])
-    b2  = score_b2_confirm([dict(r) for r in rows])
-    b3  = score_b3_accelerate([dict(r) for r in rows])
-    sb1 = score_super_b1([dict(r) for r in rows])
-
     strategies = {}
-    if tp:  strategies["trend_pullback"] = tp
-    if bo:  strategies["breakout"] = bo
-    if sf:  strategies["shaofu_b1"] = sf
-    if b2:  strategies["b2_confirm"] = b2
-    if b3:  strategies["b3_accelerate"] = b3
-    if sb1: strategies["super_b1"] = sb1
+    for strategy_id, scorer in active_strategy_scorers().items():
+        # Shallow-copy rows so each scorer can add its own annotations if needed.
+        scored = scorer([dict(r) for r in rows])
+        if scored:
+            strategies[strategy_id] = scored
 
     if not strategies:
         return None
@@ -1383,7 +1496,7 @@ def main():
     to_analyze = liquid[:top_n]
     print(f"  High liquidity (成交额>8亿): {len(liquid)}, analyzing top {top_n}", file=sys.stderr)
 
-    print("Step 3: Multi-strategy scoring (local + Zettaranc buy systems)...", file=sys.stderr)
+    print("Step 3: Multi-strategy scoring (registered strategy profiles)...", file=sys.stderr)
     results = []
     for i, (code, name, q) in enumerate(to_analyze):
         tencent_key = tencent_keys[code]
@@ -1451,7 +1564,7 @@ def main():
     from collections import Counter
     strat_counts = Counter(r["best_strategy"] for r in results)
     for k, v in strat_counts.most_common():
-        print(f"    {STRATEGY_META.get(k, {}).get('label', k)}: {v}", file=sys.stderr)
+        print(f"    {active_strategy_meta().get(k, {}).get('label', k)}: {v}", file=sys.stderr)
 
     # Output
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1476,8 +1589,8 @@ def main():
         "trade_count": len(trade_candidates),
         "total_analyzed": len(results),
         "strategy_distribution": dict(strat_counts),
-        "strategy_meta": STRATEGY_META,
-        "strategy_score_profiles": STRATEGY_SCORE_PROFILES,
+        "strategy_meta": active_strategy_meta(),
+        "strategy_score_profiles": active_strategy_score_profiles(),
     }
     json_str = json.dumps(output, ensure_ascii=False, indent=2)
     print(json_str)

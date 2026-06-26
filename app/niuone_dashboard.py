@@ -33,6 +33,12 @@ import urllib.request
 
 from niuone_paths import get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
+from strategy_registry import (
+    PERSONA_STRATEGY_ENV,
+    default_enabled_persona_strategies_value,
+    normalize_strategy_list_update,
+    strategy_settings_options,
+)
 
 try:
     import yaml  # type: ignore
@@ -190,6 +196,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股及买卖决策时间点", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
     {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "09:30", "effect": "runtime"},
     {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "14:45", "effect": "runtime"},
+    {"name": PERSONA_STRATEGY_ENV, "label": "当前人格策略", "group": "选股策略", "kind": "strategy_single", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},
     {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "B1 扫描超时秒数", "group": "任务调度", "kind": "int", "default": "360", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "B1 漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "label": "B1 运行中陈旧秒数", "group": "任务调度", "kind": "int", "default": "900", "effect": "restart"},
@@ -263,6 +270,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_B1_SCHEDULE_TIMES",
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
+    PERSONA_STRATEGY_ENV,
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
     "DASHBOARD_MARKET_CLOSE_CRON",
@@ -282,12 +290,14 @@ TRADER_RUNTIME_ENV_NAMES = {
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
     "DASHBOARD_TIME_STOP_EXIT_TIME",
+    PERSONA_STRATEGY_ENV,
 }
 ENV_GROUP_ORDER = [
     "牛牛美股",
     "消息面预检模型",
     "买卖决策模型",
     "选股及买卖决策时间点",
+    "选股策略",
     "盘面监控生产时间点",
     "指数行情更新周期",
     "基础路径",
@@ -871,6 +881,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             "trade_items": trade_items,
             "trade_count": len(trade_items),
             "strategy_distribution": dict(strat_counts),
+            "strategy_meta": scanner.active_strategy_meta() if hasattr(scanner, "active_strategy_meta") else scanner.STRATEGY_META,
+            "strategy_score_profiles": scanner.active_strategy_score_profiles() if hasattr(scanner, "active_strategy_score_profiles") else scanner.STRATEGY_SCORE_PROFILES,
             "candidate_refresh": {
                 "refreshed_at": refreshed_at,
                 "source": "current_candidate_pool",
@@ -1554,6 +1566,8 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         return normalize_time_list_update(value)
     if kind == "handle_list":
         return normalize_handle_list_update(value)
+    if kind in {"strategy_multi", "strategy_single"}:
+        return normalize_strategy_list_update(value)
     return value
 
 
@@ -1569,7 +1583,7 @@ def write_env_file_values(updates: dict[str, str], path: Path | None = None) -> 
         kind = "secret" if schema.get("kind") == "secret" or is_secret_config_key(name) else schema.get("kind", "text")
         if kind == "secret" and value == "":
             continue
-        if value == "" and name not in existing and kind != "time_list":
+        if value == "" and name not in existing and kind not in {"time_list", "strategy_multi", "strategy_single"}:
             continue
         next_value = normalize_env_update(name, value, kind)
         if existing.get(name) != next_value:
@@ -1716,6 +1730,7 @@ ADMIN_GROUP_NOTES = {
     "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。留空则跳过。",
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。",
     "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
+    "选股策略": "选择参与 A 股扫描的人格策略；基础趋势/突破策略始终保留。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；盘面监控在 A 股交易日触发。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
 }
@@ -1811,6 +1826,16 @@ def friendly_handle_list_text(value: str) -> str:
     return "、".join(split_handle_values(value))
 
 
+def split_strategy_values(value: str) -> list[str]:
+    normalized = normalize_strategy_list_update(value)
+    return [item for item in normalized.split(",") if item]
+
+
+def friendly_strategy_list_text(value: str) -> str:
+    labels = {str(item["id"]): str(item["label"]) for item in strategy_settings_options(family="persona")}
+    return "、".join(labels.get(strategy_id, strategy_id) for strategy_id in split_strategy_values(value))
+
+
 def x_watchlist_state_accounts(path: Path | None = None) -> list[str]:
     if path is None:
         path = Path(os.environ.get("DASHBOARD_X_WATCHLIST_STATE") or str(CRON_STATE_DIR / "x_watchlist_latest.json")).expanduser()
@@ -1890,6 +1915,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_env_update(name, normalized[name], "time")
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "handle_list":
             normalized[name] = normalize_handle_list_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"strategy_multi", "strategy_single"}:
+            normalized[name] = normalize_strategy_list_update(normalized[name])
     return normalized
 
 
@@ -1923,6 +1950,8 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             normalize_env_update(name, value, "time")
         elif name == "X_WATCHLIST_ACCOUNTS":
             normalize_handle_list_update(value)
+        elif name == PERSONA_STRATEGY_ENV:
+            normalize_strategy_list_update(value)
         elif name in {"X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "DASHBOARD_INDICES_TTL_SECONDS"} and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
@@ -1938,7 +1967,7 @@ def validate_business_updates(updates: dict[str, str]) -> None:
 
 
 def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str] | tuple[str, ...] | None) -> dict[str, Any]:
-    global B1_SCHEDULE_TIMES, TRADER_MODULE, TRADER_MODULE_MTIME
+    global B1_CANDIDATE_REFRESH_LAST_TS, B1_SCHEDULE_TIMES, TRADER_MODULE, TRADER_MODULE_MTIME
     if isinstance(changed, dict):
         changed_names = set(changed.keys())
     else:
@@ -1962,6 +1991,12 @@ def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str
             applied.append("indices_ttl")
         except (TypeError, ValueError):
             pass
+
+    if PERSONA_STRATEGY_ENV in changed_names:
+        B1_CANDIDATE_REFRESH_LAST_TS = 0.0
+        with API_RESPONSE_LOCK:
+            API_RESPONSE_CACHE.pop("b1_screen", None)
+        applied.append("persona_strategies")
 
     if changed_names & TRADER_RUNTIME_ENV_NAMES:
         TRADER_MODULE = None
@@ -2063,6 +2098,20 @@ def build_admin_config_payload() -> dict[str, Any]:
                 "default": friendly_handle_list_text(default_value),
                 "handle_values": split_handle_values(edit_value),
             })
+        if schema.get("kind") in {"strategy_multi", "strategy_single"} and not secret:
+            edit_source = str(file_value or "")
+            if name not in env_values and name not in os.environ and fallback_value:
+                edit_source = fallback_value
+            edit_value = normalize_strategy_list_update(edit_source)
+            state_value = env_values.get(name) if name in env_values else (fallback_value or default_value)
+            item.update({
+                "effective": friendly_strategy_list_text(effective),
+                "file_value": edit_value,
+                "file_state": friendly_strategy_list_text(state_value),
+                "default": friendly_strategy_list_text(default_value),
+                "strategy_values": split_strategy_values(edit_value),
+                "strategy_options": strategy_settings_options(family="persona"),
+            })
         items.append(item)
     return {
         "items": items,
@@ -2112,6 +2161,13 @@ ADMIN_HTML = r"""<!doctype html>
 .save-button{box-shadow:0 10px 20px rgba(0,0,0,.22),0 1px 0 rgba(255,255,255,.20) inset;transition:transform .08s ease,filter .08s ease,background .12s ease,box-shadow .08s ease}
 .save-button:hover:not(:disabled){filter:brightness(1.05);transform:translateY(-1px)}
 .save-button:active,.save-button.pressed{transform:translateY(2px) scale(.985);filter:brightness(.88);box-shadow:0 3px 8px rgba(0,0,0,.28),0 2px 8px rgba(0,0,0,.30) inset}
+.strategy-multi-control{display:grid;gap:8px}
+.strategy-option{display:grid;grid-template-columns:18px minmax(0,1fr);gap:9px;align-items:start;border:1px solid rgba(148,163,184,.14);border-radius:8px;background:rgba(15,23,42,.50);padding:9px 10px;cursor:pointer}
+.strategy-option input{width:16px;min-width:16px;height:16px;margin:2px 0 0;padding:0;accent-color:var(--accent)}
+.strategy-option-main{display:grid;gap:3px;min-width:0}
+.strategy-option-title{display:flex;align-items:center;gap:7px;color:#e5edf8;font-weight:850;line-height:1.25}
+.strategy-option-dot{width:8px;height:8px;border-radius:3px;background:var(--strategy-color,#94a3b8);box-shadow:0 0 12px var(--strategy-color,#94a3b8);flex:0 0 auto}
+.strategy-option-desc{color:#94a3b8;font-size:12px;line-height:1.45}
 </style>
 </head><body><header class="admin-header"><div class="admin-header-inner"><div><div class="eyebrow">牛牛大作手</div><h1>设置</h1></div><a class="toplink" href="/">返回首页</a></div></header>
 <main class="admin-main">
@@ -2553,22 +2609,12 @@ INDEX_HTML = r"""<!doctype html>
     .position-brief-stats { display:grid; gap:5px; }
     .position-brief-item { min-width:0; display:flex; align-items:baseline; justify-content:space-between; gap:8px; color:#64748b; font-size:11px; line-height:1.2; }
     .position-brief-item b { color:#e2e8f0; font-size:13px; font-weight:850; font-variant-numeric:tabular-nums; white-space:nowrap; }
-    .practice-perf-summary { display:grid; grid-template-columns:repeat(3, minmax(150px, 210px)); gap:8px; width:max-content; max-width:100%; margin:0 0 10px; }
-    .practice-perf-summary .inline-field { min-width:0; padding:7px 9px; }
-    .practice-perf-summary .inline-value { font-size:13px; }
-    .practice-perf-grid { display:grid; grid-template-columns:minmax(360px, 470px) minmax(280px, 330px); gap:10px; width:fit-content; max-width:100%; margin-bottom:10px; align-items:start; }
-    .practice-perf-block { background:rgba(2,6,23,.42); border:1px solid rgba(148,163,184,.10); border-radius:12px; padding:10px 12px; min-width:0; }
-    .practice-perf-title { color:#64748b; font-size:11px; margin-bottom:6px; }
-    .exit-rule-row { width:100%; appearance:none; border:0; border-radius:8px; padding:5px 5px; background:transparent; color:inherit; cursor:pointer; display:grid; grid-template-columns:minmax(52px, 72px) auto minmax(62px, 1fr); align-items:center; gap:4px; text-align:left; font-size:11.5px; line-height:1.35; }
-    .exit-rule-row:hover, .exit-rule-row.active { background:rgba(255,255,255,.06); }
-    .exit-detail-card { position:fixed; z-index:40; border:1px solid rgba(148,163,184,.18); border-radius:12px; background:rgba(15,23,42,.96); backdrop-filter:blur(16px); padding:10px; display:grid; gap:8px; box-shadow:0 22px 58px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.06); }
-    .exit-detail-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; color:#e2e8f0; font-size:12px; font-weight:850; }
-    .exit-detail-close { appearance:none; border:1px solid rgba(148,163,184,.18); background:rgba(2,6,23,.44); color:#94a3b8; border-radius:8px; padding:3px 7px; font-size:11px; line-height:1; }
-    .exit-detail-list { display:grid; gap:7px; max-height:min(340px, calc(100vh - 180px)); overflow:auto; padding-right:2px; }
-    .exit-detail-item { border:1px solid rgba(148,163,184,.10); border-radius:10px; background:rgba(2,6,23,.36); padding:8px 9px; display:grid; gap:6px; }
-    .exit-detail-top { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; font-size:12px; }
-    .exit-detail-meta { display:flex; gap:8px; flex-wrap:wrap; color:#94a3b8; font-size:11px; line-height:1.35; }
-    .exit-detail-reason { color:#94a3b8; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }
+    .position-reason-block { margin-top:9px; display:grid; gap:6px; color:#94a3b8; font-size:12px; line-height:1.55; }
+    .position-reason-row { display:grid; grid-template-columns:64px minmax(0,1fr); gap:8px; align-items:start; min-width:0; }
+    .position-reason-label { color:#64748b; font-weight:850; white-space:nowrap; }
+    .position-reason-text { min-width:0; overflow-wrap:anywhere; color:#aebbd0; }
+    .position-reason-badges { display:flex; gap:5px; flex-wrap:wrap; min-width:0; }
+    .position-reason-badge { display:inline-flex; align-items:center; max-width:100%; border:1px solid rgba(148,163,184,.16); border-radius:7px; background:rgba(15,23,42,.54); color:#dbeafe; padding:1px 6px; font-weight:850; font-size:11px; line-height:1.5; }
     .mobile-only { display:none; }
     .empty { color:var(--muted); text-align:center; padding:42px; border:1px dashed var(--line); border-radius:18px; }
     .right { margin-left:auto; }
@@ -2686,8 +2732,6 @@ INDEX_HTML = r"""<!doctype html>
       .sector-cloud .inline-field { padding:7px 8px; }
       .sector-cloud .inline-field .inline-value { font-size:13px; }
       .practice-stats { grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:7px !important; }
-      .practice-perf-summary { grid-template-columns:repeat(3,minmax(0,1fr)); width:100%; }
-      .practice-perf-grid { grid-template-columns:1fr; width:100%; }
       .practice-chart-card { padding:11px 10px 8px; border-radius:15px; }
       .practice-chart-head { flex-direction:column; gap:8px; }
       .practice-chart-title-row { width:100%; justify-content:space-between; }
@@ -2845,9 +2889,6 @@ let practicePositionMode = initialParams.get('holdings') === 'sold' ? 'sold' : '
 window.practicePositionMode = practicePositionMode;
 let practicePositionBriefMode = initialParams.get('brief') === '1';
 window.practicePositionBriefMode = practicePositionBriefMode;
-let practiceExitRuleDetailKey = '';
-window.practiceExitRuleDetailKey = practiceExitRuleDetailKey;
-let practiceExitRulePopover = {top: 96, left: 16, width: 380, maxHeight: 420};
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const actionFetch = (url, options = {}) => fetch(url, {
@@ -3388,31 +3429,6 @@ function setPracticePositionBriefMode(enabled) {
   if (activeCategory === 'b1_screen') render();
   saveViewState();
 }
-function placePracticeExitRulePopover(target) {
-  const width = Math.min(440, Math.max(300, window.innerWidth - 24));
-  const maxHeight = Math.max(220, Math.min(440, window.innerHeight - 24));
-  if (!target || !target.getBoundingClientRect) {
-    return {top: 72, left: Math.max(12, window.innerWidth - width - 12), width, maxHeight};
-  }
-  const rect = target.getBoundingClientRect();
-  let left = Math.min(window.innerWidth - width - 12, Math.max(12, rect.right - width));
-  let top = rect.bottom + 8;
-  if (top + maxHeight > window.innerHeight - 12) {
-    top = Math.max(12, rect.top - maxHeight - 8);
-  }
-  return {top: Math.round(top), left: Math.round(left), width: Math.round(width), maxHeight: Math.round(maxHeight)};
-}
-function setPracticeExitRuleDetail(ruleKey, event) {
-  if (event && event.stopPropagation) event.stopPropagation();
-  const normalizedKey = String(ruleKey || '');
-  const nextKey = practiceExitRuleDetailKey === normalizedKey ? '' : normalizedKey;
-  practiceExitRuleDetailKey = nextKey;
-  if (nextKey) {
-    practiceExitRulePopover = placePracticeExitRulePopover(event?.currentTarget);
-  }
-  window.practiceExitRuleDetailKey = practiceExitRuleDetailKey;
-  if (activeCategory === 'b1_screen') render();
-}
 function straightSvgPath(points) {
   if (!Array.isArray(points) || points.length === 0) return '';
   return points.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' ');
@@ -3751,6 +3767,49 @@ function renderPracticePanel() {
   const totalEquity = Number(p.total_equity);
   const pnl = Number(p.total_pnl || 0);
   const pnlCls = pnl >= 0 ? 'up' : 'down';
+  const BUY_NAMES = {
+    trend_pullback: '趋势回踩',
+    breakout: '突破确认',
+    shaofu_b1: '少妇B1', b2_confirm: 'B2确认',
+    b3_accelerate: 'B3中继', super_b1: '超级B1',
+    li_daxiao_bottom: '李大霄',
+    mixed: '混合买入', unknown_buy: '未识别买入',
+    auto_exit: '系统退出', unknown: '其他'
+  };
+  const EXIT_NAMES = {
+    stop_loss: '止损', take_profit: '主动止盈', profit_protection: '回撤保护',
+    top_escape: '逃顶/出货', technical_break: '技术破位', sell_score: '卖出评分',
+    no_progress: '信号未兑现', position_adjust: '仓位调整', model_sell: '模型卖出',
+    other_exit: '其他卖出'
+  };
+  const dynamicStrategyMeta = (b1ScreenData && b1ScreenData.strategy_meta) || {};
+  for (const [key, meta] of Object.entries(dynamicStrategyMeta)) {
+    BUY_NAMES[key] = meta.label || BUY_NAMES[key] || key;
+  }
+  const splitTags = value => {
+    if (Array.isArray(value)) return value.map(x => String(x || '').trim()).filter(Boolean);
+    return String(value || '').split(/[，,]/).map(x => x.trim()).filter(Boolean);
+  };
+  const uniq = values => Array.from(new Set((values || []).filter(Boolean)));
+  const inferExitRulesFromReason = reason => {
+    const text = String(reason || '');
+    const rules = [];
+    const add = rule => { if (rule && !rules.includes(rule)) rules.push(rule); };
+    if (/止损|破入场止损/.test(text)) add('stop_loss');
+    if (/止盈清仓|第一批止盈|卤煮止盈|止盈/.test(text)) add('take_profit');
+    if (/峰值回撤|ATR吊灯|移动止损保本|盈转亏/.test(text)) add('profit_protection');
+    if (/S1|S2|S3|逃顶|出货五式/.test(text)) add('top_escape');
+    if (/卖出评分|防卖飞评分/.test(text)) add('sell_score');
+    if (/BBI|白线|死叉|低点跌破|趋势确认失效/.test(text)) add('technical_break');
+    if (/未兑现|低效持仓|持仓到期|次日不涨|未延续/.test(text)) add('no_progress');
+    return rules;
+  };
+  const badgeList = labels => labels.length
+    ? `<span class="position-reason-badges">${labels.map(label => `<span class="position-reason-badge">${esc(label)}</span>`).join('')}</span>`
+    : '';
+  const reasonRow = (label, content) => content
+    ? `<div class="position-reason-row"><span class="position-reason-label">${esc(label)}</span><span class="position-reason-text">${content}</span></div>`
+    : '';
   const positionModeButtons = `<div class="practice-mode-control" aria-label="持仓视图">
     <button class="practice-mode-btn ${!showSoldStocks ? 'active' : ''}" type="button" onclick="setPracticePositionMode('open')">当前持仓${positions.length ? ` ${positions.length}` : ''}</button>
     <button class="practice-mode-btn ${showSoldStocks ? 'active' : ''}" type="button" onclick="setPracticePositionMode('sold')">今日卖出${soldStocks.length ? ` ${soldStocks.length}` : ''}</button>
@@ -3796,10 +3855,17 @@ function renderPracticePanel() {
       ? `${pnlValue >= 0 ? '+' : ''}${fmtAmount(pnlValue)}${Number.isFinite(pnlPct) ? ` / ${pnlPct >= 0 ? '+' : ''}${fmtNumber(pnlPct)}%` : ''}`
       : '--';
     const availableHoldText = `${x.available_qty ?? 0} / ${x.qty ?? 0}`;
+    const buyStrategyLabels = uniq(splitTags(x.buy_strategy).map(key => BUY_NAMES[key] || key));
+    const buyReasonText = String(x.entry_reason || x.buy_reason || '').trim();
+    const buyReasonBlock = x.bought_today && (buyStrategyLabels.length || buyReasonText)
+      ? `<div class="position-reason-block">
+          ${reasonRow('买入策略', badgeList(buyStrategyLabels))}
+          ${reasonRow('买入理由', esc(buyReasonText))}
+        </div>`
+      : '';
     return `<div class="position-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <span style="font-weight:700;font-size:16px;color:#f8fafc">${esc(x.code)} ${esc(x.name||'')}</span>
-        <span style="font-size:13px;color:#94a3b8">${esc(x.qty)}股</span>
       </div>
       <div class="position-metrics">
         <div class="position-metric"><div class="position-label">成本/现价</div><div class="position-value combo">${costPriceText}</div></div>
@@ -3809,8 +3875,10 @@ function renderPracticePanel() {
         <div class="position-metric"><div class="position-label">最高涨幅</div><div class="position-value strong" style="color:${highColor}">${highText}</div></div>
         <div class="position-metric"><div class="position-label">今日收益</div><div class="position-value strong" style="color:${dayColor}">${todayText}</div></div>
         <div class="position-metric"><div class="position-label">市值</div><div class="position-value">${fmtAmount(x.market_value)}</div></div>
+        <div class="position-metric"><div class="position-label">仓位占比</div><div class="position-value">${positionText}</div></div>
         <div class="position-metric"><div class="position-label">可卖/持有</div><div class="position-value" style="color:#94a3b8">${availableHoldText}</div></div>
       </div>
+      ${buyReasonBlock}
     </div>`;
   }).join('') : '<div class="empty" style="padding:18px;font-size:13px">暂无持仓，等待模型决策建仓</div>';
   const soldCards = soldStocks.length ? soldStocks.map(x => {
@@ -3833,6 +3901,16 @@ function renderPracticePanel() {
       ? (afterSellPnl > 0 ? '卖出后上涨' : (afterSellPnl < 0 ? '卖出后回落' : '卖出后持平'))
       : '等待行情';
     const priceText = `${fmtNumber(x.avg_sell_price)} / ${x.current_price == null ? '--' : fmtNumber(x.current_price)}`;
+    const sellReasonText = String(x.reason || '').trim();
+    const rawExitRules = Array.isArray(x.exit_rules) && x.exit_rules.length ? x.exit_rules : x.exit_rule;
+    const exitRuleKeys = splitTags(rawExitRules);
+    const exitRuleLabels = uniq((exitRuleKeys.length ? exitRuleKeys : inferExitRulesFromReason(sellReasonText)).map(key => EXIT_NAMES[key] || key));
+    const sellReasonBlock = (exitRuleLabels.length || sellReasonText)
+      ? `<div class="position-reason-block">
+          ${reasonRow('卖出归因', badgeList(exitRuleLabels))}
+          ${reasonRow('卖出理由', esc(sellReasonText))}
+        </div>`
+      : '';
     return `<div class="position-card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px">
         <span style="font-weight:700;font-size:16px;color:#f8fafc">${esc(x.code)} ${esc(x.name||'')}</span>
@@ -3848,7 +3926,7 @@ function renderPracticePanel() {
         <div class="position-metric"><div class="position-label">到账金额</div><div class="position-value">${fmtAmount(x.net_proceeds)}</div></div>
         <div class="position-metric"><div class="position-label">费用</div><div class="position-value" style="color:#94a3b8">${fmtAmount(x.fee)}</div></div>
       </div>
-      ${x.reason ? `<div style="margin-top:8px;color:#94a3b8;font-size:12px;line-height:1.55">卖出理由：${esc(x.reason)}</div>` : ''}
+      ${sellReasonBlock}
     </div>`;
   }).join('') : '<div class="empty" style="padding:18px;font-size:13px">今日暂无卖出股票</div>';
   const stockCards = showSoldStocks ? soldCards : posCards;
@@ -3876,7 +3954,6 @@ function renderPracticePanel() {
       ${!showSoldStocks ? positionDisplayButtons : ''}
     </div>
     <div class="${stockCardsClass}">${stockCards}</div>
-    ${renderStrategyPerformance(p.strategy_performance, p)}
     <div style="margin-top:10px;color:#94a3b8;font-size:12px">${esc(p.trade_rule_note||'A股模拟：100股整数倍、T+1；09:15-09:25只作开盘集合竞价观察，09:25-09:30不模拟成交。')}｜模型：${esc(p.decision_model || 'deepseek-v4-pro')}${quoteNote}</div>
     <div style="margin-top:8px">${decisions}</div>
     ${p.last_error ? `<div class="empty" style="color:#f87171;margin-top:10px">模型/交易错误：${esc(p.last_error)}</div>` : ''}
@@ -3888,167 +3965,6 @@ function setIndicesViewMode(mode) {
   syncViewUrl();
   if (activeCategory === 'indices') render();
   saveViewState();
-}
-
-function renderStrategyPerformance(perf, portfolio) {
-  if (!perf || !Object.keys(perf).length) return '';
-  const BUY_COLORS = {
-    trend_pullback: '#60a5fa',
-    breakout: '#ec4899',
-    shaofu_b1: '#f97316', b2_confirm: '#22c55e',
-    b3_accelerate: '#a78bfa', super_b1: '#fb7185',
-    mixed: '#c084fc', unknown_buy: '#64748b',
-    auto_exit: '#94a3b8', unknown: '#64748b'
-  };
-  const BUY_NAMES = {
-    trend_pullback: '趋势回踩',
-    breakout: '突破确认',
-    shaofu_b1: '少妇B1', b2_confirm: 'B2确认',
-    b3_accelerate: 'B3中继', super_b1: '超级B1',
-    mixed: '混合买入', unknown_buy: '未识别买入',
-    auto_exit: '系统退出', unknown: '其他'
-  };
-  const EXIT_COLORS = {
-    stop_loss: '#fb7185', take_profit: '#f97316', profit_protection: '#facc15',
-    top_escape: '#c084fc', technical_break: '#60a5fa', sell_score: '#22c55e',
-    no_progress: '#94a3b8', position_adjust: '#38bdf8', model_sell: '#818cf8',
-    other_exit: '#64748b'
-  };
-  const EXIT_NAMES = {
-    stop_loss: '止损', take_profit: '主动止盈', profit_protection: '回撤保护',
-    top_escape: '逃顶/出货', technical_break: '技术破位', sell_score: '卖出评分',
-    no_progress: '信号未兑现', position_adjust: '仓位调整', model_sell: '模型卖出',
-    other_exit: '其他卖出'
-  };
-  const retiredStrategies = new Set(['strict' + '_b1', 'goldi' + 'locks']);
-  const renderBlock = (title, entries, names, colors, options = {}) => {
-    const showOpen = !!options.showOpen;
-    const activePerfEntries = Object.entries(entries || {})
-      .filter(([k, v]) => !retiredStrategies.has(k) && v && typeof v === 'object')
-      .filter(([, v]) => Number(v.trades || 0) || Number(v.open_trades || 0) || Number(v.wins || 0) || Number(v.losses || 0) || Number(v.flats || 0))
-      .sort((a, b) => (Number(b[1].trades || 0) + Number(b[1].open_trades || 0)) - (Number(a[1].trades || 0) + Number(a[1].open_trades || 0)));
-    if (!activePerfEntries.length) return '';
-    const rows = activePerfEntries.map(([k,v]) => {
-      const color = colors[k] || '#94a3b8';
-      const name = names[k] || k;
-      const winRate = Number(v.win_rate || 0);
-      const winCls = winRate >= 50 ? 'up' : 'down';
-      const flatText = Number(v.flats || 0) ? `/${v.flats || 0}平` : '';
-      const openTrades = Number(v.open_trades || 0);
-      const openPnl = Number(v.open_pnl || 0);
-      const combinedPnl = Number(v.combined_pnl ?? (Number(v.total_pnl || 0) + openPnl));
-      const openFlatText = Number(v.open_flats || 0) ? `/${v.open_flats || 0}平` : '';
-      const openCls = openPnl >= 0 ? 'up' : 'down';
-      const combinedCls = combinedPnl >= 0 ? 'up' : 'down';
-      const openLine = showOpen && openTrades
-        ? `<div style="margin-left:80px;color:#94a3b8;font-size:11px;line-height:1.35;display:flex;gap:8px;flex-wrap:wrap">
-            <span>持仓 ${v.open_wins||0}浮盈/${v.open_losses||0}浮亏${openFlatText}</span>
-            <span class="${openCls}">${openPnl >= 0 ? '+' : ''}${fmtAmount(openPnl)}</span>
-            <span>合计 <span class="${combinedCls}">${combinedPnl >= 0 ? '+' : ''}${fmtAmount(combinedPnl)}</span></span>
-          </div>`
-        : '';
-      return `<div style="font-size:12px;padding:3px 0;min-width:0">
-        <div style="display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap">
-          <span style="width:8px;height:8px;border-radius:2px;background:${color};flex-shrink:0"></span>
-          <span style="color:#e2e8f0;min-width:66px;white-space:nowrap">${esc(name)}</span>
-          <span style="color:#94a3b8;white-space:nowrap">已了结 ${v.wins||0}胜/${v.losses||0}负${flatText}</span>
-          <span class="${winCls}" style="font-weight:600;margin-left:4px;white-space:nowrap">${fmtNumber(winRate)}%</span>
-          <span style="color:#94a3b8;margin-left:4px;white-space:nowrap">均${(v.avg_pnl||0)>=0?'+':''}${fmtAmount(v.avg_pnl||0)}</span>
-        </div>
-        ${openLine}
-      </div>`;
-    }).join('');
-		    return `<div class="practice-perf-block">
-		      <div class="practice-perf-title">${esc(title)}</div>
-		      ${rows}
-		    </div>`;
-	  };
-  const renderExitAttributionBlock = (entries) => {
-    const activeEntries = Object.entries(entries || {})
-      .filter(([, v]) => v && typeof v === 'object' && Number(v.trades || v.trigger_count || 0))
-      .sort((a, b) => Number(b[1].trades || b[1].trigger_count || 0) - Number(a[1].trades || a[1].trigger_count || 0));
-    if (!activeEntries.length) return '';
-    const activeKey = activeEntries.some(([k]) => k === practiceExitRuleDetailKey) ? practiceExitRuleDetailKey : '';
-    const rows = activeEntries.map(([k, v]) => {
-      const color = EXIT_COLORS[k] || '#94a3b8';
-      const name = EXIT_NAMES[k] || k;
-      const triggers = Number(v.trades || v.trigger_count || 0);
-      const total = Number(v.total_pnl || 0);
-      const avg = Number(v.avg_pnl || 0);
-      const totalCls = total >= 0 ? 'up' : 'down';
-      const isActive = activeKey === k;
-      return `<button type="button" class="exit-rule-row ${isActive ? 'active' : ''}" onclick='setPracticeExitRuleDetail(${JSON.stringify(k)}, event)'>
-        <span style="display:flex;align-items:center;gap:6px;min-width:0"><span style="width:8px;height:8px;border-radius:2px;background:${color};flex-shrink:0"></span><span style="color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span></span>
-        <span style="color:#94a3b8;white-space:nowrap">触发${triggers}次</span>
-        <span style="text-align:right;white-space:nowrap"><span class="${totalCls}" style="font-weight:800">${total >= 0 ? '+' : ''}${fmtAmount(total)}</span><span style="color:#94a3b8;margin-left:5px">均${avg >= 0 ? '+' : ''}${fmtAmount(avg)}</span></span>
-      </button>`;
-    }).join('');
-    const activeRow = activeKey ? entries[activeKey] : null;
-    const activeName = activeKey ? (EXIT_NAMES[activeKey] || activeKey) : '';
-    const detailItems = (activeRow?.items || []).map(item => {
-      const pnl = Number(item.pnl || 0);
-      const pnlPct = Number(item.pnl_pct);
-      const pnlCls = pnl >= 0 ? 'up' : 'down';
-      const pctText = Number.isFinite(pnlPct) ? ` / ${pnlPct >= 0 ? '+' : ''}${fmtNumber(pnlPct)}%` : '';
-      const buyName = BUY_NAMES[item.buy_strategy] || item.buy_strategy || '未识别买入';
-      return `<div class="exit-detail-item">
-        <div class="exit-detail-top">
-          <div style="min-width:0">
-            <div style="color:#e2e8f0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(item.name || '')} <span style="color:#94a3b8;font-weight:700">${esc(item.code || '')}</span></div>
-            <div class="exit-detail-meta">
-              <span>${esc(item.time || '')}</span>
-              <span>${esc(buyName)}</span>
-              <span>${fmtNumber(item.shares, 0)}股 @ ${fmtNumber(item.price, 3)}</span>
-            </div>
-          </div>
-          <div class="${pnlCls}" style="font-weight:900;white-space:nowrap">${pnl >= 0 ? '+' : ''}${fmtAmount(pnl)}${pctText}</div>
-        </div>
-        ${item.reason ? `<div class="exit-detail-reason">${esc(item.reason)}</div>` : ''}
-      </div>`;
-    }).join('');
-    const pop = practiceExitRulePopover || {};
-    const popTop = Number(pop.top || 72);
-    const popLeft = Number(pop.left || 12);
-    const popWidth = Number(pop.width || 380);
-    const popMaxHeight = Number(pop.maxHeight || 420);
-    const detail = activeRow ? `<div class="exit-detail-card" style="top:${popTop}px;left:${popLeft}px;width:${popWidth}px;max-height:${popMaxHeight}px">
-      <div class="exit-detail-head">
-        <div>${esc(activeName)} · 触发 ${Number(activeRow.trades || activeRow.trigger_count || 0)} 次</div>
-        <button type="button" class="exit-detail-close" onclick="setPracticeExitRuleDetail('')">收起</button>
-      </div>
-      <div class="exit-detail-list">${detailItems || '<div class="empty" style="padding:14px;font-size:12px">暂无明细</div>'}</div>
-    </div>` : '';
-    return `<div class="practice-perf-block">
-      <div class="practice-perf-title">卖出归因</div>
-      ${rows}
-      ${detail}
-    </div>`;
-  };
-  const hasSplitPerf = perf.buy_strategy || perf.exit_rule;
-  const buyBlock = renderBlock('买入战法绩效', hasSplitPerf ? perf.buy_strategy : perf, BUY_NAMES, BUY_COLORS, {showOpen: true});
-  const exitBlock = hasSplitPerf ? renderExitAttributionBlock(perf.exit_rule) : '';
-  const blocks = [buyBlock, exitBlock].filter(Boolean).join('');
-  if (!blocks) return '';
-  const closedPnl = Number((perf.summary || {}).total_pnl);
-  const summaryOpenPnl = Number((perf.summary || {}).open_pnl);
-  const fallbackOpenPnl = (portfolio?.positions || []).reduce((sum, x) => {
-    const value = Number(x.pnl);
-    return sum + (Number.isFinite(value) ? value : 0);
-  }, 0);
-  const openPnl = Number.isFinite(summaryOpenPnl) ? summaryOpenPnl : fallbackOpenPnl;
-  const totalPnl = Number(portfolio?.total_pnl);
-  const metric = (label, value) => {
-    const cls = Number(value) >= 0 ? 'up' : 'down';
-    return `<div class="inline-field"><div class="inline-label">${label}</div><div class="inline-value ${cls}">${Number(value) >= 0 ? '+' : ''}${fmtAmount(value)}</div></div>`;
-  };
-  const summary = (Number.isFinite(closedPnl) || Number.isFinite(openPnl) || Number.isFinite(totalPnl))
-    ? `<div class="practice-perf-summary">
-        ${Number.isFinite(totalPnl) ? metric('总收益', totalPnl) : ''}
-        ${Number.isFinite(closedPnl) ? metric('已实现', closedPnl) : ''}
-        ${Number.isFinite(openPnl) ? metric('持仓浮动', openPnl) : ''}
-      </div>`
-    : '';
-  return `${summary}<div class="practice-perf-grid">${blocks}</div>`;
 }
 
 function renderIndicesPanel() {
@@ -4282,7 +4198,7 @@ function renderB1Screen() {
   } else if (!items.length) {
     html += '<div class="empty">暂无多战法结果，请等待扫描完成…</div>';
   } else {
-    const STRATEGY_META = {
+    const fallbackStrategyMeta = {
       trend_pullback: {label:'趋势回踩',  color:'#60a5fa'},
       breakout:       {label:'突破确认',  color:'#ec4899'},
       shaofu_b1:      {label:'少妇B1',    color:'#f97316'},
@@ -4290,6 +4206,7 @@ function renderB1Screen() {
       b3_accelerate:  {label:'B3中继',    color:'#a78bfa'},
       super_b1:       {label:'超级B1',    color:'#fb7185'},
     };
+    const STRATEGY_META = {...fallbackStrategyMeta, ...(d.strategy_meta || {})};
     const tierCounts = {high:0, mid:0, low:0};
     for (const item of items) {
       const s = item.best_score || item.score || 0;
@@ -5378,11 +5295,6 @@ document.addEventListener('click', event => {
     openXImageViewer(imageTrigger.dataset.xImageUrl || '', imageTrigger.dataset.xImageLabel || '推文图片');
     return;
   }
-  if (practiceExitRuleDetailKey && activeCategory === 'b1_screen') {
-    if (event.target.closest('.exit-detail-card') || event.target.closest('.exit-rule-row')) return;
-    setPracticeExitRuleDetail('');
-    return;
-  }
   if (activeCategory === 'x_monitor') {
     if (event.target.closest('.x-detail')) return;
     const row = event.target.closest('.x-row[data-x-key]');
@@ -5400,11 +5312,6 @@ document.addEventListener('click', event => {
   }
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && practiceExitRuleDetailKey) {
-    event.preventDefault();
-    setPracticeExitRuleDetail('');
-    return;
-  }
   if (!xImageViewer.url) return;
   if (event.key === 'Escape') {
     event.preventDefault();
@@ -5558,6 +5465,35 @@ def render_env_input(item: dict[str, Any]) -> str:
             + "</div><button type='button' class='time-list-add' data-time-list-add "
             "aria-label='添加作者' title='添加作者'>+</button></div>"
             "<div class='config-meta'>X/Twitter handle</div>"
+        )
+    if kind in {"strategy_multi", "strategy_single"}:
+        selected = set(item.get("strategy_values") or split_strategy_values(value))
+        field_name = f"env__{escaped_name}"
+        options = item.get("strategy_options") or strategy_settings_options(family="persona")
+        option_html = []
+        for option in options:
+            strategy_id = str(option.get("id") or "")
+            if not strategy_id:
+                continue
+            checked = " checked" if strategy_id in selected else ""
+            input_type = "radio" if kind == "strategy_single" else "checkbox"
+            label = html.escape(str(option.get("label") or strategy_id))
+            desc = html.escape(str(option.get("desc") or ""))
+            color = html.escape(str(option.get("color") or "#94a3b8"))
+            option_html.append(
+                f"<label class='strategy-option' style='--strategy-color:{color}'>"
+                f"<input type='{input_type}' name='{field_name}' value='{html.escape(strategy_id)}'{checked}>"
+                "<span class='strategy-option-main'>"
+                f"<span class='strategy-option-title'><span class='strategy-option-dot'></span>{label}</span>"
+                f"<span class='strategy-option-desc'>{desc}</span>"
+                "</span>"
+                "</label>"
+            )
+        return (
+            f"<div class='strategy-multi-control'>"
+            f"<input type='hidden' name='{field_name}' value=''>"
+            + "".join(option_html)
+            + "</div><div class='config-meta'>每次只启用一个人格策略</div>"
         )
     input_type = "number" if kind == "int" else "text"
     return f"<input type='{input_type}' name='env__{escaped_name}' value='{html.escape(value)}'>"
@@ -5881,7 +5817,7 @@ class Handler(BaseHTTPRequestHandler):
         for key, values in parsed.items():
             env_name = key[len("env__"):] if key.startswith("env__") else ""
             schema = ENV_CONFIG_BY_NAME.get(env_name, {})
-            if schema.get("kind") in {"time_list", "handle_list"}:
+            if schema.get("kind") in {"time_list", "handle_list", "strategy_multi", "strategy_single"}:
                 result[key] = ",".join(v.strip() for v in values if v.strip())
             else:
                 result[key] = values[-1] if values else ""

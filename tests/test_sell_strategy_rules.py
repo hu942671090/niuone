@@ -72,6 +72,8 @@ class SellStrategyRuleTests(unittest.TestCase):
                     "avg_cost": 10.0,
                     "last_price": 10.0,
                     "buy_date_lots": {"2026-06-23": 1000},
+                    "buy_strategy": "b3_accelerate",
+                    "entry_reason": "B3中继评分10.0达标",
                 }
             },
             "trade_log": [],
@@ -105,6 +107,46 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(row["day_high_pct"], 8.0)
         self.assertEqual(row["day_low_pct"], 1.0)
         self.assertEqual(row["change_pct"], 5.0)
+        self.assertFalse(row["bought_today"])
+        self.assertEqual(row["today_buy_qty"], 0)
+        self.assertEqual(row["buy_strategy"], "b3_accelerate")
+        self.assertEqual(row["entry_reason"], "B3中继评分10.0达标")
+
+    def test_portfolio_marks_only_today_bought_positions(self):
+        original_today_key = trader.today_key
+        try:
+            trader.today_key = lambda: "2026-06-24"
+            state = {
+                "cash": 0.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "qty": 1000,
+                        "avg_cost": 10.0,
+                        "last_price": 10.2,
+                        "buy_date_lots": {"2026-06-24": 300, "2026-06-23": 700},
+                        "buy_strategy": "b3_accelerate",
+                        "entry_reason": "B3中继评分10.0达标",
+                    },
+                    "600001": {
+                        "code": "600001",
+                        "qty": 1000,
+                        "avg_cost": 10.0,
+                        "last_price": 10.2,
+                        "buy_date_lots": {"2026-06-23": 1000},
+                        "buy_strategy": "trend_pullback",
+                        "entry_reason": "趋势回踩评分9.0达标",
+                    },
+                },
+            }
+            rows = {row["code"]: row for row in trader.enrich_portfolio(state)["positions"]}
+        finally:
+            trader.today_key = original_today_key
+
+        self.assertTrue(rows["600000"]["bought_today"])
+        self.assertEqual(rows["600000"]["today_buy_qty"], 300)
+        self.assertFalse(rows["600001"]["bought_today"])
+        self.assertEqual(rows["600001"]["today_buy_qty"], 0)
 
     def test_available_to_sell_treats_legacy_positions_as_historical(self):
         original_today_key = trader.today_key
@@ -517,6 +559,9 @@ class SellStrategyRuleTests(unittest.TestCase):
     def test_buy_strategy_classifier_drops_legacy_b1_aliases(self):
         self.assertEqual(trader.classify_buy_strategy("超级B1放量破位洗盘"), "super_b1")
         self.assertEqual(trader.classify_buy_strategy("少妇B1缩量回调"), "shaofu_b1")
+        self.assertEqual(trader.classify_buy_strategy("巴菲特价值评分达标"), "unknown_buy")
+        self.assertEqual(trader.classify_buy_strategy("李大霄低位企稳"), "li_daxiao_bottom")
+        self.assertEqual(trader.classify_buy_strategy("李大霄底部低位企稳"), "li_daxiao_bottom")
         self.assertEqual(trader.classify_buy_strategy("中庸动量评分达标"), "unknown_buy")
         self.assertEqual(trader.classify_buy_strategy("高匹配B1评分达标"), "unknown_buy")
         self.assertEqual(trader.classify_buy_strategy("B1旧版买入"), "unknown_buy")
@@ -954,6 +999,8 @@ class SellStrategyRuleTests(unittest.TestCase):
                         "fee": 10.0,
                         "pnl": 990.0,
                         "reason": "止盈",
+                        "exit_rule": "take_profit",
+                        "buy_strategy": "b2_confirm",
                     },
                     {
                         "time": "2026-06-23 10:00:00",
@@ -975,6 +1022,10 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(rows[0]["current_price"], 10.5)
         self.assertEqual(rows[0]["after_sell_pnl"], 500.0)
         self.assertIn("止盈", rows[0]["reason"])
+        self.assertEqual(rows[0]["exit_rule"], "take_profit")
+        self.assertEqual(rows[0]["exit_rules"], ["take_profit"])
+        self.assertEqual(rows[0]["buy_strategy"], "b2_confirm")
+        self.assertEqual(rows[0]["buy_strategies"], ["b2_confirm"])
 
     def test_profit_giveback_triggers_after_peak(self):
         pos = {
