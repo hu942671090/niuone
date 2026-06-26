@@ -909,6 +909,24 @@ class SellStrategyRuleTests(unittest.TestCase):
         )
         self.assertEqual([p["time"] for p in state["daily_equity_history"]], ["2026-06-25 15:00:00"])
 
+    def test_daily_equity_history_is_normalized_to_latest_point_per_day(self):
+        state = {
+            "daily_equity_history": [
+                {"time": "2026-06-25 10:00:00", "equity": 99000.0},
+                {"time": "2026-06-26 09:30:00", "equity": 100000.0},
+                {"time": "2026-06-25 15:00:00", "equity": 101000.0},
+                {"time": "2026-06-26 10:00:00", "equity": 100500.0},
+            ],
+        }
+
+        changed = trader.normalize_daily_equity_history(state)
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [(p["time"], p["equity"]) for p in state["daily_equity_history"]],
+            [("2026-06-25 15:00:00", 101000.0), ("2026-06-26 10:00:00", 100500.0)],
+        )
+
     def test_today_sold_stocks_are_aggregated_with_quote_delta(self):
         original_fetch = trader.fetch_realtime_quotes
         try:

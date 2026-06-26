@@ -3493,11 +3493,14 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     }
     return [...byDate.values()].sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
   }
+  const normalizedHistory = normalizeEquityPoints(history);
+  const normalizedDailyHistory = normalizeEquityPoints(dailyHistory);
   let rawPoints = [];
   let dailyCompactedPoints = [];
+  let intradayBasePoint = null;
   if (isDailyMode) {
-    const compactedFromDaily = compactDailyPoints(normalizeEquityPoints(dailyHistory));
-    const compactedFromIntraday = compactDailyPoints(normalizeEquityPoints(history));
+    const compactedFromDaily = compactDailyPoints(normalizedDailyHistory);
+    const compactedFromIntraday = compactDailyPoints(normalizedHistory);
     const byDate = new Map();
     for (const p of [...compactedFromIntraday, ...compactedFromDaily]) {
       const date = String(p.time || '').slice(0, 10);
@@ -3511,11 +3514,25 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
       .sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
     rawPoints = dailyCompactedPoints;
   } else {
-    rawPoints = normalizeEquityPoints(history);
+    rawPoints = normalizedHistory;
   }
   if (rawPoints.length < 2) return '<div class="empty" style="padding:18px">收益曲线等待更多净值点…</div>';
   const latestTradingClockPoint = [...rawPoints].reverse().find(p => tradingClockMinuteOfDay(p.time) != null);
   const latestDay = (latestTradingClockPoint || rawPoints[rawPoints.length - 1]).time.slice(0, 10);
+  if (!isDailyMode) {
+    const priorByDate = new Map();
+    for (const p of [...compactDailyPoints(normalizedHistory), ...compactDailyPoints(normalizedDailyHistory)]) {
+      const date = String(p.time || '').slice(0, 10);
+      if (!date || date >= latestDay) continue;
+      const prev = priorByDate.get(date);
+      if (!prev || (new Date(p.time).getTime() || 0) >= (new Date(prev.time).getTime() || 0)) {
+        priorByDate.set(date, p);
+      }
+    }
+    intradayBasePoint = [...priorByDate.values()]
+      .sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0))
+      .at(-1) || null;
+  }
   const w = 720, h = 210, left = 12, right = 58, top = 18, bottom = 24;
   const innerW = w - left - right, innerH = h - top - bottom;
   const totalSessionMinutes = 4 * 60; // 4小时 = 240分钟
@@ -3592,7 +3609,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     ];
   }
   const vals = points.map(p => p.equity);
-  const chartBase = isDailyMode ? initialCash : vals[0];
+  const chartBase = isDailyMode ? initialCash : (Number.isFinite(Number(intradayBasePoint?.equity)) ? Number(intradayBasePoint.equity) : vals[0]);
   const chartPcts = vals.map(v => chartBase ? (v / chartBase - 1) * 100 : 0);
   const chartDeltas = vals.map(v => v - (chartBase || 0));
   const last = vals[vals.length - 1], prev = vals[Math.max(0, vals.length - 2)];
@@ -3669,9 +3686,12 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     return `<span class="practice-time-label ${cls}" style="left:${((t.x / w) * 100).toFixed(2)}%">${esc(t.label)}</span>`;
   }).join('');
   const chartTitle = isDailyMode ? '收益曲线 · 每日总收益' : '收益曲线 · 当日收益';
+  const intradayBaseLabel = intradayBasePoint
+    ? `0轴为上一交易日净值(${esc(String(intradayBasePoint.time || '').slice(5, 16))})`
+    : '0轴为今日首个净值';
   const chartSub = isDailyMode
     ? `按交易日最后净值计算 · 0轴为起始资金 · 最近点：${esc(lastTime)}`
-    : `固定盘面时间轴 09:30-15:00 · 0轴为今日首个净值 · 最近点：${esc(lastTime)}`;
+    : `固定盘面时间轴 09:30-15:00 · ${intradayBaseLabel} · 最近点：${esc(lastTime)}`;
   const primaryKpiLabel = isDailyMode ? '最新总收益' : '当日收益';
   const secondaryKpiLabel = isDailyMode ? '较前日变化' : '累计收益';
   const secondaryKpiPnl = isDailyMode ? dayDelta : totalPnl;

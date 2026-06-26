@@ -378,6 +378,27 @@ def prune_future_intraday_equity_points(
     return changed
 
 
+def normalize_daily_equity_history(state: dict[str, Any]) -> bool:
+    history = state.get("daily_equity_history")
+    if not isinstance(history, list):
+        return False
+    by_date: dict[str, dict[str, Any]] = {}
+    for point in history:
+        if not isinstance(point, dict):
+            continue
+        date = str(point.get("time") or "")[:10]
+        if not date:
+            continue
+        prev = by_date.get(date)
+        if prev is None or str(point.get("time") or "") >= str(prev.get("time") or ""):
+            by_date[date] = point
+    normalized = [by_date[date] for date in sorted(by_date.keys())][-EQUITY_HISTORY_LIMIT:]
+    if normalized == history:
+        return False
+    state["daily_equity_history"] = normalized
+    return True
+
+
 def default_state() -> dict[str, Any]:
     return {
         "created_at": now_ts(),
@@ -474,6 +495,7 @@ def save_state(state: dict[str, Any]) -> None:
         pass
 
     prune_future_intraday_equity_points(state)
+    normalize_daily_equity_history(state)
 
     tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
@@ -1178,6 +1200,7 @@ def add_execution_block(decision: dict[str, Any], code: str, reason: str) -> Non
 
 def record_equity(state: dict[str, Any]) -> None:
     prune_future_intraday_equity_points(state)
+    normalize_daily_equity_history(state)
     snap = enrich_portfolio(state)
     history = state.setdefault("equity_history", [])
     now = now_ts()
