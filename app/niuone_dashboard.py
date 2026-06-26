@@ -619,8 +619,39 @@ def downsample_sequence(items: list[Any], max_points: int) -> list[Any]:
     return selected
 
 
-def compact_intraday_equity_history(history: list[dict[str, Any]], *, max_points: int = 120) -> list[dict[str, Any]]:
-    points = [p for p in (history or []) if isinstance(p, dict)]
+def parse_dashboard_ts(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(str(value or ""), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def filter_future_equity_points(
+    history: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    grace_seconds: int = 120,
+) -> list[dict[str, Any]]:
+    now = now or datetime.now()
+    cutoff = now.timestamp() + max(0, int(grace_seconds or 0))
+    filtered: list[dict[str, Any]] = []
+    for point in history or []:
+        if not isinstance(point, dict):
+            continue
+        dt = parse_dashboard_ts(str(point.get("time") or ""))
+        if dt is not None and (dt.date() > now.date() or (dt.date() == now.date() and dt.timestamp() > cutoff)):
+            continue
+        filtered.append(point)
+    return filtered
+
+
+def compact_intraday_equity_history(
+    history: list[dict[str, Any]],
+    *,
+    max_points: int = 120,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    points = filter_future_equity_points(history or [], now=now)
     if not points:
         return []
     latest_day = ""
@@ -633,9 +664,14 @@ def compact_intraday_equity_history(history: list[dict[str, Any]], *, max_points
     return downsample_sequence(day_points, max_points)
 
 
-def compact_daily_equity_history(history: list[dict[str, Any]], *, max_days: int = 260) -> list[dict[str, Any]]:
+def compact_daily_equity_history(
+    history: list[dict[str, Any]],
+    *,
+    max_days: int = 260,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
     by_date: dict[str, dict[str, Any]] = {}
-    for point in history or []:
+    for point in filter_future_equity_points(history or [], now=now):
         if not isinstance(point, dict):
             continue
         date = str(point.get("time") or "")[:10]

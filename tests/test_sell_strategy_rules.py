@@ -849,6 +849,66 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertFalse(rebuilt)
         self.assertEqual(len(state["equity_history"]), 1)
 
+    def test_intraday_curve_rebuild_clamps_today_points_to_current_clock(self):
+        state = {
+            "cash": 90000.0,
+            "initial_cash": 100000.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 10.2,
+                    "intraday": {"points": [
+                        {"time": "09:30", "minute": 0, "price": 10.0},
+                        {"time": "09:31", "minute": 1, "price": 10.1},
+                        {"time": "15:00", "minute": 240, "price": 10.8},
+                    ]},
+                }
+            },
+            "trade_log": [],
+            "equity_history": [],
+            "daily_equity_history": [],
+        }
+
+        rebuilt = trader.rebuild_intraday_equity_curve(
+            state,
+            today="2026-06-24",
+            now=datetime(2026, 6, 24, 9, 31, 30),
+        )
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(
+            [p["time"] for p in state["equity_history"]],
+            ["2026-06-24 09:30:00", "2026-06-24 09:31:00"],
+        )
+        self.assertEqual(state["daily_equity_history"][-1]["time"], "2026-06-24 09:31:00")
+
+    def test_prune_future_intraday_equity_points_removes_today_future_points(self):
+        state = {
+            "equity_history": [
+                {"time": "2026-06-25 15:00:00", "equity": 99000.0},
+                {"time": "2026-06-26 09:39:00", "equity": 100000.0},
+                {"time": "2026-06-26 15:00:00", "equity": 105000.0},
+            ],
+            "daily_equity_history": [
+                {"time": "2026-06-25 15:00:00", "equity": 99000.0},
+                {"time": "2026-06-26 15:00:00", "equity": 105000.0},
+            ],
+        }
+
+        changed = trader.prune_future_intraday_equity_points(
+            state,
+            now=datetime(2026, 6, 26, 9, 39, 30),
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [p["time"] for p in state["equity_history"]],
+            ["2026-06-25 15:00:00", "2026-06-26 09:39:00"],
+        )
+        self.assertEqual([p["time"] for p in state["daily_equity_history"]], ["2026-06-25 15:00:00"])
+
     def test_today_sold_stocks_are_aggregated_with_quote_delta(self):
         original_fetch = trader.fetch_realtime_quotes
         try:

@@ -9,6 +9,7 @@ import unittest
 import sys
 import urllib.parse
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -151,6 +152,33 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertTrue(all(p['time'].startswith('2026-06-25') for p in compacted))
         self.assertEqual(compacted[0], latest_points[0])
         self.assertEqual(compacted[-1], latest_points[-1])
+
+    def test_compact_intraday_equity_history_filters_future_same_day_points(self):
+        points = [
+            {'time': '2026-06-26 09:30:00', 'equity': 1000000, 'pnl_pct': 0},
+            {'time': '2026-06-26 09:39:00', 'equity': 1000100, 'pnl_pct': 0.01},
+            {'time': '2026-06-26 15:00:00', 'equity': 1005000, 'pnl_pct': 0.5},
+        ]
+
+        compacted = dashboard.compact_intraday_equity_history(
+            points,
+            now=datetime(2026, 6, 26, 9, 39, 30),
+        )
+
+        self.assertEqual([p['time'] for p in compacted], ['2026-06-26 09:30:00', '2026-06-26 09:39:00'])
+
+    def test_compact_daily_equity_history_filters_future_same_day_settlement(self):
+        points = [
+            {'time': '2026-06-25 15:00:00', 'equity': 1000000, 'pnl_pct': 0},
+            {'time': '2026-06-26 15:00:00', 'equity': 1005000, 'pnl_pct': 0.5},
+        ]
+
+        compacted = dashboard.compact_daily_equity_history(
+            points,
+            now=datetime(2026, 6, 26, 9, 39, 30),
+        )
+
+        self.assertEqual([p['time'] for p in compacted], ['2026-06-25 15:00:00'])
 
     def test_compact_strategy_performance_truncates_exit_details(self):
         perf = {

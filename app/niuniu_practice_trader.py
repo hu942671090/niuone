@@ -326,6 +326,58 @@ def parse_ts(value: str) -> datetime | None:
         return None
 
 
+def current_session_minute(dt: datetime | None = None) -> int:
+    """Return the latest valid A-share minute that should exist at this clock time."""
+    dt = dt or datetime.now()
+    t = dt.time()
+    if t < dtime(9, 30):
+        return -1
+    if t <= dtime(11, 30):
+        return int((dt.hour * 60 + dt.minute) - (9 * 60 + 30))
+    if t < dtime(13, 0):
+        return 120
+    if t <= dtime(15, 0):
+        return 120 + int((dt.hour * 60 + dt.minute) - (13 * 60))
+    return 240
+
+
+def prune_future_intraday_equity_points(
+    state: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    grace_seconds: int = 120,
+) -> bool:
+    """Drop same-day equity points that are ahead of the dashboard clock.
+
+    Tencent minute data can briefly serve the previous full trading day before
+    today's stream is populated. Those points used to be relabeled as today and
+    made the intraday account curve show 15:00 before the session got there.
+    """
+    now = now or datetime.now()
+    cutoff = now.timestamp() + max(0, int(grace_seconds or 0))
+    changed = False
+    for key in ("equity_history", "daily_equity_history"):
+        history = state.get(key)
+        if not isinstance(history, list):
+            continue
+        kept: list[Any] = []
+        for point in history:
+            if not isinstance(point, dict):
+                kept.append(point)
+                continue
+            dt = parse_ts(str(point.get("time") or ""))
+            if dt is None:
+                kept.append(point)
+                continue
+            if dt.date() > now.date() or (dt.date() == now.date() and dt.timestamp() > cutoff):
+                changed = True
+                continue
+            kept.append(point)
+        if len(kept) != len(history):
+            state[key] = kept[-(2000 if key == "equity_history" else EQUITY_HISTORY_LIMIT):]
+    return changed
+
+
 def default_state() -> dict[str, Any]:
     return {
         "created_at": now_ts(),
@@ -420,6 +472,8 @@ def save_state(state: dict[str, Any]) -> None:
                     state[key] = current.get(key)
     except Exception:
         pass
+
+    prune_future_intraday_equity_points(state)
 
     tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
@@ -1123,6 +1177,7 @@ def add_execution_block(decision: dict[str, Any], code: str, reason: str) -> Non
 
 
 def record_equity(state: dict[str, Any]) -> None:
+    prune_future_intraday_equity_points(state)
     snap = enrich_portfolio(state)
     history = state.setdefault("equity_history", [])
     now = now_ts()
@@ -1184,16 +1239,23 @@ def record_equity(state: dict[str, Any]) -> None:
             pass
 
 
-def rebuild_intraday_equity_curve(state: dict[str, Any], today: str | None = None) -> bool:
+def rebuild_intraday_equity_curve(
+    state: dict[str, Any],
+    today: str | None = None,
+    *,
+    now: datetime | None = None,
+) -> bool:
     """Rebuild today's account equity from per-position minute prices.
 
     This keeps dashboard refreshes accurate without executing trades. It is most
     useful after data repair, where sparse heartbeat points can otherwise make
     the intraday curve look flat or jumpy.
     """
-    today = today or today_key()
+    now = now or datetime.now()
+    today = today or now.strftime("%Y-%m-%d")
     if any(str(t.get("time", "")).startswith(today) for t in state.get("trade_log", []) if isinstance(t, dict)):
         return False
+    session_cutoff = current_session_minute(now) if today == now.strftime("%Y-%m-%d") else 240
     cash = float(state.get("cash") or 0)
     initial_cash = float(state.get("initial_cash") or INITIAL_CASH)
     positions = state.get("positions") or {}
@@ -1207,6 +1269,8 @@ def rebuild_intraday_equity_curve(state: dict[str, Any], today: str | None = Non
             minute = point.get("minute")
             price = point.get("price")
             time_text = point.get("time")
+            if isinstance(minute, int) and minute > session_cutoff:
+                continue
             if isinstance(minute, int) and isinstance(price, (int, float)) and time_text:
                 series[int(minute)] = (str(time_text), float(price))
         if series:
@@ -2525,6 +2589,7 @@ def maybe_record_session_equity_heartbeat(min_interval_seconds: int = EQUITY_HEA
     if not is_a_share_session_clock(now):
         return False
     state = load_state()
+    pruned = prune_future_intraday_equity_points(state, now=now)
     history = state.setdefault("equity_history", [])
     last_dt = None
     for item in reversed(history):
@@ -2532,6 +2597,8 @@ def maybe_record_session_equity_heartbeat(min_interval_seconds: int = EQUITY_HEA
         if last_dt:
             break
     if last_dt and (now - last_dt).total_seconds() < min_interval_seconds:
+        if pruned:
+            save_state(state)
         return False
     # Keep current holdings marked-to-market before taking a snapshot.
     try:
@@ -3510,6 +3577,7 @@ def resume_trading() -> dict[str, Any]:
 
 def get_dashboard_payload() -> dict[str, Any]:
     state = load_state()
+    prune_future_intraday_equity_points(state)
     # 看板读取必须是无交易副作用的：只刷新行情/指标和权益曲线。
     # 自动止盈止损只能由明确的交易调度流程触发，避免页面刷新造成非预定成交。
     refresh_realtime_prices(state)
