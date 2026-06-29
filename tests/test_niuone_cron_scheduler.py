@@ -93,6 +93,15 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
         self.assertTrue(scheduler.job_enabled(us_job, {"DASHBOARD_US_FEATURES_ENABLED": "true"}))
         self.assertTrue(scheduler.job_enabled(cn_job, {}))
 
+    def test_us_market_summary_runs_at_8_on_weekdays(self):
+        scheduler = load_scheduler_module()
+        job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_US_MARKET_SUMMARY_CRON")
+
+        self.assertEqual(job.default_expr, "0 8 * * 1-5")
+        self.assertEqual(job.command, ("us_market_summary.py", "--archive"))
+        self.assertEqual(scheduler.normalize_job_expr(job, "08:00"), "0 8 * * 1-5")
+        self.assertTrue(scheduler.job_enabled(job, {}))
+
     def test_time_exit_job_uses_hhmm_setting(self):
         scheduler = load_scheduler_module()
         b3_job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_B3_EXIT_TIME")

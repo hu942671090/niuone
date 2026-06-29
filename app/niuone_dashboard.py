@@ -39,6 +39,7 @@ from strategy_registry import (
     normalize_strategy_list_update,
     strategy_settings_options,
 )
+from us_market_summary import fetch_us_market_summary
 
 try:
     import yaml  # type: ignore
@@ -148,6 +149,7 @@ API_TTLS = {
     "money_flow": 60,
     "market_flow": 30,
     "us_quotes": 30,
+    "us_market_summary": int(os.environ.get("DASHBOARD_US_MARKET_SUMMARY_TTL_SECONDS", "300") or "300"),
 }
 
 SECRET_PLACEHOLDER = "__KEEP_SECRET__"
@@ -220,6 +222,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_DECISION_MODEL", "label": "买卖决策模型", "group": "买卖决策模型", "kind": "text", "default": "deepseek-v4-pro", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_BASE_URL", "label": "买卖决策 API 地址", "group": "买卖决策模型", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_API_KEY", "label": "买卖决策 API 密钥", "group": "买卖决策模型", "kind": "secret", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_US_MARKET_SUMMARY_CRON", "label": "隔夜美股盘面总结时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "0 8 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_AUCTION_CRON", "label": "盘前竞价监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "25 9 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_MIDDAY_CRON", "label": "午盘监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "40 11 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_CLOSE_CRON", "label": "盘后监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "10 15 * * 1-5", "effect": "next_run"},
@@ -271,6 +274,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
     PERSONA_STRATEGY_ENV,
+    "DASHBOARD_US_MARKET_SUMMARY_CRON",
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
     "DASHBOARD_MARKET_CLOSE_CRON",
@@ -1714,24 +1718,26 @@ def write_yaml_config(raw_text: str) -> dict[str, Any]:
 
 
 CRON_CONFIG_NAMES = {
+    "DASHBOARD_US_MARKET_SUMMARY_CRON",
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
     "DASHBOARD_MARKET_CLOSE_CRON",
     "DASHBOARD_US_RATING_CRON",
 }
 CRON_TIME_CONFIGS = {
+    "DASHBOARD_US_MARKET_SUMMARY_CRON": {"day_label": "A股交易日"},
     "DASHBOARD_MARKET_AUCTION_CRON": {"day_label": "周一至周五"},
     "DASHBOARD_MARKET_MIDDAY_CRON": {"day_label": "周一至周五"},
     "DASHBOARD_MARKET_CLOSE_CRON": {"day_label": "周一至周五"},
     "DASHBOARD_US_RATING_CRON": {"day_label": "每天"},
 }
 ADMIN_GROUP_NOTES = {
-    "牛牛美股": "集中管理 X/推文监控与美股买入评级。开启后显示并启用相关设置；关闭时隐藏相关设置，后台定时任务会跳过这些功能。Grok 为推荐模型。",
+    "牛牛美股": "集中管理 X/推文监控、美股买入评级和隔夜美股盘面总结使用的 Grok 配置。开启后显示并启用相关设置；关闭时隐藏 X/评级相关设置，隔夜美股总结仍会读取已配置的 Grok 参数。",
     "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。留空则跳过。",
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。",
     "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
     "选股策略": "选择参与 A 股扫描的人格策略；基础趋势/突破策略始终保留。",
-    "盘面监控生产时间点": "直接填写北京时间 HH:MM；盘面监控在 A 股交易日触发。",
+    "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
 }
 US_FEATURE_GATED_GROUPS = {
@@ -2504,6 +2510,31 @@ INDEX_HTML = r"""<!doctype html>
     .market-detail-line.tip::before { background:rgba(96,165,250,.72); }
     .market-detail-heading { color:#dbeafe; font-size:13px; font-weight:850; margin-top:4px; }
     .market-detail-note { color:#94a3b8; }
+    .us-market-summary-card { position:relative; overflow:hidden; border:1px solid rgba(148,163,184,.16); border-radius:16px; padding:15px 16px; background:linear-gradient(135deg, rgba(15,23,42,.94), rgba(2,6,23,.86)); box-shadow:0 14px 42px rgba(0,0,0,.20), inset 0 1px 0 rgba(255,255,255,.035); }
+    .us-market-summary-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:4px; background:rgba(96,165,250,.74); }
+    .us-market-summary-card.offensive::before { background:rgba(248,113,113,.78); }
+    .us-market-summary-card.balanced::before { background:rgba(167,139,250,.74); }
+    .us-market-summary-card.cautious::before { background:rgba(251,191,36,.78); }
+    .us-market-summary-card.defensive::before { background:rgba(52,211,153,.78); }
+    .us-market-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px; }
+    .us-market-title { color:#f8fafc; font-size:16px; line-height:1.25; font-weight:900; }
+    .us-market-sub { margin-top:4px; color:#7b8aa0; font-size:12px; line-height:1.35; }
+    .us-market-tone { flex:0 0 auto; border:1px solid rgba(96,165,250,.24); border-radius:999px; padding:5px 9px; color:#bfdbfe; background:rgba(37,99,235,.13); font-size:12px; line-height:1; font-weight:850; white-space:nowrap; }
+    .us-market-summary-card.offensive .us-market-tone { color:#fecaca; border-color:rgba(248,113,113,.28); background:rgba(127,29,29,.20); }
+    .us-market-summary-card.balanced .us-market-tone { color:#ddd6fe; border-color:rgba(167,139,250,.28); background:rgba(88,28,135,.18); }
+    .us-market-summary-card.cautious .us-market-tone { color:#fde68a; border-color:rgba(251,191,36,.30); background:rgba(113,63,18,.18); }
+    .us-market-summary-card.defensive .us-market-tone { color:#bbf7d0; border-color:rgba(52,211,153,.28); background:rgba(6,78,59,.20); }
+    .us-market-brief { color:#e2e8f0; font-size:14px; line-height:1.58; margin-bottom:12px; overflow-wrap:anywhere; word-break:break-word; }
+    .us-market-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(128px,1fr)); gap:8px; margin-bottom:12px; }
+    .us-market-metric { min-width:0; border:1px solid rgba(148,163,184,.13); border-radius:9px; padding:8px 9px; background:rgba(2,6,23,.42); }
+    .us-market-metric-label { color:#8da0b8; font-size:11px; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .us-market-metric-value { margin-top:3px; display:flex; align-items:baseline; justify-content:space-between; gap:7px; color:#e5edf8; font-size:13px; line-height:1.25; font-weight:850; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .us-market-pct.up { color:#d75442; }
+    .us-market-pct.down { color:#59b881; }
+    .us-market-pct.flat { color:#94a3b8; }
+    .us-market-guidance { display:grid; gap:7px; }
+    .us-market-guidance-line { display:grid; grid-template-columns:8px minmax(0,1fr); gap:8px; color:#cbd5e1; font-size:13.5px; line-height:1.5; }
+    .us-market-guidance-line::before { content:""; width:5px; height:5px; border-radius:999px; margin-top:.62em; background:rgba(148,163,184,.62); }
     .market-day-pager { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-top:12px; padding:13px 15px; }
     .market-day-title { color:#dbeafe; font-size:14px; font-weight:850; }
     .market-day-sub { color:#7b8aa0; font-size:12px; margin-top:3px; }
@@ -2687,6 +2718,14 @@ INDEX_HTML = r"""<!doctype html>
       .market-detail-line { font-size:13.5px; line-height:1.58; }
       .market-detail-line.flow { grid-template-columns:38px minmax(0,1fr); gap:7px; padding:6px 0; }
       .market-detail-heading { font-size:12.5px; }
+      .us-market-summary-card { border-radius:14px; padding:12px 11px; }
+      .us-market-head { display:grid; grid-template-columns:1fr; gap:8px; margin-bottom:10px; }
+      .us-market-title { font-size:14.5px; }
+      .us-market-tone { justify-self:start; }
+      .us-market-brief { font-size:13.5px; line-height:1.5; }
+      .us-market-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
+      .us-market-metric { padding:7px 8px; }
+      .us-market-guidance-line { font-size:13px; line-height:1.48; }
       .market-day-pager { align-items:stretch; padding:10px 11px; gap:8px; }
       .market-day-title { font-size:13.5px; }
       .market-day-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); width:100%; gap:7px; }
@@ -2866,6 +2905,7 @@ let usQuotesLoadingKey = '';
 let hotStocksData = {};
 let moneyFlowData = {inflow: [], outflow: []};
 let marketFlowData = {total_inflow_yi: null, total_outflow_yi: null, net_flow_yi: null};
+let usMarketSummaryData = {loading: true};
 let b1ScreenData = {items: [], count: 0};
 let niuniuPracticeData = {positions: [], equity_history: [], trade_log: [], decision_log: [], cash: 1000000, total_equity: 1000000};
 let practiceBenchmarksData = {items: []};
@@ -2937,7 +2977,7 @@ function saveViewState() {
   try {
     sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
       data, indicesData, sectorData, hotStocksData, moneyFlowData, marketFlowData,
-      b1ScreenData, niuniuPracticeData, practiceBenchmarksData, usQuotesData,
+      usMarketSummaryData, b1ScreenData, niuniuPracticeData, practiceBenchmarksData, usQuotesData,
       xPageOffset, xLoadedOffset, practiceCurveMode, practicePositionMode, practicePositionBriefMode, indicesViewMode,
       savedAt: Date.now()
     }));
@@ -2953,6 +2993,7 @@ function restoreViewState() {
     hotStocksData = cached.hotStocksData || hotStocksData;
     moneyFlowData = cached.moneyFlowData || moneyFlowData;
     marketFlowData = cached.marketFlowData || marketFlowData;
+    usMarketSummaryData = cached.usMarketSummaryData || usMarketSummaryData;
     b1ScreenData = cached.b1ScreenData || b1ScreenData;
     niuniuPracticeData = cached.niuniuPracticeData || niuniuPracticeData;
     practiceBenchmarksData = cached.practiceBenchmarksData || practiceBenchmarksData;
@@ -3179,16 +3220,23 @@ function refreshVisibleUsQuotes() {
 }
 async function loadIndicesDataInBg() {
   try {
-    const [idx, sec, hot, mf, mkf] = await Promise.all([
+    const [idx, sec, hot, mf, mkf, usSummary] = await Promise.all([
       fetch('/api/indices').then(r => r.ok ? r.json() : Promise.resolve({})),
       Promise.resolve(sectorData),
       fetch('/api/hot_stocks').then(r => r.ok ? r.json() : Promise.resolve({})),
       fetch('/api/money_flow').then(r => r.ok ? r.json() : Promise.resolve({})),
-      fetch('/api/market_flow').then(r => r.ok ? r.json() : Promise.resolve({}))
+      fetch('/api/market_flow').then(r => r.ok ? r.json() : Promise.resolve({})),
+      fetch('/api/us_market_summary').then(r => r.ok ? r.json() : Promise.resolve({available:false, error:'load_failed'}))
     ]);
     indicesData = idx; sectorData = sec; hotStocksData = hot; moneyFlowData = mf; marketFlowData = mkf;
+    usMarketSummaryData = usSummary || {available:false};
     if (activeCategory === 'market_monitor') render();
-  } catch(e) {}
+    saveViewState();
+  } catch(e) {
+    usMarketSummaryData = {available:false, error:String(e), loading:false};
+    if (activeCategory === 'market_monitor') render();
+    saveViewState();
+  }
 }
 async function loadIndices() {
   try {
@@ -4858,6 +4906,49 @@ function renderMarketMonitorCard(r) {
     ${open ? `<div class="market-card-detail">${renderMarketDetail(r.content || '')}</div>` : ''}
   </article>`;
 }
+function usMarketToneClass(tone) {
+  return ['offensive', 'balanced', 'cautious', 'defensive'].includes(tone) ? tone : 'neutral';
+}
+function renderUsMarketSummaryCard() {
+  const d = usMarketSummaryData || {};
+  if (d.loading && !d.generated_at) {
+    return `<section class="us-market-summary-card neutral">
+      <div class="us-market-head">
+        <div><div class="us-market-title">隔夜美股盘面总结</div><div class="us-market-sub">正在加载昨晚美股盘面...</div></div>
+        <div class="us-market-tone">加载中</div>
+      </div>
+      <div class="us-market-brief">这条摘要会作为今日买卖选股的外盘背景，盘中仍以 A 股竞价、资金流和板块联动确认。</div>
+    </section>`;
+  }
+  const tone = usMarketToneClass(String(d.tone || 'neutral'));
+  const toneLabel = d.tone_label || '中性';
+  const target = d.target_us_date || '--';
+  const dateRule = d.date_rule || '周一显示上周五美股盘面；其他日期显示前一美股交易日。';
+  const summary = d.summary || (d.error ? '隔夜美股盘面暂不可用，今日先按 A 股自身信号执行。' : '等待隔夜美股盘面总结。');
+  const metrics = (d.metrics || []).slice(0, 8);
+  const metricHtml = metrics.length ? `<div class="us-market-metrics">${metrics.map(m => {
+    const pct = Number(m.change_pct);
+    const pctCls = Number.isFinite(pct) ? upCls(pct) : 'flat';
+    return `<div class="us-market-metric">
+      <div class="us-market-metric-label">${esc(m.label || '')}</div>
+      <div class="us-market-metric-value"><span>${esc(m.value || '--')}</span><span class="us-market-pct ${pctCls}">${esc(m.change_pct_text || '--')}</span></div>
+    </div>`;
+  }).join('')}</div>` : '';
+  const guidance = (d.guidance_lines || []).slice(0, 7);
+  const guidanceHtml = guidance.length ? `<div class="us-market-guidance">${guidance.map(line => `<div class="us-market-guidance-line"><span>${esc(line)}</span></div>`).join('')}</div>` : '';
+  return `<section class="us-market-summary-card ${tone}">
+    <div class="us-market-head">
+      <div>
+        <div class="us-market-title">隔夜美股盘面总结</div>
+        <div class="us-market-sub">目标美股交易日 ${esc(target)} · ${esc(dateRule)}</div>
+      </div>
+      <div class="us-market-tone">${esc(toneLabel)}</div>
+    </div>
+    <div class="us-market-brief">${esc(summary)}</div>
+    ${metricHtml}
+    ${guidanceHtml}
+  </section>`;
+}
 function marketDateKey(r) {
   const t = String(r.time || '').trim();
   if (/^\d{4}-\d{2}-\d{2}/.test(t)) return t.slice(0, 10);
@@ -4908,14 +4999,15 @@ function renderMarketDayPager(allRecords, days, day, dayRecords) {
   </div>`;
 }
 function renderMarketMonitor(records) {
-  if (!records.length) return '<div class="empty">暂无盘面监控消息</div>';
+  const usSummaryHtml = renderUsMarketSummaryCard();
+  if (!records.length) return `${usSummaryHtml}<div class="empty">暂无盘面监控消息</div>`;
   const groups = groupMarketRecordsByDay(records);
   const days = [...groups.keys()].sort().reverse();
-  if (!days.length) return '<div class="empty">暂无盘面监控消息</div>';
+  if (!days.length) return `${usSummaryHtml}<div class="empty">暂无盘面监控消息</div>`;
   if (marketDayIndex >= days.length) marketDayIndex = 0;
   const day = days[marketDayIndex] || days[0];
   const dayRecords = groups.get(day) || [];
-  return `<div class="market-monitor-grid">${dayRecords.map(r => renderMarketMonitorCard(r)).join('')}</div>${renderMarketDayPager(records, days, day, dayRecords)}`;
+  return `${usSummaryHtml}<div class="market-monitor-grid">${dayRecords.map(r => renderMarketMonitorCard(r)).join('')}</div>${renderMarketDayPager(records, days, day, dayRecords)}`;
 }
 function xRecordKey(r) {
   return 'x-' + shortHash(recordKey(r));
@@ -6044,6 +6136,9 @@ class Handler(BaseHTTPRequestHandler):
             symbols = sanitize_symbols(params.get("symbols", [""])[0])
             cache_key = "us_quotes:" + ",".join(symbols)
             self.send_json_cached(cache_key, API_TTLS["us_quotes"], lambda: fetch_us_quotes(symbols), edge_ttl=API_TTLS["us_quotes"], browser_ttl=10)
+            return
+        if parsed.path == "/api/us_market_summary":
+            self.send_json_cached("us_market_summary", API_TTLS["us_market_summary"], fetch_us_market_summary, edge_ttl=API_TTLS["us_market_summary"], browser_ttl=30)
             return
         if parsed.path == "/api/money_flow":
             self.send_json_cached("money_flow", API_TTLS["money_flow"], lambda: run_dashboard_helper("money_flow_dashboard_api.py", {"inflow": [], "outflow": []}, timeout=120), edge_ttl=API_TTLS["money_flow"], browser_ttl=15)
