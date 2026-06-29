@@ -227,6 +227,12 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_MARKET_AUCTION_CRON", "label": "盘前竞价监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "25 9 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_MIDDAY_CRON", "label": "午盘监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "40 11 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_CLOSE_CRON", "label": "盘后监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "10 15 * * 1-5", "effect": "next_run"},
+    {"name": "A_SHARE_MODEL_SUMMARY_ENABLED", "label": "A股盘面模型总结", "group": "盘面监控生产时间点", "kind": "bool", "default": "1", "effect": "next_run", "bool_no_default": "1"},
+    {"name": "A_SHARE_MODEL_SUMMARY_MODEL", "label": "A股盘面总结模型", "group": "盘面监控生产时间点", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "A_SHARE_MODEL_SUMMARY_BASE_URL", "label": "A股盘面总结 API地址", "group": "盘面监控生产时间点", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "A_SHARE_MODEL_SUMMARY_API_KEY", "label": "A股盘面总结 API密钥", "group": "盘面监控生产时间点", "kind": "secret", "default": "", "effect": "next_run"},
+    {"name": "A_SHARE_MODEL_SUMMARY_DEADLINE_SECONDS", "label": "A股模型总结总超时秒数", "group": "盘面监控生产时间点", "kind": "int", "default": "60", "effect": "next_run"},
+    {"name": "A_SHARE_MODEL_SUMMARY_REQUEST_TIMEOUT_SECONDS", "label": "A股模型总结单次超时秒数", "group": "盘面监控生产时间点", "kind": "int", "default": "45", "effect": "next_run"},
     {"name": "X_WATCHLIST_ACCOUNTS", "label": "推文监控作者", "group": "牛牛美股", "kind": "handle_list", "default": "", "effect": "next_run"},
     {"name": "X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "label": "推文监控间隔", "group": "牛牛美股", "kind": "int", "default": "1200", "effect": "next_run"},
     {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "牛牛美股", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
@@ -279,6 +285,12 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
     "DASHBOARD_MARKET_CLOSE_CRON",
+    "A_SHARE_MODEL_SUMMARY_ENABLED",
+    "A_SHARE_MODEL_SUMMARY_MODEL",
+    "A_SHARE_MODEL_SUMMARY_BASE_URL",
+    "A_SHARE_MODEL_SUMMARY_API_KEY",
+    "A_SHARE_MODEL_SUMMARY_DEADLINE_SECONDS",
+    "A_SHARE_MODEL_SUMMARY_REQUEST_TIMEOUT_SECONDS",
     "DASHBOARD_CRON_MAX_ATTEMPTS",
     "DASHBOARD_CRON_RETRY_DELAY_SECONDS",
     "DASHBOARD_INDICES_TTL_SECONDS",
@@ -5876,8 +5888,10 @@ def render_env_input(item: dict[str, Any]) -> str:
         current = normalize_env_update(name, value, "bool") if value != "" else ""
         toggle_attr = ""
         default_option = f"<option value='' {'selected' if current == '' else ''}>默认</option>"
-        if name == "DASHBOARD_US_FEATURES_ENABLED":
+        if name == "DASHBOARD_US_FEATURES_ENABLED" or item.get("bool_no_default"):
             toggle_attr = " data-feature-toggle='us'"
+            if name != "DASHBOARD_US_FEATURES_ENABLED":
+                toggle_attr = ""
             default_option = ""
         return (
             f"<select name='env__{escaped_name}'{toggle_attr}>"

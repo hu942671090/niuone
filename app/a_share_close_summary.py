@@ -537,7 +537,9 @@ def main():
     try:
         text = build_report()
         if text:
+            from a_share_grok_summary import apply_grok_to_a_share_report
             from niuone_dashboard_archive import archive_market_report
+            text = apply_grok_to_a_share_report(text, title=f"A股{TITLE}")
             archive_market_report(text, job_id="67ac98149ead", title=f"A股{TITLE}", run_dt=NOW)
             print(text)
         else:

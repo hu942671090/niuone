@@ -670,7 +670,9 @@ def main():
     try:
         text = build_report()
         if text:
+            from a_share_grok_summary import apply_grok_to_a_share_report
             from niuone_dashboard_archive import archive_market_report
+            text = apply_grok_to_a_share_report(text, title="A股竞价盘前总结")
             archive_market_report(text, job_id="8453b3f28cd3", title="A股竞价盘前总结", run_dt=NOW)
             print(text)
         else:
