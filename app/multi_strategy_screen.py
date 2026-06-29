@@ -35,6 +35,7 @@
 """
 import json
 import os
+import re
 import shlex
 import statistics
 import sys
@@ -65,6 +66,7 @@ DASHBOARD_ENV_FILE = get_dashboard_env_file(Path(__file__).resolve().parents[1])
 B1_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 B1_CACHE_FILE = B1_OUTPUT_DIR / "b1_screen_latest.json"
 MULTI_STRATEGY_CACHE = B1_OUTPUT_DIR / "multi_strategy_latest.json"
+STOCK_INDUSTRY_CACHE = B1_OUTPUT_DIR / "stock_industry_cache.json"
 B1_HISTORY_DIR = B1_OUTPUT_DIR / "b1_history"
 MULTI_STRATEGY_HISTORY = B1_OUTPUT_DIR / "multi_strategy_history"
 DISPLAY_CANDIDATE_LIMIT = 16
@@ -73,6 +75,8 @@ TRADE_CANDIDATE_LIMIT = 8
 COMMON_MAX_BBI_DISTANCE_PCT = 6.5
 B1_CORE_J_CEILING = -10.0
 B1_WATCH_J_CEILING = 12.0
+_LOCAL_SITE_PACKAGES_READY = False
+_STOCK_INDUSTRY_MEMORY_CACHE: dict[str, str] | None = None
 
 
 # ========== helpers ==========
@@ -1398,6 +1402,264 @@ def select_display_candidates(results: list[dict[str, Any]], limit: int = DISPLA
     return selected
 
 
+def normalize_industry_name(name: Any) -> str:
+    text = str(name or "").strip()
+    if not text or text.lower() in {"nan", "none", "null"} or text in {"-", "--"}:
+        return ""
+    text = re.sub(r"[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+$", "", text).strip()
+    for suffix in ("行业", "板块", "概念"):
+        if text.endswith(suffix) and len(text) > len(suffix) + 1:
+            text = text[: -len(suffix)].strip()
+    return text
+
+
+def normalize_stock_code(code: Any) -> str:
+    raw = str(code or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(\d{6})", raw)
+    if match:
+        return match.group(1)
+    digits = re.sub(r"\D", "", raw)
+    return digits.zfill(6) if digits else ""
+
+
+def _record_value(row: Any, key: str) -> Any:
+    if hasattr(row, "get"):
+        return row.get(key)
+    try:
+        return row[key]
+    except Exception:
+        return None
+
+
+def _iter_record_rows(data: Any):
+    if data is None:
+        return
+    iterrows = getattr(data, "iterrows", None)
+    if callable(iterrows):
+        for _, row in iterrows():
+            yield row
+        return
+    if isinstance(data, dict):
+        yield data
+        return
+    try:
+        for row in data:
+            yield row
+    except TypeError:
+        return
+
+
+def extract_industry_from_individual_info(info: Any) -> str:
+    """Read the industry/sector name from akshare.stock_individual_info_em output."""
+    direct_keys = ("行业", "所属行业", "板块", "所属板块")
+    item_keys = ("item", "项目", "指标")
+    value_keys = ("value", "值", "内容")
+
+    for row in _iter_record_rows(info):
+        for key in direct_keys:
+            industry = normalize_industry_name(_record_value(row, key))
+            if industry:
+                return industry
+
+        item_name = ""
+        for key in item_keys:
+            item_name = str(_record_value(row, key) or "").strip()
+            if item_name:
+                break
+        if item_name not in direct_keys:
+            continue
+
+        for key in value_keys:
+            industry = normalize_industry_name(_record_value(row, key))
+            if industry:
+                return industry
+    return ""
+
+
+def extract_industry_from_cninfo_change(info: Any) -> str:
+    rows = list(_iter_record_rows(info) or [])
+    standard_priority = (
+        "申银万国行业分类标准",
+        "中证行业分类标准",
+        "巨潮行业分类标准",
+        "中国上市公司协会上市公司行业分类标准",
+    )
+    value_keys = ("行业中类", "行业大类", "行业次类", "行业门类")
+
+    def row_date(row: Any) -> str:
+        return str(_record_value(row, "变更日期") or "")
+
+    def row_industry(row: Any) -> str:
+        for key in value_keys:
+            industry = normalize_industry_name(_record_value(row, key))
+            if industry:
+                return industry
+        return ""
+
+    for standard in standard_priority:
+        selected = [
+            row for row in rows
+            if standard in str(_record_value(row, "分类标准") or "")
+        ]
+        for row in sorted(selected, key=row_date, reverse=True):
+            industry = row_industry(row)
+            if industry:
+                return industry
+
+    for row in sorted(rows, key=row_date, reverse=True):
+        industry = row_industry(row)
+        if industry:
+            return industry
+    return ""
+
+
+def _add_local_runtime_site_packages() -> None:
+    global _LOCAL_SITE_PACKAGES_READY
+    if _LOCAL_SITE_PACKAGES_READY:
+        return
+    _LOCAL_SITE_PACKAGES_READY = True
+    version_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site_packages = DASHBOARD_HOME.parent / ".venv" / "lib" / version_dir / "site-packages"
+    if site_packages.exists() and str(site_packages) not in sys.path:
+        sys.path.insert(0, str(site_packages))
+
+
+def load_stock_industry_cache() -> dict[str, str]:
+    global _STOCK_INDUSTRY_MEMORY_CACHE
+    if _STOCK_INDUSTRY_MEMORY_CACHE is not None:
+        return dict(_STOCK_INDUSTRY_MEMORY_CACHE)
+    try:
+        raw = json.loads(STOCK_INDUSTRY_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    cache = {
+        normalize_stock_code(code): normalize_industry_name(industry)
+        for code, industry in (raw or {}).items()
+        if normalize_stock_code(code) and normalize_industry_name(industry)
+    }
+    _STOCK_INDUSTRY_MEMORY_CACHE = cache
+    return dict(cache)
+
+
+def save_stock_industry_cache(cache: dict[str, str]) -> None:
+    global _STOCK_INDUSTRY_MEMORY_CACHE
+    clean = {
+        normalize_stock_code(code): normalize_industry_name(industry)
+        for code, industry in (cache or {}).items()
+        if normalize_stock_code(code) and normalize_industry_name(industry)
+    }
+    _STOCK_INDUSTRY_MEMORY_CACHE = clean
+    try:
+        STOCK_INDUSTRY_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STOCK_INDUSTRY_CACHE.with_suffix(STOCK_INDUSTRY_CACHE.suffix + ".new")
+        tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(STOCK_INDUSTRY_CACHE)
+    except Exception as exc:
+        print(f"[WARN] stock industry cache save failed: {type(exc).__name__}", file=sys.stderr)
+
+
+def lookup_stock_industry(code: str, ak_module: Any | None = None) -> str:
+    code = normalize_stock_code(code)
+    if not code:
+        return ""
+    if ak_module is None:
+        _add_local_runtime_site_packages()
+        import akshare as ak_module
+
+    for attempt in range(2):
+        try:
+            info = ak_module.stock_industry_change_cninfo(
+                symbol=code,
+                start_date="19900101",
+                end_date=time.strftime("%Y%m%d"),
+            )
+            industry = extract_industry_from_cninfo_change(info)
+            if industry:
+                return industry
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.4)
+                continue
+            break
+
+    info = ak_module.stock_individual_info_em(symbol=code)
+    return extract_industry_from_individual_info(info)
+
+
+def annotate_candidate_industries(
+    *groups: list[dict[str, Any]],
+    lookup: Callable[[str], str | None] | None = None,
+) -> None:
+    """Attach industry/sector labels to candidate rows without making them required."""
+    missing_by_code: dict[str, list[dict[str, Any]]] = {}
+
+    for group in groups:
+        for item in group or []:
+            if not isinstance(item, dict):
+                continue
+            industry = normalize_industry_name(
+                item.get("industry") or item.get("sector") or item.get("board")
+            )
+            if industry:
+                item["industry"] = industry
+                item["sector"] = industry
+                continue
+            code = normalize_stock_code(item.get("code"))
+            if not code:
+                continue
+            missing_by_code.setdefault(code, []).append(item)
+
+    def fill_code(code: str, industry: str) -> None:
+        industry = normalize_industry_name(industry)
+        if not industry:
+            return
+        for item in missing_by_code.get(code, []):
+            item["industry"] = industry
+            item["sector"] = industry
+        missing_by_code.pop(code, None)
+
+    if lookup is None and missing_by_code:
+        cache = load_stock_industry_cache()
+        for code in list(missing_by_code):
+            fill_code(code, cache.get(code, ""))
+
+        if missing_by_code:
+            cache_changed = False
+            for code in list(missing_by_code):
+                try:
+                    industry = normalize_industry_name(lookup_stock_industry(code))
+                except Exception:
+                    industry = ""
+                if industry:
+                    cache[code] = industry
+                    cache_changed = True
+                    fill_code(code, industry)
+                time.sleep(0.08)
+            if cache_changed:
+                save_stock_industry_cache(cache)
+        return
+
+    failures: list[str] = []
+    for code, items in missing_by_code.items():
+        try:
+            industry = normalize_industry_name((lookup or lookup_stock_industry)(code))
+        except Exception as exc:
+            failures.append(f"{code}:{type(exc).__name__}")
+            continue
+        if not industry:
+            continue
+        for item in items:
+            item["industry"] = industry
+            item["sector"] = industry
+
+    if failures:
+        sample = ", ".join(failures[:5])
+        more = f" (+{len(failures) - 5})" if len(failures) > 5 else ""
+        print(f"[WARN] candidate industry lookup failed: {sample}{more}", file=sys.stderr)
+
+
 # ========== Main ==========
 
 def grok_industry_classify(candidates: list[dict]) -> None:
@@ -1558,6 +1820,7 @@ def main():
     results.sort(key=sort_key, reverse=True)
     display_candidates = select_display_candidates(results)
     trade_candidates = select_trade_candidates(results)
+    annotate_candidate_industries(display_candidates, trade_candidates)
 
     print(f"  Analyzed: {len(results)} stocks", file=sys.stderr)
     print(f"  Strategy distribution:", file=sys.stderr)

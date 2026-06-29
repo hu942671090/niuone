@@ -58,6 +58,27 @@ def archive_market_report(
     return path
 
 
+def extract_decision_guidance(content: str) -> list[str]:
+    """Extract the compact buy/sell guidance block from a market report."""
+    lines = [line.strip() for line in str(content or "").splitlines()]
+    guidance: list[str] = []
+    in_section = False
+    for line in lines:
+        clean = line.strip()
+        if not clean:
+            if in_section and guidance:
+                break
+            continue
+        if "买卖指引" in clean:
+            in_section = True
+            continue
+        if in_section and clean.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "⚠️", "🌡️")) and "**" in clean:
+            break
+        if in_section:
+            guidance.append(clean.lstrip("·- ").strip())
+    return guidance[:8]
+
+
 def write_market_report_to_db(
     content: str,
     archive_path: Path | None,
@@ -72,6 +93,7 @@ def write_market_report_to_db(
     local_dt = _to_cn_datetime(run_dt)
     archive_stem = archive_path.stem if archive_path else local_dt.strftime("%Y-%m-%d_%H-%M-%S")
     source_id = f"cron_output_{job_id}_{archive_stem}"
+    guidance = extract_decision_guidance(content)
     message = {
         "timestamp": local_dt.timestamp(),
         "time_text": local_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -90,7 +112,7 @@ def write_market_report_to_db(
         "matched": True,
         "kind": "cron_output",
         "delivery": {"mode": "dashboard_archive_only", "job_id": job_id},
-        "metadata": {"job_name": title},
+        "metadata": {"job_name": title, "decision_guidance": guidance},
         "raw_path": str(archive_path or ""),
     }
     return push_history.upsert_many([message])

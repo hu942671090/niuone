@@ -27,6 +27,7 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Any
 
+from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
 from niuone_paths import get_dashboard_home
 from strategy_registry import (
     PERSONA_STRATEGY_ENV,
@@ -58,6 +59,13 @@ def env_float(name: str, default: float) -> float:
         return float(value) if value else default
     except (TypeError, ValueError):
         return default
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def env_hhmm(name: str, default: str) -> dtime:
@@ -92,6 +100,13 @@ def load_dashboard_env() -> None:
         "DASHBOARD_B3_EXIT_TIME",
         "DASHBOARD_TIME_EXIT_TIME",
         "DASHBOARD_TIME_STOP_EXIT_TIME",
+        "DASHBOARD_MAX_OPEN_POSITIONS",
+        "DASHBOARD_MAX_NEW_BUYS_PER_DECISION",
+        "DASHBOARD_MAX_SINGLE_POSITION_PCT",
+        "DASHBOARD_MAX_TOTAL_POSITION_PCT",
+        "DASHBOARD_MIN_CASH_RESERVE_PCT",
+        "DASHBOARD_MARKET_GUIDANCE_ENABLED",
+        "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
         PERSONA_STRATEGY_ENV,
         "CROSSDESK_BASE_URL",
         "CROSSDESK_API_KEY",
@@ -254,11 +269,15 @@ def today_key() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def is_a_share_trading_day(dt: datetime | None = None) -> bool:
+    return calendar_is_a_share_trading_day(dt or datetime.now())
+
+
 def is_a_share_trading_time(dt: datetime | None = None) -> tuple[bool, str]:
     """A-share market trading/auction clock, including the opening auction."""
     dt = dt or datetime.now()
-    if dt.weekday() >= 5:
-        return False, "非交易日（周末）"
+    if not is_a_share_trading_day(dt):
+        return False, "非A股交易日"
     t = dt.time()
     if dtime(9, 15) <= t < dtime(9, 25):
         return True, "早盘集合竞价申报时段"
@@ -279,8 +298,8 @@ def is_a_share_execution_time(dt: datetime | None = None) -> tuple[bool, str]:
     continuous auction starts.
     """
     dt = dt or datetime.now()
-    if dt.weekday() >= 5:
-        return False, "非交易日（周末）"
+    if not is_a_share_trading_day(dt):
+        return False, "非A股交易日"
     t = dt.time()
     if dtime(9, 15) <= t < dtime(9, 25):
         return False, "早盘集合竞价申报时段，仅记录观察/委托参考，不模拟即时成交"
@@ -297,7 +316,7 @@ def is_a_share_execution_time(dt: datetime | None = None) -> tuple[bool, str]:
 
 def is_a_share_auction_time(dt: datetime | None = None) -> bool:
     dt = dt or datetime.now()
-    if dt.weekday() >= 5:
+    if not is_a_share_trading_day(dt):
         return False
     t = dt.time()
     return dtime(9, 15) <= t < dtime(9, 30) or dtime(14, 57) <= t <= dtime(15, 0)
@@ -305,14 +324,14 @@ def is_a_share_auction_time(dt: datetime | None = None) -> bool:
 
 def is_time_exit_check_time(dt: datetime | None = None) -> bool:
     dt = dt or datetime.now()
-    if dt.weekday() >= 5:
+    if not is_a_share_trading_day(dt):
         return False
     return TIME_EXIT_TIME <= dt.time() <= dtime(15, 0)
 
 
 def is_b3_exit_check_time(dt: datetime | None = None) -> bool:
     dt = dt or datetime.now()
-    if dt.weekday() >= 5:
+    if not is_a_share_trading_day(dt):
         return False
     return dt.strftime("%H:%M") == B3_EXIT_HHMM
 
@@ -324,7 +343,7 @@ def is_time_stop_exit_check_time(dt: datetime | None = None) -> bool:
 def is_a_share_session_clock(dt: datetime | None = None) -> bool:
     """Full A-share dashboard session clock: 09:15-15:00, including auction and lunch break."""
     dt = dt or datetime.now()
-    if dt.weekday() >= 5:
+    if not is_a_share_trading_day(dt):
         return False
     return dtime(9, 15) <= dt.time() <= dtime(15, 0)
 
@@ -388,6 +407,27 @@ def prune_future_intraday_equity_points(
     return changed
 
 
+def prune_non_trading_day_equity_points(state: dict[str, Any]) -> bool:
+    changed = False
+    for key in ("equity_history", "daily_equity_history"):
+        history = state.get(key)
+        if not isinstance(history, list):
+            continue
+        kept: list[Any] = []
+        for point in history:
+            if not isinstance(point, dict):
+                kept.append(point)
+                continue
+            dt = parse_ts(str(point.get("time") or ""))
+            if dt is not None and not is_a_share_trading_day(dt):
+                changed = True
+                continue
+            kept.append(point)
+        if len(kept) != len(history):
+            state[key] = kept[-(2000 if key == "equity_history" else EQUITY_HISTORY_LIMIT):]
+    return changed
+
+
 def normalize_daily_equity_history(state: dict[str, Any]) -> bool:
     history = state.get("daily_equity_history")
     if not isinstance(history, list):
@@ -407,6 +447,22 @@ def normalize_daily_equity_history(state: dict[str, Any]) -> bool:
         return False
     state["daily_equity_history"] = normalized
     return True
+
+
+def sort_equity_history(state: dict[str, Any]) -> bool:
+    changed = False
+    for key in ("equity_history", "daily_equity_history"):
+        history = state.get(key)
+        if not isinstance(history, list):
+            continue
+        sorted_history = sorted(
+            history,
+            key=lambda point: str(point.get("time") or "") if isinstance(point, dict) else "",
+        )
+        if sorted_history != history:
+            state[key] = sorted_history[-(2000 if key == "equity_history" else EQUITY_HISTORY_LIMIT):]
+            changed = True
+    return changed
 
 
 def default_state() -> dict[str, Any]:
@@ -504,8 +560,10 @@ def save_state(state: dict[str, Any]) -> None:
     except Exception:
         pass
 
+    prune_non_trading_day_equity_points(state)
     prune_future_intraday_equity_points(state)
     normalize_daily_equity_history(state)
+    sort_equity_history(state)
 
     tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
@@ -1216,8 +1274,13 @@ def add_execution_block(decision: dict[str, Any], code: str, reason: str) -> Non
 
 
 def record_equity(state: dict[str, Any]) -> None:
+    if not is_a_share_trading_day():
+        prune_non_trading_day_equity_points(state)
+        return
+    prune_non_trading_day_equity_points(state)
     prune_future_intraday_equity_points(state)
     normalize_daily_equity_history(state)
+    sort_equity_history(state)
     snap = enrich_portfolio(state)
     history = state.setdefault("equity_history", [])
     now = now_ts()
@@ -1293,6 +1356,9 @@ def rebuild_intraday_equity_curve(
     """
     now = now or datetime.now()
     today = today or now.strftime("%Y-%m-%d")
+    if not is_a_share_trading_day(now):
+        prune_non_trading_day_equity_points(state)
+        return False
     if any(str(t.get("time", "")).startswith(today) for t in state.get("trade_log", []) if isinstance(t, dict)):
         return False
     session_cutoff = current_session_minute(now) if today == now.strftime("%Y-%m-%d") else 240
@@ -1512,12 +1578,270 @@ CONSENSUS_POSITION_BOOST = 1.5  # 策略共识≥3时仓位放大系数
 SELF_OPTIMIZATION_COOLDOWN = 3600  # 自优化最小间隔（秒）
 HIGH_VOL_REDUCTION = 0.7  # 高波动率仓位缩小系数
 LOW_VOL_BOOST = 1.3       # 低波动率仓位放大系数
-MAX_OPEN_POSITIONS = env_int("DASHBOARD_MAX_OPEN_POSITIONS", 5)
+MAX_OPEN_POSITIONS = env_int("DASHBOARD_MAX_OPEN_POSITIONS", 6)
 MAX_NEW_BUYS_PER_DECISION = env_int("DASHBOARD_MAX_NEW_BUYS_PER_DECISION", 2)
 MAX_SINGLE_POSITION_PCT = env_float("DASHBOARD_MAX_SINGLE_POSITION_PCT", 10.0)
 MAX_TOTAL_POSITION_PCT = env_float("DASHBOARD_MAX_TOTAL_POSITION_PCT", 80.0)
 MIN_CASH_RESERVE_PCT = env_float("DASHBOARD_MIN_CASH_RESERVE_PCT", 20.0)
 COMMON_MAX_BBI_DISTANCE_PCT = 6.5
+MARKET_GUIDANCE_ENABLED = env_bool("DASHBOARD_MARKET_GUIDANCE_ENABLED", True)
+MORNING_MAX_OPEN_POSITIONS = env_int("DASHBOARD_MORNING_MAX_OPEN_POSITIONS", min(3, MAX_OPEN_POSITIONS))
+MORNING_MAX_OPEN_POSITIONS = max(1, min(MAX_OPEN_POSITIONS, MORNING_MAX_OPEN_POSITIONS))
+MARKET_REPORT_LOOKBACK = 12
+
+
+def market_session_phase(now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    t = now.time()
+    if t < dtime(11, 30):
+        return "morning"
+    if t < dtime(13, 0):
+        return "lunch"
+    if t < dtime(14, 30):
+        return "afternoon"
+    if t <= dtime(15, 0):
+        return "late"
+    return "after_close"
+
+
+def load_today_market_monitor_reports(now: datetime | None = None, limit: int = 3) -> list[dict[str, Any]]:
+    """Load today's latest archived market-monitor reports for trading context."""
+    if not MARKET_GUIDANCE_ENABLED:
+        return []
+    now = now or datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    try:
+        import push_history as _push_history
+        data = _push_history.query_messages(category="market_monitor", limit=MARKET_REPORT_LOOKBACK)
+    except Exception:
+        return []
+    reports: list[dict[str, Any]] = []
+    for record in data.get("records") or []:
+        if not isinstance(record, dict):
+            continue
+        time_text = str(record.get("time_text") or record.get("time") or "")
+        if not time_text.startswith(today):
+            continue
+        content = str(record.get("content") or "")
+        if not content.strip():
+            continue
+        reports.append({
+            "title": record.get("title") or record.get("chat_label") or "盘面监控",
+            "time": time_text,
+            "content": content,
+            "metadata": record.get("metadata") or {},
+        })
+        if len(reports) >= limit:
+            break
+    return reports
+
+
+def extract_market_guidance_lines(content: str, metadata: dict[str, Any] | None = None, max_lines: int = 8) -> list[str]:
+    guidance = (metadata or {}).get("decision_guidance")
+    if isinstance(guidance, list):
+        cleaned = [str(line).strip() for line in guidance if str(line).strip()]
+        if cleaned:
+            return cleaned[:max_lines]
+
+    lines = [line.strip() for line in str(content or "").splitlines()]
+    out: list[str] = []
+    in_section = False
+    for line in lines:
+        if not line:
+            if in_section and out:
+                break
+            continue
+        if "买卖指引" in line:
+            in_section = True
+            continue
+        if in_section and line.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "⚠️", "🌡️")) and "**" in line:
+            break
+        if in_section:
+            out.append(line.lstrip("·- ").strip())
+    if out:
+        return out[:max_lines]
+
+    keywords = ("风险级别", "开仓", "买入", "卖出", "控仓", "仓位", "追高", "只卖")
+    fallback = [
+        line.lstrip("·- ").strip()
+        for line in lines
+        if any(keyword in line for keyword in keywords)
+    ]
+    return fallback[:max_lines]
+
+
+def classify_market_guidance_tone(text: str) -> str:
+    raw = str(text or "")
+    compact = re.sub(r"\s+", "", raw)
+    m = re.search(r"风险级别[：:]\s*([^\n。；;，,]+)", raw)
+    level = (m.group(1) if m else "").strip()
+    if any(word in level for word in ("防守", "极弱", "只卖", "暂停")):
+        return "defensive"
+    if any(word in level for word in ("谨慎", "偏弱", "控仓")):
+        return "cautious"
+    if any(word in level for word in ("进攻", "积极", "强")):
+        return "offensive"
+    if any(word in level for word in ("平衡", "中性")):
+        return "balanced"
+
+    defensive_hits = ("只卖不买", "暂停新开仓", "空头占优", "风险端更强", "竞价偏弱", "跌停风险不弱")
+    cautious_hits = ("结构性偏弱", "中性偏谨慎", "谨慎追高", "控仓", "仓位和追高保守", "独苗")
+    offensive_hits = ("多头占优", "进攻较强", "赚钱效应较活跃", "竞价进攻较强")
+    balanced_hits = ("结构性偏强", "有一定进攻", "正常建仓")
+    if any(hit in compact for hit in defensive_hits):
+        return "defensive"
+    if any(hit in compact for hit in cautious_hits):
+        return "cautious"
+    if any(hit in compact for hit in offensive_hits):
+        return "offensive"
+    if any(hit in compact for hit in balanced_hits):
+        return "balanced"
+    return "neutral"
+
+
+def _market_context_base(now: datetime | None = None) -> dict[str, Any]:
+    phase = market_session_phase(now)
+    return {
+        "enabled": MARKET_GUIDANCE_ENABLED,
+        "available": False,
+        "tone": "neutral",
+        "tone_label": "中性",
+        "phase": phase,
+        "max_open_positions": MAX_OPEN_POSITIONS,
+        "max_new_buys_per_decision": MAX_NEW_BUYS_PER_DECISION,
+        "max_total_position_pct": MAX_TOTAL_POSITION_PCT,
+        "min_cash_reserve_pct": MIN_CASH_RESERVE_PCT,
+        "buy_budget_multiplier": 1.0,
+        "allow_new_buys": True,
+        "guidance_lines": [],
+        "reports": [],
+        "source_title": "",
+        "source_time": "",
+        "session_note": "",
+    }
+
+
+def derive_market_strategy_context(reports: list[dict[str, Any]] | None, now: datetime | None = None) -> dict[str, Any]:
+    """Turn the latest market-monitor summaries into enforceable trading limits."""
+    ctx = _market_context_base(now)
+    reports = [r for r in (reports or []) if isinstance(r, dict)]
+    latest = reports[0] if reports else {}
+    guidance_lines = extract_market_guidance_lines(
+        str(latest.get("content") or ""),
+        latest.get("metadata") if isinstance(latest.get("metadata"), dict) else None,
+    ) if latest else []
+    tone_text = "\n".join(guidance_lines) or str(latest.get("content") or "")
+    tone = classify_market_guidance_tone(tone_text)
+    tone_labels = {
+        "offensive": "进攻",
+        "balanced": "平衡",
+        "neutral": "中性",
+        "cautious": "谨慎",
+        "defensive": "防守",
+    }
+    ctx.update({
+        "available": bool(reports),
+        "tone": tone,
+        "tone_label": tone_labels.get(tone, "中性"),
+        "guidance_lines": guidance_lines,
+        "source_title": latest.get("title") or "",
+        "source_time": latest.get("time") or "",
+        "reports": [
+            {
+                "title": r.get("title") or "盘面监控",
+                "time": r.get("time") or "",
+                "guidance": extract_market_guidance_lines(
+                    str(r.get("content") or ""),
+                    r.get("metadata") if isinstance(r.get("metadata"), dict) else None,
+                    max_lines=5,
+                ),
+            }
+            for r in reports[:3]
+        ],
+    })
+
+    if tone == "offensive":
+        ctx["max_new_buys_per_decision"] = min(MAX_NEW_BUYS_PER_DECISION, 2)
+    elif tone == "balanced":
+        ctx["max_open_positions"] = min(MAX_OPEN_POSITIONS, 4)
+        ctx["max_new_buys_per_decision"] = min(MAX_NEW_BUYS_PER_DECISION, 1)
+        ctx["max_total_position_pct"] = min(MAX_TOTAL_POSITION_PCT, 65.0)
+        ctx["min_cash_reserve_pct"] = max(MIN_CASH_RESERVE_PCT, 30.0)
+    elif tone == "cautious":
+        ctx["max_open_positions"] = min(MAX_OPEN_POSITIONS, 3)
+        ctx["max_new_buys_per_decision"] = min(MAX_NEW_BUYS_PER_DECISION, 1)
+        ctx["max_total_position_pct"] = min(MAX_TOTAL_POSITION_PCT, 50.0)
+        ctx["min_cash_reserve_pct"] = max(MIN_CASH_RESERVE_PCT, 40.0)
+        ctx["buy_budget_multiplier"] = 0.6
+    elif tone == "defensive":
+        ctx["allow_new_buys"] = False
+        ctx["max_open_positions"] = min(MAX_OPEN_POSITIONS, 2)
+        ctx["max_new_buys_per_decision"] = 0
+        ctx["max_total_position_pct"] = min(MAX_TOTAL_POSITION_PCT, 35.0)
+        ctx["min_cash_reserve_pct"] = max(MIN_CASH_RESERVE_PCT, 60.0)
+        ctx["buy_budget_multiplier"] = 0.0
+
+    if ctx["phase"] in {"morning", "lunch"}:
+        before = int(ctx["max_open_positions"])
+        ctx["max_open_positions"] = min(before, MORNING_MAX_OPEN_POSITIONS)
+        if int(ctx["max_open_positions"]) < MAX_OPEN_POSITIONS:
+            reserve_slots = MAX_OPEN_POSITIONS - int(ctx["max_open_positions"])
+            ctx["session_note"] = f"午盘前最多持有{ctx['max_open_positions']}只，保留{reserve_slots}个仓位给午后确认"
+        if tone in {"neutral", "balanced"}:
+            ctx["max_new_buys_per_decision"] = min(int(ctx["max_new_buys_per_decision"]), 1)
+
+    ctx["max_open_positions"] = max(0, int(ctx["max_open_positions"]))
+    ctx["max_new_buys_per_decision"] = max(0, int(ctx["max_new_buys_per_decision"]))
+    ctx["max_total_position_pct"] = round(float(ctx["max_total_position_pct"]), 2)
+    ctx["min_cash_reserve_pct"] = round(float(ctx["min_cash_reserve_pct"]), 2)
+    ctx["buy_budget_multiplier"] = round(float(ctx["buy_budget_multiplier"]), 3)
+    return ctx
+
+
+def current_market_strategy_context(now: datetime | None = None) -> dict[str, Any]:
+    return derive_market_strategy_context(load_today_market_monitor_reports(now), now)
+
+
+def compact_market_strategy_context(ctx: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: ctx.get(key)
+        for key in (
+            "enabled", "available", "tone", "tone_label", "phase", "max_open_positions",
+            "max_new_buys_per_decision", "max_total_position_pct", "min_cash_reserve_pct",
+            "buy_budget_multiplier", "allow_new_buys", "source_title", "source_time",
+            "session_note", "guidance_lines",
+        )
+        if ctx.get(key) not in (None, "", [])
+    }
+
+
+def format_market_strategy_context_for_prompt(ctx: dict[str, Any]) -> str:
+    if not ctx.get("enabled"):
+        return "【今日盘面监控指引】已关闭。"
+    lines = [
+        "【今日盘面监控指引】",
+        (
+            f"风险级别：{ctx.get('tone_label', '中性')}；阶段：{ctx.get('phase', '-')}; "
+            f"动态上限：最多{ctx.get('max_open_positions')}只、单轮新仓≤{ctx.get('max_new_buys_per_decision')}笔、"
+            f"总仓≤{ctx.get('max_total_position_pct')}%、现金≥{ctx.get('min_cash_reserve_pct')}%、"
+            f"买入预算×{ctx.get('buy_budget_multiplier')}。"
+        ),
+    ]
+    if not ctx.get("allow_new_buys", True):
+        lines.append("执行层当前按盘面指引暂停买入，只允许卖出/持有。")
+    if ctx.get("session_note"):
+        lines.append(str(ctx.get("session_note")))
+    if ctx.get("source_title") or ctx.get("source_time"):
+        lines.append(f"最新来源：{ctx.get('source_title') or '盘面监控'} {ctx.get('source_time') or ''}".strip())
+    guidance = ctx.get("guidance_lines") or []
+    if guidance:
+        lines.extend(f"- {line}" for line in guidance[:8])
+    else:
+        if ctx.get("phase") in {"morning", "lunch"}:
+            lines.append("- 暂无今日盘面总结，按午盘前保留仓位和静态风控执行。")
+        else:
+            lines.append("- 暂无今日盘面总结，按静态风控执行。")
+    return "\n".join(lines)
 
 
 def get_volatility_adjustment(code: str) -> float:
@@ -2934,6 +3258,8 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
         base_url, api_key = load_crossdesk_config("DASHBOARD_DECISION_BASE_URL", "DASHBOARD_DECISION_API_KEY")
     market_env = check_market_environment()
     market_sent = check_market_sentiment()
+    market_strategy_ctx = current_market_strategy_context()
+    market_strategy_prompt = format_market_strategy_context_for_prompt(market_strategy_ctx)
     sentiment_note = ""
     if market_sent.get("sentiment") == "cold":
         sentiment_note = f"⚠️市场情绪偏冷({market_sent.get('detail','')})，建议仓位减半"
@@ -3011,6 +3337,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 - 买入必须100股整数倍；不能融资、不能做空、现金不能为负。
 - 单次决策最多给2条新买入；当前持仓达到{MAX_OPEN_POSITIONS}只时只允许卖出/持有，不能继续开新仓，避免“开超市”。
 - 单票目标仓位不超过总资产{MAX_SINGLE_POSITION_PCT:g}%；总持仓不超过{MAX_TOTAL_POSITION_PCT:g}%；至少保留{MIN_CASH_RESERVE_PCT:g}%现金。
+- 今日盘面监控指引优先收紧买入节奏；若动态上限低于静态上限，必须按动态上限决策，不能上午把{MAX_OPEN_POSITIONS}只买满。
 - 首次建仓必须小仓试错；按注册策略仓位上限执行：{position_limit_desc}；尾盘(14:30后)原则上不新开仓。
 - 自动卖出规则：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、B3仅在{B3_EXIT_HHMM}做开盘离场检查，B2/超级B1仅在{TIME_EXIT_HHMM}做尾盘离场检查、持仓超25日退出
 - 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出
@@ -3031,7 +3358,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 - 评分 < 8 → 不买（min_score从7提到8后，假信号减少40%+）
 - 止损线统一设为 -4%，买入K线/前低止损优先
 - 止盈设在 +12%~15%（回测显示突破确认能吃到9.6%平均盈利）
-- 单票仓位 ≤ 总资金15%（回测显示持仓<5只时最大回撤控制在8%以内）
+- 单票仓位 ≤ 总资金15%；持仓数仍受静态上限和盘面动态上限共同约束
 
 {zettaranc_strategy_section}
 
@@ -3050,6 +3377,8 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 市场情绪：{market_sent.get('detail', '未知')}
 {sentiment_note}
 热门板块(涨停集中)：{', '.join(market_sent.get('hot_sectors', [])[:5]) or '无数据'}
+
+{market_strategy_prompt}
 
 当前账户JSON：
 {json.dumps(decision_portfolio, ensure_ascii=False)}
@@ -3082,6 +3411,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
         raise RuntimeError("model did not return object")
     result["model"] = MODEL
     result["provider"] = PROVIDER_DISPLAY_NAME
+    result["market_guidance"] = compact_market_strategy_context(market_strategy_ctx)
     return result
 
 
@@ -3092,6 +3422,13 @@ def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates:
     positions = state.setdefault("positions", {})
     cash = float(state.get("cash") or 0)
     new_buys = 0
+    market_strategy_ctx = current_market_strategy_context()
+    effective_max_open_positions = int(market_strategy_ctx.get("max_open_positions", MAX_OPEN_POSITIONS))
+    effective_max_new_buys = int(market_strategy_ctx.get("max_new_buys_per_decision", MAX_NEW_BUYS_PER_DECISION))
+    effective_max_total_position_pct = float(market_strategy_ctx.get("max_total_position_pct", MAX_TOTAL_POSITION_PCT))
+    effective_min_cash_reserve_pct = float(market_strategy_ctx.get("min_cash_reserve_pct", MIN_CASH_RESERVE_PCT))
+    buy_budget_multiplier = float(market_strategy_ctx.get("buy_budget_multiplier", 1.0))
+    allow_market_guidance_buys = bool(market_strategy_ctx.get("allow_new_buys", True))
     if not trade_allowed:
         return executed
     for action in (decision.get("actions") or [])[:5]:
@@ -3117,6 +3454,9 @@ def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates:
         if shares <= 0:
             continue
         if act == "BUY":
+            if not allow_market_guidance_buys:
+                add_execution_block(decision, code, f"盘面指引为{market_strategy_ctx.get('tone_label', '防守')}，暂停买入")
+                continue
             blockers = candidate_buy_blockers(candidate)
             if blockers:
                 add_execution_block(decision, code, "买入拦截：" + "、".join(blockers))
@@ -3124,11 +3464,15 @@ def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates:
             buy_strategy = classify_buy_strategy(reason, candidate)
             existing_pos = positions.get(code)
             old_qty = position_qty(existing_pos or {})
-            if old_qty <= 0 and open_position_count(positions) >= MAX_OPEN_POSITIONS:
-                add_execution_block(decision, code, f"持仓已达{MAX_OPEN_POSITIONS}只上限")
+            if old_qty <= 0 and open_position_count(positions) >= effective_max_open_positions:
+                add_execution_block(
+                    decision,
+                    code,
+                    f"盘面动态持仓已达{effective_max_open_positions}只上限（静态{MAX_OPEN_POSITIONS}只）",
+                )
                 continue
-            if old_qty <= 0 and new_buys >= MAX_NEW_BUYS_PER_DECISION:
-                add_execution_block(decision, code, f"本轮新开仓已达{MAX_NEW_BUYS_PER_DECISION}笔上限")
+            if old_qty <= 0 and new_buys >= effective_max_new_buys:
+                add_execution_block(decision, code, f"盘面动态本轮新开仓已达{effective_max_new_buys}笔上限")
                 continue
 
             total_equity = portfolio_total_equity_for_limits(cash, positions)
@@ -3138,14 +3482,14 @@ def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates:
                 current_market_value = max(0.0, current_market_value - position_market_value(existing_pos) + current_position_value)
             position_limit_value = total_equity * strategy_position_limit_pct(buy_strategy) / 100
             position_budget = max(0.0, position_limit_value - current_position_value)
-            total_exposure_budget = max(0.0, total_equity * MAX_TOTAL_POSITION_PCT / 100 - current_market_value)
-            cash_reserve_budget = max(0.0, cash - total_equity * MIN_CASH_RESERVE_PCT / 100)
-            max_buy_budget = min(position_budget, total_exposure_budget, cash_reserve_budget)
+            total_exposure_budget = max(0.0, total_equity * effective_max_total_position_pct / 100 - current_market_value)
+            cash_reserve_budget = max(0.0, cash - total_equity * effective_min_cash_reserve_pct / 100)
+            max_buy_budget = min(position_budget, total_exposure_budget, cash_reserve_budget) * max(0.0, min(buy_budget_multiplier, 1.0))
             if max_buy_budget <= 0:
                 add_execution_block(
                     decision,
                     code,
-                    f"仓位预算不足：单票/总仓/现金储备约束({strategy_position_limit_pct(buy_strategy):g}%/{MAX_TOTAL_POSITION_PCT:g}%/{MIN_CASH_RESERVE_PCT:g}%)",
+                    f"仓位预算不足：单票/盘面总仓/现金储备约束({strategy_position_limit_pct(buy_strategy):g}%/{effective_max_total_position_pct:g}%/{effective_min_cash_reserve_pct:g}%)",
                 )
                 continue
 
@@ -3648,6 +3992,7 @@ def get_dashboard_payload() -> dict[str, Any]:
     payload = enrich_portfolio(state)
     payload["equity_history"] = state.get("equity_history", [])
     payload["daily_equity_history"] = state.get("daily_equity_history", [])
+    payload["trading_calendar"] = trading_day_status()
     # 补充从 DB 读取的每日资金快照（作为兜底）
     try:
         from niuniu_db import query_daily_equity as _qde
@@ -3657,6 +4002,7 @@ def get_dashboard_payload() -> dict[str, Any]:
     except Exception: pass
     payload["market_environment"] = check_market_environment()
     payload["market_sentiment"] = check_market_sentiment()
+    payload["market_decision_context"] = compact_market_strategy_context(current_market_strategy_context())
     payload["trading_paused"] = state.get("trading_paused", False)
     payload["pause_reason"] = state.get("pause_reason", "")
     payload["pause_since"] = state.get("pause_since", "")
@@ -3665,6 +4011,7 @@ def get_dashboard_payload() -> dict[str, Any]:
         f"A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，"
         f"09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。"
         f"买入硬约束：最多{MAX_OPEN_POSITIONS}只持仓、单轮最多{MAX_NEW_BUYS_PER_DECISION}笔新仓、"
+        f"午盘前默认最多{MORNING_MAX_OPEN_POSITIONS}只，并按最新盘面监控动态收紧；"
         f"单票≤{MAX_SINGLE_POSITION_PCT:g}%、总仓≤{MAX_TOTAL_POSITION_PCT:g}%、现金≥{MIN_CASH_RESERVE_PCT:g}%。"
         f"系统自动卖出：-4%硬止损/买入K线前低止损、防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
         f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。"

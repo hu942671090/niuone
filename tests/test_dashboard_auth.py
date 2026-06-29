@@ -153,6 +153,20 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(compacted[0], latest_points[0])
         self.assertEqual(compacted[-1], latest_points[-1])
 
+    def test_compact_intraday_equity_history_can_keep_latest_day_full_density(self):
+        old_points = [
+            {'time': f'2026-06-24 09:{i:02d}:00', 'equity': 1000000 + i, 'pnl_pct': i / 100}
+            for i in range(30)
+        ]
+        latest_points = [
+            {'time': f'2026-06-25 10:{i:02d}:00', 'equity': 1000100 + i, 'pnl_pct': i / 100}
+            for i in range(40)
+        ]
+
+        compacted = dashboard.compact_intraday_equity_history(old_points + latest_points, max_points=0)
+
+        self.assertEqual(compacted, latest_points)
+
     def test_compact_intraday_equity_history_filters_future_same_day_points(self):
         points = [
             {'time': '2026-06-26 09:30:00', 'equity': 1000000, 'pnl_pct': 0},
@@ -167,6 +181,22 @@ class DashboardAuthTests(unittest.TestCase):
 
         self.assertEqual([p['time'] for p in compacted], ['2026-06-26 09:30:00', '2026-06-26 09:39:00'])
 
+    def test_compact_intraday_equity_history_ignores_weekend_points(self):
+        points = [
+            {'time': '2026-06-25 15:00:00', 'equity': 999000, 'pnl_pct': -0.1},
+            {'time': '2026-06-24 09:30:00', 'equity': 998000, 'pnl_pct': -0.2},
+            {'time': '2026-06-26 09:30:00', 'equity': 1000000, 'pnl_pct': 0},
+            {'time': '2026-06-27 11:29:00', 'equity': 1008000, 'pnl_pct': 0.8},
+            {'time': '2026-06-26 15:00:00', 'equity': 1005000, 'pnl_pct': 0.5},
+        ]
+
+        compacted = dashboard.compact_intraday_equity_history(
+            points,
+            now=datetime(2026, 6, 27, 12, 31, 0),
+        )
+
+        self.assertEqual([p['time'] for p in compacted], ['2026-06-26 09:30:00', '2026-06-26 15:00:00'])
+
     def test_compact_daily_equity_history_filters_future_same_day_settlement(self):
         points = [
             {'time': '2026-06-25 15:00:00', 'equity': 1000000, 'pnl_pct': 0},
@@ -179,6 +209,51 @@ class DashboardAuthTests(unittest.TestCase):
         )
 
         self.assertEqual([p['time'] for p in compacted], ['2026-06-25 15:00:00'])
+
+    def test_fast_practice_payload_derives_daily_calendar_points_from_intraday_history(self):
+        class TraderStub:
+            def load_state(self):
+                return {
+                    'initial_cash': 1000000,
+                    'cash': 1000000,
+                    'positions': {},
+                    'equity_history': [
+                        {'time': '2026-06-22 09:30:00', 'equity': 1000000, 'pnl_pct': 0},
+                        {'time': '2026-06-22 15:00:00', 'equity': 1008000, 'pnl_pct': 0.8},
+                        {'time': '2026-06-23 09:30:00', 'equity': 1007000, 'pnl_pct': 0.7},
+                        {'time': '2026-06-23 15:00:00', 'equity': 992000, 'pnl_pct': -0.8},
+                        {'time': '2026-06-24 15:00:00', 'equity': 995000, 'pnl_pct': -0.5},
+                    ],
+                    'daily_equity_history': [
+                        {'time': '2026-06-24 15:00:00', 'equity': 995000, 'pnl_pct': -0.5},
+                    ],
+                    'trade_log': [],
+                    'decision_log': [],
+                }
+
+            def enrich_portfolio(self, state):
+                return {
+                    'initial_cash': state['initial_cash'],
+                    'cash': state['cash'],
+                    'positions': [],
+                    'trade_log': state['trade_log'],
+                    'decision_log': state['decision_log'],
+                }
+
+        original_get_trader = dashboard.get_trader_module
+        original_trading_day_status = dashboard.trading_day_status
+        try:
+            dashboard.get_trader_module = lambda: TraderStub()
+            dashboard.trading_day_status = lambda: {'is_trading_day': True}
+            payload = dashboard.get_practice_payload_fast()
+        finally:
+            dashboard.get_trader_module = original_get_trader
+            dashboard.trading_day_status = original_trading_day_status
+
+        self.assertEqual(
+            [p['time'] for p in payload['daily_equity_history']],
+            ['2026-06-22 15:00:00', '2026-06-23 15:00:00', '2026-06-24 15:00:00'],
+        )
 
     def test_compact_strategy_performance_truncates_exit_details(self):
         perf = {
@@ -208,9 +283,72 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('x.bought_today', dashboard.INDEX_HTML)
         self.assertIn('买入理由', dashboard.INDEX_HTML)
         self.assertIn('卖出归因', dashboard.INDEX_HTML)
+        self.assertIn('最低/最高', dashboard.INDEX_HTML)
+        self.assertNotIn('最低涨幅', dashboard.INDEX_HTML)
+        self.assertNotIn('最高涨幅', dashboard.INDEX_HTML)
+        self.assertIn('industryLabel = item.industry || item.sector || item.board', dashboard.INDEX_HTML)
+        self.assertIn('${esc(industryLabel)}</span>', dashboard.INDEX_HTML)
+        self.assertIn('white-space:nowrap', dashboard.INDEX_HTML)
+        self.assertNotIn('所属板块', dashboard.INDEX_HTML)
+        self.assertNotIn('板块 ${esc(industryLabel)}', dashboard.INDEX_HTML)
         self.assertIn('仓位占比', dashboard.INDEX_HTML)
         self.assertIn('可卖/持有', dashboard.INDEX_HTML)
         self.assertNotIn('${esc(x.qty)}股', dashboard.INDEX_HTML)
+        self.assertIn('今日收益曲线', dashboard.INDEX_HTML)
+        self.assertIn('isNonTradingCalendarDay', dashboard.INDEX_HTML)
+        self.assertIn('tradingCalendar.is_trading_day === false', dashboard.INDEX_HTML)
+        self.assertIn('（${esc(latestDay)}）', dashboard.INDEX_HTML)
+        self.assertIn('交易日历', dashboard.INDEX_HTML)
+        self.assertIn('openPracticeCalendar(event)', dashboard.INDEX_HTML)
+        self.assertIn('buildPracticeCalendarRows', dashboard.INDEX_HTML)
+        self.assertIn('practice-calendar-popover', dashboard.INDEX_HTML)
+        self.assertIn('practiceCalendarSelectedDate', dashboard.INDEX_HTML)
+        self.assertIn('renderPracticeCalendarDayCurve', dashboard.INDEX_HTML)
+        self.assertIn('practice-calendar-day-curve', dashboard.INDEX_HTML)
+        self.assertIn('data-practice-calendar-date="${esc(date)}"', dashboard.INDEX_HTML)
+        self.assertIn('data-practice-calendar-action="clear-day"', dashboard.INDEX_HTML)
+        self.assertIn('data-practice-calendar-curve', dashboard.INDEX_HTML)
+        self.assertIn('selectedCls = date === practiceCalendarSelectedDate', dashboard.INDEX_HTML)
+        self.assertIn("practiceCalendarSelectedDate = practiceCalendarSelectedDate === nextDate ? '' : nextDate", dashboard.INDEX_HTML)
+        self.assertIn('sessionDayPoints', dashboard.INDEX_HTML)
+        self.assertIn('allDayHistoryPoints.at(-1)?.equity', dashboard.INDEX_HTML)
+        self.assertIn("curveSubPrefix = hasSessionCurve ? '' : '仅有收盘点 · '", dashboard.INDEX_HTML)
+        self.assertIn("time: `${date} 15:00:00`", dashboard.INDEX_HTML)
+        self.assertIn('0轴 ${prevPoint ? esc(String(prevPoint.time || \'\').slice(5, 16)) : \'初始资金\'}', dashboard.INDEX_HTML)
+        self.assertIn('position:absolute; left:0; right:0; bottom:calc(100% + 8px)', dashboard.INDEX_HTML)
+        self.assertIn('overflow:visible', dashboard.INDEX_HTML)
+        self.assertIn('width:min(390px', dashboard.INDEX_HTML)
+        self.assertIn('transform:translate(-50%,-50%)', dashboard.INDEX_HTML)
+        self.assertNotIn('max-height:min(76vh, 640px); display:grid; gap:8px', dashboard.INDEX_HTML)
+        self.assertNotIn('practice-calendar-popover::before', dashboard.INDEX_HTML)
+        self.assertNotIn('filter:blur(18px)', dashboard.INDEX_HTML)
+        self.assertIn('border:1px solid transparent', dashboard.INDEX_HTML)
+        self.assertIn('linear-gradient(135deg, rgba(96,165,250,.68), rgba(124,92,255,.56) 48%, rgba(52,211,153,.32)) border-box', dashboard.INDEX_HTML)
+        self.assertIn('background:linear-gradient(180deg, #172033, #101827)', dashboard.INDEX_HTML)
+        self.assertIn('background:rgba(31,42,62,.72)', dashboard.INDEX_HTML)
+        self.assertIn('practice-calendar-no-data', dashboard.INDEX_HTML)
+        self.assertIn('grid-template-columns:repeat(5, minmax(0, 1.14fr)) repeat(2, minmax(30px, .72fr))', dashboard.INDEX_HTML)
+        self.assertIn('dayOfWeek === 0 || dayOfWeek === 6', dashboard.INDEX_HTML)
+        self.assertIn('practice-calendar-day.weekend', dashboard.INDEX_HTML)
+        self.assertIn('practice-calendar-weekday.weekend', dashboard.INDEX_HTML)
+        self.assertIn('weekendTodayMarker = isToday && isWeekend && !row', dashboard.INDEX_HTML)
+        self.assertIn('inlineTodayMarker = isToday && !weekendTodayMarker', dashboard.INDEX_HTML)
+        self.assertIn('class="practice-calendar-today weekend-today"', dashboard.INDEX_HTML)
+        self.assertIn('grid-row:2; align-self:end; justify-self:start; padding:0 3px', dashboard.INDEX_HTML)
+        self.assertNotIn('practice-calendar-day.weekend { min-height', dashboard.INDEX_HTML)
+        self.assertNotIn('align-self:start', dashboard.INDEX_HTML)
+        self.assertIn("${date}${isWeekend ? ' 周末' : ''}", dashboard.INDEX_HTML)
+        self.assertIn('signedCellPct', dashboard.INDEX_HTML)
+        self.assertIn('signedCellAmount', dashboard.INDEX_HTML)
+        self.assertIn('aria-label="${esc(fullText)}"', dashboard.INDEX_HTML)
+        self.assertIn('practice-calendar-grid', dashboard.INDEX_HTML)
+        self.assertIn('data-practice-calendar-action="prev"', dashboard.INDEX_HTML)
+        self.assertNotIn('practice-calendar-backdrop', dashboard.INDEX_HTML)
+        self.assertNotIn('practiceCalendarAnchor', dashboard.INDEX_HTML)
+        self.assertNotIn('practice-calendar-values empty', dashboard.INDEX_HTML)
+        self.assertNotIn('<h3 class="practice-panel-title"><span>牛牛实战 · 模拟账户</span><button class="practice-calendar-open-btn"', dashboard.INDEX_HTML)
+        self.assertNotIn('最近交易日收益', dashboard.INDEX_HTML)
+        self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', dashboard.INDEX_HTML)
 
     def test_admin_token_redirect_sets_secure_cookie_and_security_headers(self):
         token = dashboard.get_or_create_admin_token()
@@ -565,6 +703,7 @@ class DashboardAuthTests(unittest.TestCase):
                 'DASHBOARD_NEWS_BASE_URL': 'https://news.example/v1',
                 'DASHBOARD_NEWS_API_KEY': 'news-secret',
                 'DASHBOARD_B1_SCHEDULE_TIMES': '09:25, 10:00, 14:50',
+                'DASHBOARD_US_MARKET_SUMMARY_CRON': '08:01',
                 'DASHBOARD_US_RATING_CRON': '10:30',
                 'DASHBOARD_MARKET_AUCTION_CRON': '09:26',
                 'X_WATCHLIST_ACCOUNTS': '@Foo, bar, foo',
@@ -593,6 +732,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(parsed['DASHBOARD_NEWS_BASE_URL'], 'https://news.example/v1')
         self.assertEqual(parsed['DASHBOARD_NEWS_API_KEY'], 'news-secret')
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
+        self.assertEqual(parsed['DASHBOARD_US_MARKET_SUMMARY_CRON'], '1 8 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
         self.assertEqual(parsed['X_WATCHLIST_ACCOUNTS'], 'foo,bar')
@@ -750,6 +890,7 @@ class DashboardAuthTests(unittest.TestCase):
                 'env__DASHBOARD_NEWS_API_KEY': 'news-secret',
                 'env__DASHBOARD_B1_SCHEDULE_TIMES': ['', '09:25', '10:00', '', '14:50'],
                 'env__DASHBOARD_INDICES_TTL_SECONDS': '20',
+                'env__DASHBOARD_US_MARKET_SUMMARY_CRON': '08:01',
                 'env__DASHBOARD_MARKET_AUCTION_CRON': '09:26',
                 'env__DASHBOARD_US_RATING_CRON': '10:30',
                 'env__X_WATCHLIST_ACCOUNTS': ['', '@Foo', 'bar', 'foo'],
@@ -803,6 +944,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(parsed['DASHBOARD_NEWS_API_KEY'], 'news-secret')
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
         self.assertEqual(parsed['DASHBOARD_INDICES_TTL_SECONDS'], '20')
+        self.assertEqual(parsed['DASHBOARD_US_MARKET_SUMMARY_CRON'], '1 8 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
         self.assertEqual(parsed['X_WATCHLIST_ACCOUNTS'], 'foo,bar')

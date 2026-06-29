@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from http import cookies
 import urllib.request
 
+from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
 from niuone_paths import get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
 from strategy_registry import (
@@ -640,6 +641,10 @@ def parse_dashboard_ts(value: str) -> datetime | None:
         return None
 
 
+def is_a_share_trading_day_for_dashboard(dt: datetime) -> bool:
+    return calendar_is_a_share_trading_day(dt)
+
+
 def filter_future_equity_points(
     history: list[dict[str, Any]],
     *,
@@ -655,6 +660,8 @@ def filter_future_equity_points(
         dt = parse_dashboard_ts(str(point.get("time") or ""))
         if dt is not None and (dt.date() > now.date() or (dt.date() == now.date() and dt.timestamp() > cutoff)):
             continue
+        if dt is not None and not is_a_share_trading_day_for_dashboard(dt):
+            continue
         filtered.append(point)
     return filtered
 
@@ -665,15 +672,16 @@ def compact_intraday_equity_history(
     max_points: int = 120,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    points = filter_future_equity_points(history or [], now=now)
+    points = sorted(
+        filter_future_equity_points(history or [], now=now),
+        key=lambda point: str(point.get("time") or "") if isinstance(point, dict) else "",
+    )
     if not points:
         return []
-    latest_day = ""
-    for point in reversed(points):
-        ts = str(point.get("time") or "")
-        if len(ts) >= 10:
-            latest_day = ts[:10]
-            break
+    latest_day = max(
+        (str(point.get("time") or "")[:10] for point in points if len(str(point.get("time") or "")) >= 10),
+        default="",
+    )
     day_points = [p for p in points if str(p.get("time") or "").startswith(latest_day)] if latest_day else points
     return downsample_sequence(day_points, max_points)
 
@@ -685,7 +693,11 @@ def compact_daily_equity_history(
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     by_date: dict[str, dict[str, Any]] = {}
-    for point in filter_future_equity_points(history or [], now=now):
+    points = sorted(
+        filter_future_equity_points(history or [], now=now),
+        key=lambda point: str(point.get("time") or "") if isinstance(point, dict) else "",
+    )
+    for point in points:
         if not isinstance(point, dict):
             continue
         date = str(point.get("time") or "")[:10]
@@ -721,10 +733,16 @@ def get_practice_payload_fast() -> dict[str, Any]:
         trader = get_trader_module()
         state = trader.load_state()
         payload = trader.enrich_portfolio(state)
-        payload["equity_history"] = compact_intraday_equity_history(state.get("equity_history", []))
-        payload["daily_equity_history"] = compact_daily_equity_history(state.get("daily_equity_history", []))
+        equity_history = state.get("equity_history", []) or []
+        daily_equity_history = state.get("daily_equity_history", []) or []
+        # Keep the same intraday point density as the full payload. Otherwise the
+        # chart first renders a downsampled fast response, then visibly jumps when
+        # the full response arrives a few seconds later.
+        payload["equity_history"] = compact_intraday_equity_history(equity_history, max_points=0)
+        payload["daily_equity_history"] = compact_daily_equity_history([*equity_history, *daily_equity_history])
         payload["trade_log"] = (payload.get("trade_log") or [])[:20]
         payload["decision_log"] = (payload.get("decision_log") or [])[:3]
+        payload["trading_calendar"] = trading_day_status()
         payload["trading_paused"] = state.get("trading_paused", False)
         payload["pause_reason"] = state.get("pause_reason", "")
         payload["pause_since"] = state.get("pause_since", "")
@@ -871,6 +889,7 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
         refreshed.sort(key=sort_key, reverse=True)
         selected = scanner.select_display_candidates(refreshed)
         trade_items = scanner.select_trade_candidates(refreshed)
+        scanner.annotate_candidate_industries(selected, trade_items)
         from collections import Counter
         strat_counts = Counter(str(item.get("best_strategy") or "unknown") for item in selected)
         refreshed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2596,6 +2615,8 @@ INDEX_HTML = r"""<!doctype html>
     .inline-field { border:1px solid rgba(148,163,184,.12); border-radius:13px; padding:10px 11px; background:rgba(2,6,23,.36); }
     .inline-label { color:#8da0b8; font-size:11px; font-weight:800; letter-spacing:.05em; margin-bottom:3px; }
     .inline-value { color:#e5edf8; font-size:14px; line-height:1.5; font-weight:600; }
+    .practice-calendar-open-btn { display:inline-flex; align-items:center; justify-content:center; min-width:0; padding:5px 9px; border-radius:8px; border:1px solid rgba(124,92,255,.30); background:rgba(124,92,255,.14); color:#dbeafe; font-size:11px; line-height:1; font-weight:850; white-space:nowrap; box-shadow:inset 0 1px 0 rgba(255,255,255,.045); }
+    .practice-calendar-open-btn:hover { border-color:rgba(157,178,255,.56); background:rgba(124,92,255,.22); }
     .practice-chart-card { position:relative; overflow:hidden; margin:12px 0; padding:14px 14px 10px; border-radius:18px; border:1px solid rgba(255,255,255,.08); background:radial-gradient(circle at 15% 0%, rgba(113,112,255,.16), transparent 34%), linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.018)); box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 18px 42px rgba(0,0,0,.22); }
     .practice-chart-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:8px; }
     .practice-chart-title-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
@@ -2646,6 +2667,53 @@ INDEX_HTML = r"""<!doctype html>
     .position-reason-text { min-width:0; overflow-wrap:anywhere; color:#aebbd0; }
     .position-reason-badges { display:flex; gap:5px; flex-wrap:wrap; min-width:0; }
     .position-reason-badge { display:inline-flex; align-items:center; max-width:100%; border:1px solid rgba(148,163,184,.16); border-radius:7px; background:rgba(15,23,42,.54); color:#dbeafe; padding:1px 6px; font-weight:850; font-size:11px; line-height:1.5; }
+    .practice-calendar-popover { position:fixed; top:50%; left:50%; z-index:70; width:min(390px, calc(100vw - 36px)); max-height:min(62vh, 500px); overflow:visible; transform:translate(-50%,-50%); }
+    .practice-calendar-day-curve { position:absolute; left:0; right:0; bottom:calc(100% + 8px); z-index:1; min-width:0; overflow:hidden; border:1px solid transparent; border-radius:12px; padding:8px 9px 7px; background:linear-gradient(180deg, rgba(23,32,51,.98), rgba(15,23,42,.98)) padding-box, linear-gradient(135deg, rgba(96,165,250,.60), rgba(124,92,255,.46) 48%, rgba(52,211,153,.28)) border-box; box-shadow:0 18px 58px rgba(0,0,0,.48), inset 0 1px 0 rgba(255,255,255,.07); }
+    .practice-calendar-day-curve-head { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:start; gap:8px; margin-bottom:4px; }
+    .practice-calendar-day-curve-title { min-width:0; color:#e5edf8; font-size:12px; line-height:1.2; font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .practice-calendar-day-curve-sub { margin-top:2px; color:#7b8aa0; font-size:9px; line-height:1.2; font-variant-numeric:tabular-nums; }
+    .practice-calendar-day-curve-value { color:#e2e8f0; font-size:11px; line-height:1.2; font-weight:850; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .practice-calendar-day-curve-value.up { color:#ff4d4f; }
+    .practice-calendar-day-curve-value.down { color:#39d98a; }
+    .practice-calendar-day-curve-close { width:22px; height:22px; min-width:22px; display:grid; place-items:center; padding:0; border-radius:7px; border:1px solid rgba(191,219,254,.18); background:rgba(30,41,59,.76); color:#cbd5e1; font-size:13px; line-height:1; font-weight:850; }
+    .practice-calendar-day-curve-svg { width:100%; height:78px; display:block; }
+    .practice-calendar-day-curve-empty { min-height:56px; display:grid; place-items:center; border:1px dashed rgba(148,163,184,.20); border-radius:8px; color:#7b8aa0; font-size:11px; }
+    .practice-calendar-card { width:100%; max-height:inherit; min-height:0; display:grid; grid-template-rows:auto auto minmax(0,1fr); overflow:hidden; border:1px solid transparent; border-radius:12px; background:linear-gradient(180deg, #172033, #101827) padding-box, linear-gradient(135deg, rgba(96,165,250,.68), rgba(124,92,255,.56) 48%, rgba(52,211,153,.32)) border-box; box-shadow:0 24px 90px rgba(0,0,0,.58), 0 0 0 1px rgba(15,23,42,.72), inset 0 1px 0 rgba(255,255,255,.075); }
+    .practice-calendar-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 10px; border-bottom:1px solid rgba(191,219,254,.18); background:rgba(30,41,59,.48); }
+    .practice-calendar-title { min-width:0; color:#e5edf8; font-size:13.5px; line-height:1.2; font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .practice-calendar-sub { margin-top:2px; color:#7b8aa0; font-size:10px; line-height:1.25; font-variant-numeric:tabular-nums; }
+    .practice-calendar-actions { display:flex; align-items:center; gap:7px; flex:0 0 auto; }
+    .practice-calendar-icon-btn { width:30px; height:30px; min-width:30px; display:grid; place-items:center; padding:0; border-radius:8px; border:1px solid rgba(191,219,254,.22); background:rgba(30,41,59,.82); color:#f8fafc; font-size:16px; line-height:1; font-weight:850; }
+    .practice-calendar-icon-btn:hover { border-color:rgba(199,210,254,.56); background:rgba(51,65,85,.92); }
+    .practice-calendar-summary { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:5px; padding:6px 8px; border-bottom:1px solid rgba(191,219,254,.16); background:rgba(15,23,42,.18); }
+    .practice-calendar-stat { min-width:0; border:1px solid rgba(191,219,254,.16); border-radius:7px; padding:5px 6px; background:rgba(30,41,59,.58); }
+    .practice-calendar-stat-label { color:#93a4bb; font-size:9px; line-height:1.15; font-weight:850; }
+    .practice-calendar-stat-value { margin-top:2px; color:#e2e8f0; font-size:11px; line-height:1.2; font-weight:850; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .practice-calendar-grid-wrap { min-height:0; overflow:auto; padding:7px 8px 9px; }
+    .practice-calendar-weekdays, .practice-calendar-grid { display:grid; grid-template-columns:repeat(5, minmax(0, 1.14fr)) repeat(2, minmax(30px, .72fr)); gap:3px; }
+    .practice-calendar-weekdays { margin-bottom:4px; }
+    .practice-calendar-weekday { color:#93a4bb; font-size:10px; line-height:1.1; font-weight:850; text-align:center; }
+    .practice-calendar-weekday.weekend { color:#5f6f86; font-size:9px; }
+    .practice-calendar-day { min-width:0; min-height:30px; display:grid; grid-template-rows:auto minmax(0,1fr); gap:2px; border:1px solid rgba(191,219,254,.13); border-radius:6px; padding:4px; background:rgba(31,42,62,.72); }
+    .practice-calendar-day.has-result { min-height:52px; cursor:pointer; }
+    .practice-calendar-day.has-result:hover { border-color:rgba(191,219,254,.36); box-shadow:inset 0 0 0 1px rgba(191,219,254,.12); }
+    .practice-calendar-day.selected { border-color:rgba(191,219,254,.70) !important; box-shadow:inset 0 0 0 1px rgba(191,219,254,.28), 0 0 0 1px rgba(124,92,255,.20); }
+    .practice-calendar-day.blank { visibility:hidden; }
+    .practice-calendar-day.weekend { border-color:rgba(100,116,139,.15); background:rgba(15,23,42,.34); }
+    .practice-calendar-day.has-result.up { border-color:rgba(248,113,113,.42); background:linear-gradient(180deg, rgba(127,29,29,.38), rgba(64,26,35,.72)); }
+    .practice-calendar-day.has-result.down { border-color:rgba(52,211,153,.38); background:linear-gradient(180deg, rgba(6,78,59,.40), rgba(18,55,50,.72)); }
+    .practice-calendar-day.has-result.flat { border-color:rgba(191,219,254,.22); background:rgba(51,65,85,.70); }
+    .practice-calendar-date { display:flex; align-items:center; justify-content:space-between; gap:3px; color:#cbd5e1; font-size:10.5px; line-height:1; font-weight:850; font-variant-numeric:tabular-nums; }
+    .practice-calendar-day.weekend .practice-calendar-date { justify-content:flex-start; color:#64748b; font-size:9px; font-weight:800; }
+    .practice-calendar-today { border:1px solid rgba(96,165,250,.26); color:#bfdbfe; border-radius:999px; padding:1px 5px; font-size:9.5px; line-height:1.25; }
+    .practice-calendar-day.weekend .practice-calendar-today.weekend-today { grid-row:2; align-self:end; justify-self:start; padding:0 3px; border-color:rgba(148,163,184,.22); color:#94a3b8; font-size:7px; line-height:1.2; }
+    .practice-calendar-values { min-width:0; display:grid; align-content:end; gap:2px; font-variant-numeric:tabular-nums; }
+    .practice-calendar-rate { font-size:9.5px; line-height:1.15; font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:clip; }
+    .practice-calendar-amount { color:#aebbd0; font-size:8.5px; line-height:1.18; white-space:nowrap; overflow:hidden; text-overflow:clip; }
+    .practice-calendar-rate.up, .practice-calendar-amount.up, .practice-calendar-stat-value.up { color:#ff4d4f; }
+    .practice-calendar-rate.down, .practice-calendar-amount.down, .practice-calendar-stat-value.down { color:#39d98a; }
+    .practice-calendar-no-data { align-self:end; color:#708099; font-size:10px; line-height:1; }
+    .practice-calendar-day.weekend .practice-calendar-no-data { display:none; }
     .mobile-only { display:none; }
     .empty { color:var(--muted); text-align:center; padding:42px; border:1px dashed var(--line); border-radius:18px; }
     .right { margin-left:auto; }
@@ -2771,6 +2839,7 @@ INDEX_HTML = r"""<!doctype html>
       .sector-cloud .inline-field { padding:7px 8px; }
       .sector-cloud .inline-field .inline-value { font-size:13px; }
       .practice-stats { grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:7px !important; }
+      .practice-calendar-open-btn { padding:5px 8px; font-size:11px; }
       .practice-chart-card { padding:11px 10px 8px; border-radius:15px; }
       .practice-chart-head { flex-direction:column; gap:8px; }
       .practice-chart-title-row { width:100%; justify-content:space-between; }
@@ -2787,6 +2856,31 @@ INDEX_HTML = r"""<!doctype html>
       .position-brief-card { padding:9px 10px; gap:7px; }
       .position-brief-name { font-size:13px; }
       .position-brief-item b { font-size:12.5px; }
+      .practice-calendar-popover { top:50% !important; left:50%; right:auto !important; bottom:auto; width:min(340px, calc(100vw - 42px)); max-height:64vh; transform:translate(-50%,-50%); }
+      .practice-calendar-day-curve { bottom:calc(100% + 6px); padding:7px 8px 6px; border-radius:11px; }
+      .practice-calendar-day-curve-head { gap:6px; margin-bottom:3px; }
+      .practice-calendar-day-curve-title { font-size:11.5px; }
+      .practice-calendar-day-curve-sub { font-size:8.5px; }
+      .practice-calendar-day-curve-value { font-size:10px; }
+      .practice-calendar-day-curve-svg { height:66px; }
+      .practice-calendar-day-curve-empty { min-height:46px; font-size:10.5px; }
+      .practice-calendar-card { border-radius:12px; }
+      .practice-calendar-head { padding:8px 9px; gap:7px; }
+      .practice-calendar-title { font-size:12.5px; }
+      .practice-calendar-actions { gap:5px; }
+      .practice-calendar-icon-btn { width:28px; height:28px; min-width:28px; }
+      .practice-calendar-summary { grid-template-columns:repeat(3,minmax(0,1fr)); gap:3px; padding:6px 7px; }
+      .practice-calendar-stat { padding:4px 5px; }
+      .practice-calendar-stat-label { font-size:8.5px; }
+      .practice-calendar-stat-value { font-size:10px; }
+      .practice-calendar-grid-wrap { padding:6px 7px 8px; }
+      .practice-calendar-weekdays, .practice-calendar-grid { grid-template-columns:repeat(5, minmax(0, 1.16fr)) repeat(2, minmax(26px, .62fr)); gap:3px; }
+      .practice-calendar-day { min-height:28px; padding:3px; gap:2px; }
+      .practice-calendar-day.has-result { min-height:48px; }
+      .practice-calendar-date { font-size:10px; }
+      .practice-calendar-day.weekend .practice-calendar-date { font-size:8.5px; }
+      .practice-calendar-rate { font-size:9px; }
+      .practice-calendar-amount { font-size:8px; }
       .market-strip { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:7px; margin:0 0 9px; }
       .indices-page { gap:11px; }
       .indices-switch { width:100%; }
@@ -2929,6 +3023,9 @@ let practicePositionMode = initialParams.get('holdings') === 'sold' ? 'sold' : '
 window.practicePositionMode = practicePositionMode;
 let practicePositionBriefMode = initialParams.get('brief') === '1';
 window.practicePositionBriefMode = practicePositionBriefMode;
+let practiceCalendarOpen = false;
+let practiceCalendarMonth = '';
+let practiceCalendarSelectedDate = '';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const actionFetch = (url, options = {}) => fetch(url, {
@@ -3537,34 +3634,58 @@ function clampedTradingClockMinuteOfDay(timeText) {
   if (minute <= end) return (minute - start) - 90;
   return 240;
 }
+function normalizePracticeEquityPoints(source) {
+  return (source || [])
+    .map(p => ({time: p.time || '', equity: Number(p.equity), pnlPct: Number(p.pnl_pct)}))
+    .filter(p => Number.isFinite(p.equity) && p.time);
+}
+function compactPracticeDailyPoints(points) {
+  const byDate = new Map();
+  for (const p of points || []) {
+    const date = String(p.time || '').slice(0, 10);
+    if (!date) continue;
+    const prev = byDate.get(date);
+    if (!prev || (new Date(p.time).getTime() || 0) >= (new Date(prev.time).getTime() || 0)) {
+      byDate.set(date, p);
+    }
+  }
+  return [...byDate.values()].sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
+}
+function buildPracticeCalendarRows(history, dailyHistory, initialCash=1000000) {
+  const normalizedHistory = normalizePracticeEquityPoints(history);
+  const normalizedDailyHistory = normalizePracticeEquityPoints(dailyHistory);
+  const byDate = new Map();
+  for (const p of [...compactPracticeDailyPoints(normalizedHistory), ...compactPracticeDailyPoints(normalizedDailyHistory)]) {
+    const date = String(p.time || '').slice(0, 10);
+    if (!date) continue;
+    const prev = byDate.get(date);
+    if (!prev || (new Date(p.time).getTime() || 0) >= (new Date(prev.time).getTime() || 0)) {
+      byDate.set(date, p);
+    }
+  }
+  const points = [...byDate.values()]
+    .sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
+  let previousEquity = Number(initialCash);
+  return points.map(p => {
+    const date = String(p.time || '').slice(0, 10);
+    const equity = Number(p.equity);
+    const base = Number.isFinite(previousEquity) && previousEquity > 0 ? previousEquity : equity;
+    const pnl = Number.isFinite(equity) && Number.isFinite(base) ? equity - base : 0;
+    const pnlPct = base ? pnl / base * 100 : 0;
+    previousEquity = equity;
+    return {date, time:p.time, equity, pnl, pnlPct};
+  }).filter(row => row.date);
+}
 function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchmarks={items:[]}) {
   const isDailyMode = practiceCurveMode === 'daily';
-  
-  function normalizeEquityPoints(source) {
-    return (source || [])
-      .map(p => ({time: p.time || '', equity: Number(p.equity), pnlPct: Number(p.pnl_pct)}))
-      .filter(p => Number.isFinite(p.equity) && p.time);
-  }
-  function compactDailyPoints(points) {
-    const byDate = new Map();
-    for (const p of points || []) {
-      const date = String(p.time || '').slice(0, 10);
-      if (!date) continue;
-      const prev = byDate.get(date);
-      if (!prev || (new Date(p.time).getTime() || 0) >= (new Date(prev.time).getTime() || 0)) {
-        byDate.set(date, p);
-      }
-    }
-    return [...byDate.values()].sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
-  }
-  const normalizedHistory = normalizeEquityPoints(history);
-  const normalizedDailyHistory = normalizeEquityPoints(dailyHistory);
+  const normalizedHistory = normalizePracticeEquityPoints(history);
+  const normalizedDailyHistory = normalizePracticeEquityPoints(dailyHistory);
   let rawPoints = [];
   let dailyCompactedPoints = [];
   let intradayBasePoint = null;
   if (isDailyMode) {
-    const compactedFromDaily = compactDailyPoints(normalizedDailyHistory);
-    const compactedFromIntraday = compactDailyPoints(normalizedHistory);
+    const compactedFromDaily = compactPracticeDailyPoints(normalizedDailyHistory);
+    const compactedFromIntraday = compactPracticeDailyPoints(normalizedHistory);
     const byDate = new Map();
     for (const p of [...compactedFromIntraday, ...compactedFromDaily]) {
       const date = String(p.time || '').slice(0, 10);
@@ -3580,12 +3701,15 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   } else {
     rawPoints = normalizedHistory;
   }
+  rawPoints = [...rawPoints].sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
   if (rawPoints.length < 2) return '<div class="empty" style="padding:18px">收益曲线等待更多净值点…</div>';
-  const latestTradingClockPoint = [...rawPoints].reverse().find(p => tradingClockMinuteOfDay(p.time) != null);
+  const tradingCalendar = (niuniuPracticeData && niuniuPracticeData.trading_calendar) || {};
+  const isNonTradingCalendarDay = tradingCalendar.is_trading_day === false;
+  const latestTradingClockPoint = rawPoints.filter(p => tradingClockMinuteOfDay(p.time) != null).at(-1);
   const latestDay = (latestTradingClockPoint || rawPoints[rawPoints.length - 1]).time.slice(0, 10);
   if (!isDailyMode) {
     const priorByDate = new Map();
-    for (const p of [...compactDailyPoints(normalizedHistory), ...compactDailyPoints(normalizedDailyHistory)]) {
+    for (const p of [...compactPracticeDailyPoints(normalizedHistory), ...compactPracticeDailyPoints(normalizedDailyHistory)]) {
       const date = String(p.time || '').slice(0, 10);
       if (!date || date >= latestDay) continue;
       const prev = priorByDate.get(date);
@@ -3633,6 +3757,8 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     }
   } else {
     points = rawPoints.filter(p => p.time.slice(0, 10) === latestDay);
+    const sessionPoints = points.filter(p => tradingClockMinuteOfDay(p.time) != null);
+    if (sessionPoints.length >= 2) points = sessionPoints;
     if (points.length < 2) points = rawPoints.slice(-180);
     
     // 按时间排序并去重
@@ -3656,11 +3782,6 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
       }
       return true;
     });
-    
-    if (points.length > 80) {
-      const step = Math.ceil(points.length / 60);
-      points = points.filter((_, i, arr) => i === 0 || i === arr.length - 1 || i % step === 0);
-    }
     
     xFromTime = time => {
       const clampedMinute = Math.max(0, Math.min(totalSessionMinutes, clampedTradingClockMinuteOfDay(time)));
@@ -3716,7 +3837,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     const lastPct = b.points.length ? Number(b.points[b.points.length - 1].pct) : null;
     return {...b, d, lastPct};
   }).filter(b => b.d);
-  const line = isDailyMode ? straightSvgPath(pts) : smoothSvgPath(pts);
+  const line = straightSvgPath(pts);
   const areaBaseY = y(clampPct(0));
   const area = `${line} L${pts[pts.length-1][0].toFixed(1)} ${areaBaseY.toFixed(1)} L${pts[0][0].toFixed(1)} ${areaBaseY.toFixed(1)} Z`;
   const baseY = areaBaseY;
@@ -3749,7 +3870,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     const cls = idx === 0 ? 'start' : (idx === timeTicks.length - 1 ? 'end' : 'mid');
     return `<span class="practice-time-label ${cls}" style="left:${((t.x / w) * 100).toFixed(2)}%">${esc(t.label)}</span>`;
   }).join('');
-  const chartTitle = isDailyMode ? '收益曲线 · 每日总收益' : '收益曲线 · 当日收益';
+  const chartTitle = isDailyMode ? '收益曲线 · 每日总收益' : `今日收益曲线${isNonTradingCalendarDay && latestDay ? `（${esc(latestDay)}）` : ''}`;
   const intradayBaseLabel = intradayBasePoint
     ? `0轴为上一交易日净值(${esc(String(intradayBasePoint.time || '').slice(5, 16))})`
     : '0轴为今日首个净值';
@@ -3765,12 +3886,14 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     <button class="practice-mode-btn ${!isDailyMode ? 'active' : ''}" type="button" onclick="setPracticeCurveMode('intraday')">当日收益</button>
     <button class="practice-mode-btn ${isDailyMode ? 'active' : ''}" type="button" onclick="setPracticeCurveMode('daily')">每日总收益</button>
   </div>`;
+  const calendarButton = `<button class="practice-calendar-open-btn" type="button" onclick="openPracticeCalendar(event)">交易日历</button>`;
   return `<div class="practice-chart-card">
     <div class="practice-chart-head">
       <div>
         <div class="practice-chart-title-row">
           <div class="practice-chart-title">${chartTitle}</div>
           ${modeButtons}
+          ${calendarButton}
         </div>
         <div class="practice-chart-sub">${chartSub}</div>
         <div class="benchmark-toggle-row"><button class="benchmark-toggle on" type="button" style="--dot:${markerColor}"><span class="benchmark-dot"></span>牛牛账户收益率</button></div>
@@ -3806,6 +3929,226 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
       ${timeTickHtml}
     </div>
   </div>`;
+}
+function practiceCalendarRoot() {
+  let root = document.getElementById('practiceCalendarRoot');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'practiceCalendarRoot';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+function monthKeyFromDate(value) {
+  const text = String(value || '').slice(0, 10);
+  return text.length >= 7 ? text.slice(0, 7) : '';
+}
+function localDateKey(date=new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+function shiftMonthKey(monthKey, delta) {
+  const m = String(monthKey || '').match(/^(\d{4})-(\d{2})$/);
+  const base = m ? new Date(Number(m[1]), Number(m[2]) - 1 + delta, 1) : new Date();
+  return `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}`;
+}
+function renderPracticeCalendarDayCurve(date) {
+  if (!date) return '';
+  const p = niuniuPracticeData || {};
+  const initialCash = Number(p.initial_cash || 1000000);
+  const history = normalizePracticeEquityPoints(p.equity_history || [])
+    .sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
+  const dailyHistory = normalizePracticeEquityPoints(p.daily_equity_history || [])
+    .sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
+  const allDayHistoryPoints = history
+    .filter(point => String(point.time || '').slice(0, 10) === date)
+    .filter((point, idx, arr) => idx === 0 || String(point.time || '') !== String(arr[idx - 1].time || ''));
+  const dailyDayPoints = dailyHistory.filter(point => String(point.time || '').slice(0, 10) === date);
+  const sessionDayPoints = allDayHistoryPoints.filter(point => tradingClockMinuteOfDay(point.time) != null);
+  const dailyPoints = compactPracticeDailyPoints([...history, ...dailyHistory]);
+  const prevPoint = dailyPoints.filter(point => String(point.time || '').slice(0, 10) < date).at(-1);
+  const baseEquity = Number(prevPoint?.equity || initialCash);
+  const row = buildPracticeCalendarRows(history, dailyHistory, initialCash).find(item => item.date === date);
+  const latestEquity = Number(sessionDayPoints.at(-1)?.equity ?? allDayHistoryPoints.at(-1)?.equity ?? dailyDayPoints.at(-1)?.equity ?? row?.equity);
+  const finalPnl = Number.isFinite(latestEquity) && Number.isFinite(baseEquity) ? latestEquity - baseEquity : Number(row?.pnl || 0);
+  const finalPct = baseEquity ? finalPnl / baseEquity * 100 : Number(row?.pnlPct || 0);
+  const valueCls = finalPnl > 0 ? 'up' : finalPnl < 0 ? 'down' : 'flat';
+  const signedAmount = `${finalPnl >= 0 ? '+' : ''}${fmtAmount(finalPnl)}`;
+  const signedPct = `${finalPct >= 0 ? '+' : ''}${fmtNumber(finalPct)}%`;
+  let curveSourcePoints = sessionDayPoints;
+  const hasSessionCurve = sessionDayPoints.length >= 2;
+  if (!hasSessionCurve && Number.isFinite(baseEquity) && baseEquity > 0 && Number.isFinite(latestEquity)) {
+    curveSourcePoints = [
+      {time: `${date} 09:30:00`, equity: baseEquity, pnlPct: 0},
+      {time: `${date} 15:00:00`, equity: latestEquity, pnlPct: finalPct},
+    ];
+  }
+  const curveSubPrefix = hasSessionCurve ? '' : '仅有收盘点 · ';
+  const closeBtn = '<button type="button" class="practice-calendar-day-curve-close" data-practice-calendar-action="clear-day" title="关闭曲线" aria-label="关闭曲线">x</button>';
+  const head = `<div class="practice-calendar-day-curve-head">
+    <div>
+      <div class="practice-calendar-day-curve-title">${esc(date.slice(5))} 当日收益曲线</div>
+      <div class="practice-calendar-day-curve-sub">${curveSubPrefix}0轴 ${prevPoint ? esc(String(prevPoint.time || '').slice(5, 16)) : '初始资金'}</div>
+    </div>
+    <div class="practice-calendar-day-curve-value ${valueCls}">${signedAmount} / ${signedPct}</div>
+    ${closeBtn}
+  </div>`;
+  if (curveSourcePoints.length < 2 || !Number.isFinite(baseEquity) || baseEquity <= 0) {
+    return `<div class="practice-calendar-day-curve" data-practice-calendar-curve>${head}<div class="practice-calendar-day-curve-empty">等待当日分时点</div></div>`;
+  }
+  const w = 360, h = 96, left = 8, right = 12, top = 8, bottom = 14;
+  const innerW = w - left - right;
+  const innerH = h - top - bottom;
+  const curvePoints = curveSourcePoints.map(point => {
+    const minute = clampedTradingClockMinuteOfDay(point.time);
+    const pct = (Number(point.equity) - baseEquity) / baseEquity * 100;
+    return {minute, pct};
+  }).filter(point => Number.isFinite(point.minute) && Number.isFinite(point.pct));
+  if (curvePoints.length < 2) {
+    return `<div class="practice-calendar-day-curve" data-practice-calendar-curve>${head}<div class="practice-calendar-day-curve-empty">等待当日分时点</div></div>`;
+  }
+  const values = curvePoints.map(point => point.pct);
+  let minV = Math.min(0, ...values);
+  let maxV = Math.max(0, ...values);
+  const pad = Math.max((maxV - minV) * 0.12, 0.08);
+  minV -= pad;
+  maxV += pad;
+  const yFor = value => top + (maxV - value) / Math.max(0.0001, maxV - minV) * innerH;
+  const xFor = minute => left + Math.max(0, Math.min(240, minute)) / 240 * innerW;
+  const path = curvePoints.map((point, idx) => `${idx ? 'L' : 'M'}${xFor(point.minute).toFixed(1)},${yFor(point.pct).toFixed(1)}`).join(' ');
+  const lastPoint = curvePoints.at(-1);
+  const markerX = xFor(lastPoint.minute).toFixed(1);
+  const markerY = yFor(lastPoint.pct).toFixed(1);
+  const zeroY = yFor(0).toFixed(1);
+  const stroke = finalPnl >= 0 ? '#ff4d4f' : '#39d98a';
+  const fill = finalPnl >= 0 ? 'rgba(255,77,79,.13)' : 'rgba(57,217,138,.13)';
+  const areaPath = `${path} L${markerX},${h - bottom} L${xFor(curvePoints[0].minute).toFixed(1)},${h - bottom} Z`;
+  return `<div class="practice-calendar-day-curve" data-practice-calendar-curve>${head}
+    <svg class="practice-calendar-day-curve-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(date)} 当日收益曲线">
+      <line x1="${left}" y1="${zeroY}" x2="${w - right}" y2="${zeroY}" stroke="rgba(203,213,225,.32)" stroke-width="1" stroke-dasharray="4 5"></line>
+      <path d="${areaPath}" fill="${fill}"></path>
+      <path d="${path}" fill="none" stroke="${stroke}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+      <circle cx="${markerX}" cy="${markerY}" r="4" fill="#f8fafc" stroke="${stroke}" stroke-width="2"></circle>
+      <text x="${left}" y="${h - 2}" fill="#7b8aa0" font-size="9">09:30</text>
+      <text x="${left + innerW / 2}" y="${h - 2}" fill="#7b8aa0" font-size="9" text-anchor="middle">11:30</text>
+      <text x="${w - right}" y="${h - 2}" fill="#7b8aa0" font-size="9" text-anchor="end">15:00</text>
+    </svg>
+  </div>`;
+}
+function renderPracticeCalendarModal() {
+  const root = practiceCalendarRoot();
+  if (!practiceCalendarOpen) {
+    root.innerHTML = '';
+    return;
+  }
+  const p = niuniuPracticeData || {};
+  const rows = buildPracticeCalendarRows(p.equity_history || [], p.daily_equity_history || [], Number(p.initial_cash || 1000000));
+  const latestMonth = monthKeyFromDate(rows.at(-1)?.date) || monthKeyFromDate(localDateKey());
+  if (!practiceCalendarMonth) practiceCalendarMonth = latestMonth;
+  const monthMatch = String(practiceCalendarMonth || latestMonth).match(/^(\d{4})-(\d{2})$/);
+  const year = monthMatch ? Number(monthMatch[1]) : new Date().getFullYear();
+  const month = monthMatch ? Number(monthMatch[2]) : new Date().getMonth() + 1;
+  practiceCalendarMonth = `${year}-${String(month).padStart(2, '0')}`;
+  const monthStart = new Date(year, month - 1, 1);
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const firstWeekday = (monthStart.getDay() + 6) % 7;
+  const rowByDate = new Map(rows.map(row => [row.date, row]));
+  const monthRows = rows.filter(row => row.date.startsWith(practiceCalendarMonth));
+  const monthPnl = monthRows.reduce((sum, row) => sum + (Number(row.pnl) || 0), 0);
+  const monthBase = monthRows.length ? monthRows[0].equity - monthRows[0].pnl : Number(p.initial_cash || 0);
+  const monthPct = monthBase ? monthPnl / monthBase * 100 : 0;
+  const winDays = monthRows.filter(row => Number(row.pnl) > 0).length;
+  const lossDays = monthRows.filter(row => Number(row.pnl) < 0).length;
+  const flatDays = Math.max(0, monthRows.length - winDays - lossDays);
+  const clsFor = value => Number(value) > 0 ? 'up' : Number(value) < 0 ? 'down' : 'flat';
+  const signedPct = value => `${Number(value) >= 0 ? '+' : ''}${fmtNumber(value)}%`;
+  const signedAmount = value => `${Number(value) >= 0 ? '+' : ''}${fmtAmount(value)}`;
+  const signedCellPct = value => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '--';
+    const digits = Math.abs(n) >= 1 ? 1 : 2;
+    return `${n >= 0 ? '+' : ''}${fmtNumber(n, digits)}%`;
+  };
+  const signedCellAmount = value => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '--';
+    const sign = n >= 0 ? '+' : '';
+    const abs = Math.abs(n);
+    if (abs >= 10000) return `${sign}${(n / 10000).toFixed(abs >= 100000 ? 1 : 2)}万`;
+    if (abs >= 100) return `${sign}${Math.round(n)}`;
+    return `${sign}${n.toFixed(1)}`;
+  };
+  const todayText = localDateKey();
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push('<div class="practice-calendar-day blank" aria-hidden="true"></div>');
+  for (let day = 1; day <= daysInMonth; day++) {
+    const date = `${practiceCalendarMonth}-${String(day).padStart(2, '0')}`;
+    const row = rowByDate.get(date);
+    const valueCls = row ? clsFor(row.pnl) : '';
+    const selectedCls = date === practiceCalendarSelectedDate ? 'selected' : '';
+    const dateAttr = row ? `data-practice-calendar-date="${esc(date)}"` : '';
+    const dayOfWeek = new Date(year, month - 1, day).getDay();
+    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+    const weekendCls = isWeekend && !row ? 'weekend' : '';
+    const isToday = date === todayText;
+    const weekendTodayMarker = isToday && isWeekend && !row ? '<span class="practice-calendar-today weekend-today">今</span>' : '';
+    const inlineTodayMarker = isToday && !weekendTodayMarker ? '<span class="practice-calendar-today">今</span>' : '';
+    const fullText = row ? `${date} ${signedPct(row.pnlPct)} / ${signedAmount(row.pnl)}` : `${date}${isWeekend ? ' 周末' : ''}`;
+    cells.push(`<div class="practice-calendar-day ${weekendCls} ${selectedCls} ${row ? `has-result ${valueCls}` : ''}" ${dateAttr} title="${esc(fullText)}" aria-label="${esc(fullText)}">
+      <div class="practice-calendar-date"><span>${day}</span>${inlineTodayMarker}</div>
+      ${row ? `<div class="practice-calendar-values">
+        <div class="practice-calendar-rate ${valueCls}">${signedCellPct(row.pnlPct)}</div>
+        <div class="practice-calendar-amount ${valueCls}">${signedCellAmount(row.pnl)}</div>
+      </div>` : '<div class="practice-calendar-no-data">--</div>'}
+      ${weekendTodayMarker}
+    </div>`);
+  }
+  const selectedCurve = practiceCalendarSelectedDate && practiceCalendarSelectedDate.startsWith(practiceCalendarMonth) && rowByDate.has(practiceCalendarSelectedDate)
+    ? renderPracticeCalendarDayCurve(practiceCalendarSelectedDate)
+    : '';
+  root.innerHTML = `<div class="practice-calendar-popover">
+    ${selectedCurve}
+    <div class="practice-calendar-card" role="dialog" aria-label="交易日历">
+      <div class="practice-calendar-head">
+        <div>
+          <div class="practice-calendar-title">交易日历 · ${year}年${String(month).padStart(2, '0')}月</div>
+          <div class="practice-calendar-sub">${monthRows.length ? `有记录 ${monthRows.length} 天 · 最近 ${esc(monthRows.at(-1).date)}` : '本月暂无收益记录'}</div>
+        </div>
+        <div class="practice-calendar-actions">
+          <button type="button" class="practice-calendar-icon-btn" data-practice-calendar-action="prev" title="上个月" aria-label="上个月">‹</button>
+          <button type="button" class="practice-calendar-icon-btn" data-practice-calendar-action="next" title="下个月" aria-label="下个月">›</button>
+          <button type="button" class="practice-calendar-icon-btn" data-practice-calendar-action="close" title="关闭" aria-label="关闭">x</button>
+        </div>
+      </div>
+      <div class="practice-calendar-summary">
+        <div class="practice-calendar-stat"><div class="practice-calendar-stat-label">本月收益</div><div class="practice-calendar-stat-value ${clsFor(monthPnl)}">${signedAmount(monthPnl)} / ${signedPct(monthPct)}</div></div>
+        <div class="practice-calendar-stat"><div class="practice-calendar-stat-label">盈利天数</div><div class="practice-calendar-stat-value up">${winDays}</div></div>
+        <div class="practice-calendar-stat"><div class="practice-calendar-stat-label">亏损/持平</div><div class="practice-calendar-stat-value">${lossDays} / ${flatDays}</div></div>
+      </div>
+      <div class="practice-calendar-grid-wrap">
+        <div class="practice-calendar-weekdays">${['一','二','三','四','五','六','日'].map((day, idx) => `<div class="practice-calendar-weekday ${idx >= 5 ? 'weekend' : ''}">${day}</div>`).join('')}</div>
+        <div class="practice-calendar-grid">${cells.join('')}</div>
+      </div>
+    </div>
+  </div>`;
+}
+function openPracticeCalendar(event) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  const p = niuniuPracticeData || {};
+  const rows = buildPracticeCalendarRows(p.equity_history || [], p.daily_equity_history || [], Number(p.initial_cash || 1000000));
+  practiceCalendarMonth = monthKeyFromDate(rows.at(-1)?.date) || monthKeyFromDate(localDateKey());
+  practiceCalendarSelectedDate = '';
+  practiceCalendarOpen = true;
+  renderPracticeCalendarModal();
+}
+function closePracticeCalendar() {
+  practiceCalendarOpen = false;
+  practiceCalendarSelectedDate = '';
+  renderPracticeCalendarModal();
+}
+function shiftPracticeCalendarMonth(delta) {
+  practiceCalendarMonth = shiftMonthKey(practiceCalendarMonth, delta);
+  practiceCalendarSelectedDate = '';
+  renderPracticeCalendarModal();
 }
 function renderPracticePanel() {
   const p = niuniuPracticeData || {};
@@ -3919,8 +4262,7 @@ function renderPracticePanel() {
         <div class="position-metric"><div class="position-label">成本/现价</div><div class="position-value combo">${costPriceText}</div></div>
         <div class="position-metric"><div class="position-label">盈亏</div><div class="position-value strong combo" style="color:${c}">${pnlText}</div></div>
         <div class="position-metric"><div class="position-label">实时涨幅</div><div class="position-value strong" style="color:${changeColor}">${changeText}</div></div>
-        <div class="position-metric"><div class="position-label">最低涨幅</div><div class="position-value strong" style="color:${lowColor}">${lowText}</div></div>
-        <div class="position-metric"><div class="position-label">最高涨幅</div><div class="position-value strong" style="color:${highColor}">${highText}</div></div>
+        <div class="position-metric"><div class="position-label">最低/最高</div><div class="position-value strong combo"><span style="color:${lowColor}">${lowText}</span><span style="color:#64748b">/</span><span style="color:${highColor}">${highText}</span></div></div>
         <div class="position-metric"><div class="position-label">今日收益</div><div class="position-value strong" style="color:${dayColor}">${todayText}</div></div>
         <div class="position-metric"><div class="position-label">市值</div><div class="position-value">${fmtAmount(x.market_value)}</div></div>
         <div class="position-metric"><div class="position-label">仓位占比</div><div class="position-value">${positionText}</div></div>
@@ -4124,18 +4466,19 @@ function renderIndicesPanel() {
     const aOpen = isAShareOpenNow();
     const usOpen = isUsOpenNow();
     const aIndexItems = marketItems('a_index', 'domestic');
+    const usIndexItems = marketItems('us_index', 'global');
     const aDaySession = isAShareDaySessionNow() && aIndexItems.length;
-    const showAIndexBeforeUsOpen = aIndexItems.length && !usOpen;
-    const sections = (aOpen || aDaySession || showAIndexBeforeUsOpen) ? [
+    const sections = (aOpen || aDaySession) ? [
       ['A股指数', aIndexItems],
       ['A股期货', marketItems('a_futures')],
       ['美股期货', marketItems('us_futures')],
       ['大宗商品', marketItems('commodity', 'commodity')],
     ] : usOpen ? [
-      ['美股指数', marketItems('us_index', 'global')],
+      ['美股指数', usIndexItems],
       ['A股期货', marketItems('a_futures')],
       ['大宗商品', marketItems('commodity', 'commodity')],
     ] : [
+      ['美股指数', usIndexItems],
       ['A股期货', marketItems('a_futures')],
       ['美股期货', marketItems('us_futures')],
       ['大宗商品', marketItems('commodity', 'commodity')],
@@ -4298,15 +4641,20 @@ function renderB1Screen() {
       const scoreBasis = item.score_basis || '';
       const tradeDiscipline = [item.position_hint, item.time_stop].filter(Boolean).join(' · ');
       const tradeReady = !!item.actionable && !hardBlockers.length && finalScore >= entryThreshold;
-      if (tradeReady) groupBadge = '<span style="background:rgba(52,211,153,.15);color:#34d399;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">交易达标</span>';
-      else if (hardBlockers.length) groupBadge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">硬过滤</span>';
-      else if (finalScore >= entryThreshold - 1.5) groupBadge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">等确认</span>';
-      else groupBadge = '<span style="background:rgba(148,163,184,.12);color:#94a3b8;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">仅观察</span>';
+      const industryLabel = item.industry || item.sector || item.board || '';
+      const groupBadgeBase = 'display:inline-flex;align-items:center;flex:0 0 auto;white-space:nowrap;line-height:1;background:rgba(52,211,153,.15);color:#34d399;padding:6px 10px;border-radius:999px;font-size:11px;font-weight:600';
+      if (tradeReady) groupBadge = `<span style="${groupBadgeBase}">交易达标</span>`;
+      else if (hardBlockers.length) groupBadge = `<span style="${groupBadgeBase};background:rgba(251,191,36,.15);color:#fbbf24">硬过滤</span>`;
+      else if (finalScore >= entryThreshold - 1.5) groupBadge = `<span style="${groupBadgeBase};background:rgba(251,191,36,.15);color:#fbbf24">等确认</span>`;
+      else groupBadge = `<span style="${groupBadgeBase};background:rgba(148,163,184,.12);color:#94a3b8">仅观察</span>`;
       html += `<div style="background:rgba(16,19,26,.86);border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 10px 36px rgba(0,0,0,.18)">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px">
-          <div><span style="font-weight:780;font-size:17px;color:#f8fafc">${esc(item.code)} ${esc(item.name)}</span>
-            <span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:999px;background:${sm.color}22;color:${sm.color};font-size:12px;border:1px solid ${sm.color}44">${esc(sm.label)}</span>
-            ${item.industry ? `<span style="display:inline-block;margin-left:6px;padding:2px 8px;border-radius:999px;background:rgba(124,92,255,.15);color:#c4b5fd;font-size:12px">${esc(item.industry)}</span>` : ''}
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px">
+          <div style="min-width:0;flex:1 1 auto">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0">
+              <span style="font-weight:780;font-size:17px;color:#f8fafc">${esc(item.code)} ${esc(item.name)}</span>
+              <span style="display:inline-flex;align-items:center;white-space:nowrap;padding:2px 8px;border-radius:999px;background:${sm.color}22;color:${sm.color};font-size:12px;border:1px solid ${sm.color}44">${esc(sm.label)}</span>
+            </div>
+            ${industryLabel ? `<div style="margin-top:8px"><span style="display:inline-flex;align-items:center;max-width:100%;white-space:nowrap;padding:2px 8px;border-radius:999px;background:rgba(124,92,255,.15);color:#c4b5fd;font-size:12px">${esc(industryLabel)}</span></div>` : ''}
           </div>
           ${groupBadge}
         </div>
@@ -5295,6 +5643,7 @@ function render() {
   }
   if (activeCategory === 'b1_screen') {
     renderB1Screen();
+    renderPracticeCalendarModal();
     return;
   }
   const records = filtered();
@@ -5366,6 +5715,33 @@ function renderCard(r) {
     </article>`;
 }
 document.addEventListener('click', event => {
+  const calendarAction = event.target.closest('[data-practice-calendar-action]');
+  if (calendarAction) {
+    event.preventDefault();
+    event.stopPropagation();
+    const action = calendarAction.dataset.practiceCalendarAction;
+    if (action === 'close') closePracticeCalendar();
+    else if (action === 'prev') shiftPracticeCalendarMonth(-1);
+    else if (action === 'next') shiftPracticeCalendarMonth(1);
+    else if (action === 'clear-day') {
+      practiceCalendarSelectedDate = '';
+      renderPracticeCalendarModal();
+    }
+    return;
+  }
+  const calendarDate = event.target.closest('[data-practice-calendar-date]');
+  if (calendarDate) {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextDate = calendarDate.dataset.practiceCalendarDate || '';
+    practiceCalendarSelectedDate = practiceCalendarSelectedDate === nextDate ? '' : nextDate;
+    renderPracticeCalendarModal();
+    return;
+  }
+  if (practiceCalendarOpen && !event.target.closest('.practice-calendar-card') && !event.target.closest('[data-practice-calendar-curve]') && !event.target.closest('.practice-calendar-open-btn')) {
+    closePracticeCalendar();
+    return;
+  }
   const viewerAction = event.target.closest('[data-x-viewer-action]');
   if (viewerAction) {
     event.preventDefault();
@@ -5404,6 +5780,11 @@ document.addEventListener('click', event => {
   }
 });
 document.addEventListener('keydown', event => {
+  if (practiceCalendarOpen && event.key === 'Escape') {
+    event.preventDefault();
+    closePracticeCalendar();
+    return;
+  }
   if (!xImageViewer.url) return;
   if (event.key === 'Escape') {
     event.preventDefault();

@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from a_share_calendar import is_a_share_trading_day
 from niuone_paths import get_dashboard_home
 
 DASHBOARD_HOME = get_dashboard_home(Path(__file__).resolve().parents[1])
@@ -25,6 +26,13 @@ STATE_FILE = Path(
         DASHBOARD_HOME / "cron" / "output" / "niuniu_practice_portfolio.json",
     )
 ).expanduser()
+
+
+def _is_trading_day_text(value: str) -> bool:
+    try:
+        return is_a_share_trading_day(datetime.strptime(str(value or "")[:10], "%Y-%m-%d"))
+    except Exception:
+        return True
 
 
 def _connect() -> sqlite3.Connection:
@@ -217,6 +225,9 @@ def record_daily_equity(pt: dict):
     try:
         conn = _connect()
         date = pt.get("time", "")[:10]
+        if not _is_trading_day_text(date):
+            conn.close()
+            return
         conn.execute("""
             INSERT OR REPLACE INTO daily_equity (date, equity, cash, market_value, pnl_pct, created_at)
             VALUES (?, ?, ?, ?, ?, ?)

@@ -13,7 +13,8 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 SSL_CTX = ssl._create_unverified_context()
@@ -43,13 +44,31 @@ SINA_DEFS = [
 KLINE_URL = "https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={qt_code},day,,,60,qfq"
 MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={qt_code}"
 SINA_GLOBAL_MINUTE_URL = "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20t=/GlobalFuturesService.getGlobalFuturesMinLine?symbol={symbol}"
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d&includePrePost=false"
+SINA_US_MINUTE_URL = "https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var%20t=/US_MinKService.getMinK?symbol={symbol}&type=1"
+EASTMONEY_US_MINUTE_URL = "https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f17&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&iscca=0&ndays=1"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d&includePrePost=true"
 YAHOO_US_INDEX_SYMBOLS = {
     "usDJI": "^DJI",
     "usIXIC": "^IXIC",
     "usINX": "^GSPC",
 }
+SINA_US_INDEX_CODES = {
+    "usDJI": "gb_dji",
+    "usIXIC": "gb_ixic",
+    "usINX": "gb_inx",
+}
+SINA_US_MINUTE_SYMBOLS = {
+    "usDJI": ".DJI",
+    "usIXIC": ".IXIC",
+    "usINX": ".INX",
+}
+EASTMONEY_US_INDEX_SECIDS = {
+    "usDJI": "100.DJIA",
+    "usIXIC": "100.NDX",
+    "usINX": "100.SPX",
+}
 NY_TZ = ZoneInfo("America/New_York")
+CN_TZ = ZoneInfo("Asia/Shanghai")
 
 _CACHE = {"ts": 0, "data": None}
 CACHE_TTL = 45
@@ -123,6 +142,28 @@ def _fmt_time(raw):
     return raw
 
 
+def _quote_from_qt_parts(code, parts):
+    if len(parts) < 33:
+        return None
+    try:
+        price = float(parts[3] or 0)
+        prev_close = float(parts[4] or 0)
+        change = float(parts[31] or 0) if len(parts) > 31 else (price - prev_close)
+        change_pct = float(parts[32] or 0) if len(parts) > 32 else ((price - prev_close) / prev_close * 100 if prev_close else 0)
+        return {
+            "name": parts[1] or code,
+            "price": price,
+            "prev_close": prev_close,
+            "change": round(change, 2),
+            "change_pct": round(change_pct, 2),
+            "high": float(parts[33] or 0) if len(parts) > 33 else None,
+            "low": float(parts[34] or 0) if len(parts) > 34 else None,
+            "time": _fmt_time(parts[30] if len(parts) > 30 else ""),
+        }
+    except Exception:
+        return None
+
+
 def _parse_qt(raw):
     results = {}
     for line in raw.strip().splitlines():
@@ -131,25 +172,9 @@ def _parse_qt(raw):
             continue
         code, fields = m.group(1), m.group(2)
         parts = fields.rstrip('";').split("~")
-        if len(parts) < 33:
-            continue
-        try:
-            price = float(parts[3] or 0)
-            prev_close = float(parts[4] or 0)
-            change = float(parts[31] or 0) if len(parts) > 31 else (price - prev_close)
-            change_pct = float(parts[32] or 0) if len(parts) > 32 else ((price - prev_close) / prev_close * 100 if prev_close else 0)
-            results[code] = {
-                "name": parts[1] or code,
-                "price": price,
-                "prev_close": prev_close,
-                "change": round(change, 2),
-                "change_pct": round(change_pct, 2),
-                "high": float(parts[33] or 0) if len(parts) > 33 else None,
-                "low": float(parts[34] or 0) if len(parts) > 34 else None,
-                "time": _fmt_time(parts[30] if len(parts) > 30 else ""),
-            }
-        except Exception:
-            continue
+        quote = _quote_from_qt_parts(code, parts)
+        if quote:
+            results[code] = quote
     return results
 
 
@@ -205,6 +230,44 @@ def _parse_sina(raw):
     return results
 
 
+def _parse_sina_us_indices(raw):
+    results = {}
+    reverse = {v: k for k, v in SINA_US_INDEX_CODES.items()}
+    for line in raw.strip().splitlines():
+        m = re.match(r'var hq_str_([^=]+)="(.*)";?', line.strip())
+        if not m:
+            continue
+        sina_code, fields = m.group(1), m.group(2)
+        code = reverse.get(sina_code)
+        if not code:
+            continue
+        p = fields.rstrip('";').split(',')
+        if len(p) < 5:
+            continue
+        try:
+            price = float(p[1] or 0)
+            change_pct = float(p[2] or 0)
+            change = float(p[4] or 0)
+            prev_close = price - change if price and change else 0
+            results[code] = {
+                "name": p[0] or code,
+                "price": price,
+                "prev_close": prev_close,
+                "change": round(change, 2),
+                "change_pct": round(change_pct, 2),
+                "high": float(p[6] or 0) if len(p) > 6 else None,
+                "low": float(p[7] or 0) if len(p) > 7 else None,
+                "time": p[3] if len(p) > 3 else "",
+            }
+        except Exception:
+            continue
+    return results
+
+
+def _sina_us_index_query():
+    return _sina_query(list(SINA_US_INDEX_CODES.values()))
+
+
 def _trade_minute_from_hhmm(hhmm):
     raw = str(hhmm or "").replace(":", "")
     if len(raw) < 4 or not raw[:4].isdigit():
@@ -223,15 +286,9 @@ def _trade_minute_from_hhmm(hhmm):
     return 120 + (minutes - pm_start)
 
 
-def _fetch_minute_line(qt_code):
-    """Fetch intraday minute line for A-share indices.
-
-    The old dashboard sparkline used daily K closes, so the tiny line looked
-    static during the session. Tencent minute/query returns the current trading
-    day's per-minute points and updates as time advances.
-    """
-    if not qt_code.startswith(("sh", "sz")):
-        return []
+@lru_cache(maxsize=32)
+def _fetch_tencent_minute_snapshot(qt_code):
+    """Fetch Tencent minute payload for A-share and US cash indices."""
     try:
         raw = _open(MINUTE_URL.format(qt_code=qt_code), timeout=8, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}).decode("utf-8", "replace")
         data = json.loads(raw)
@@ -248,18 +305,43 @@ def _fetch_minute_line(qt_code):
                 if len(parts) < 2:
                     continue
                 hhmm, price_raw = parts[0], parts[1]
-            minute = _trade_minute_from_hhmm(hhmm)
-            if minute is None:
+            minute = _trade_minute_from_hhmm(hhmm) if qt_code.startswith(("sh", "sz")) else None
+            if qt_code.startswith(("sh", "sz")) and minute is None:
                 continue
             try:
                 price = float(price_raw)
             except Exception:
                 continue
             if price > 0:
-                points.append({"time": str(hhmm), "minute": minute, "price": price})
-        return points
+                point = {"time": str(hhmm), "price": price}
+                if minute is not None:
+                    point["minute"] = minute
+                points.append(point)
+        quote = None
+        qt_parts = (((node.get("qt") or {}).get(qt_code)) if isinstance(node.get("qt"), dict) else None) or []
+        if qt_parts:
+            quote = _quote_from_qt_parts(qt_code, list(qt_parts))
+        return {"minute_line": points, "quote": quote or {}}
     except Exception:
+        return {"minute_line": [], "quote": {}}
+
+
+def _fetch_minute_line(qt_code):
+    """Fetch intraday minute line for A-share and US cash indices.
+
+    The old dashboard sparkline used daily K closes, so the tiny line looked
+    static during the session. Tencent minute/query returns the current trading
+    day's per-minute points and updates as time advances.
+    """
+    if not qt_code.startswith(("sh", "sz", "us")):
         return []
+    return _fetch_tencent_minute_snapshot(qt_code).get("minute_line") or []
+
+
+def _fetch_minute_quote(qt_code):
+    if not qt_code.startswith("us"):
+        return {}
+    return _fetch_tencent_minute_snapshot(qt_code).get("quote") or {}
 
 
 def _fetch_sina_global_minute_line(symbol):
@@ -320,6 +402,79 @@ def _fetch_yahoo_minute_line(symbol):
         return []
 
 
+def _fetch_sina_us_minute_line(symbol):
+    """Fetch US cash-index minute line from Sina, rejecting stale samples."""
+    if not symbol:
+        return []
+    try:
+        raw = _open(
+            SINA_US_MINUTE_URL.format(symbol=urllib.parse.quote(symbol, safe="")),
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"},
+        ).decode("utf-8", "replace")
+        m = re.search(r"var\s+\w+\s*=\s*\((.*)\);?\s*$", raw, re.S)
+        if not m:
+            return []
+        rows = json.loads(m.group(1))
+        if not isinstance(rows, list) or not rows:
+            return []
+        parsed = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                dt = datetime.strptime(str(row.get("d") or ""), "%Y-%m-%d %H:%M:%S")
+                price = float(row.get("c") or 0)
+            except Exception:
+                continue
+            if price > 0:
+                parsed.append((dt, price))
+        if len(parsed) < 2:
+            return []
+        latest_day = max(dt.date() for dt, _ in parsed)
+        if latest_day < (datetime.now(NY_TZ).date() - timedelta(days=7)):
+            return []
+        points = [
+            {"time": dt.strftime("%H:%M"), "price": price}
+            for dt, price in parsed
+            if dt.date() == latest_day
+        ]
+        return points if len(points) >= 2 else []
+    except Exception:
+        return []
+
+
+def _fetch_eastmoney_us_minute_line(qt_code):
+    """Fetch real US cash-index minute line from Eastmoney trends2."""
+    secid = EASTMONEY_US_INDEX_SECIDS.get(qt_code)
+    if not secid:
+        return []
+    try:
+        raw = _open(
+            EASTMONEY_US_MINUTE_URL.format(secid=urllib.parse.quote(secid, safe=".")),
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
+        ).decode("utf-8", "replace")
+        payload = json.loads(raw)
+        trends = ((payload.get("data") or {}).get("trends")) or []
+        points = []
+        for row in trends:
+            parts = str(row or "").split(",")
+            if len(parts) < 2:
+                continue
+            try:
+                dt_cn = datetime.strptime(parts[0], "%Y-%m-%d %H:%M").replace(tzinfo=CN_TZ)
+                price = float(parts[1])
+            except Exception:
+                continue
+            if price > 0:
+                dt_ny = dt_cn.astimezone(NY_TZ)
+                points.append({"time": dt_ny.strftime("%H:%M"), "price": price})
+        return points if len(points) >= 2 else []
+    except Exception:
+        return []
+
+
 def _fetch_kline(qt_code, count=45):
     # 只给 A股指数拉日K，海外/期货接口不共用这个格式
     if not qt_code.startswith(("sh", "sz")):
@@ -340,14 +495,27 @@ def fetch_indices_data():
 
     qt_codes = [code for _, code, _, _, _ in INDEX_DEFS]
     qt_data = _parse_qt(_qt_query(qt_codes))
+    sina_us_index_data = _parse_sina_us_indices(_sina_us_index_query())
     sina_data = _parse_sina(_sina_query([code for _, code, _, _, _, _ in SINA_DEFS]))
 
     def build_index_item(defn):
         key, code, name, group, market_type = defn
         q = qt_data.get(code, {})
+        if market_type == "us_index" and not q:
+            q = _fetch_minute_quote(code) or sina_us_index_data.get(code, {})
         minute_line = _fetch_minute_line(code)
-        if not minute_line and market_type == "us_index":
-            minute_line = _fetch_yahoo_minute_line(YAHOO_US_INDEX_SYMBOLS.get(code, ""))
+        if len(minute_line) < 2 and market_type == "us_index":
+            eastmoney_minute_line = _fetch_eastmoney_us_minute_line(code)
+            if len(eastmoney_minute_line) >= 2:
+                minute_line = eastmoney_minute_line
+        if len(minute_line) < 2 and market_type == "us_index":
+            yahoo_minute_line = _fetch_yahoo_minute_line(YAHOO_US_INDEX_SYMBOLS.get(code, ""))
+            if len(yahoo_minute_line) >= 2:
+                minute_line = yahoo_minute_line
+        if len(minute_line) < 2 and market_type == "us_index":
+            sina_minute_line = _fetch_sina_us_minute_line(SINA_US_MINUTE_SYMBOLS.get(code, ""))
+            if len(sina_minute_line) >= 2:
+                minute_line = sina_minute_line
         minute_line = _compact_minute_line(minute_line)
         sparkline = [] if minute_line else [_compact_price(p) for p in _downsample(_fetch_kline(code), MINUTE_LINE_MAX_POINTS)]
         return {

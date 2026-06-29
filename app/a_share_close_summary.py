@@ -357,6 +357,47 @@ def write_report_pdf(text: str) -> Path | None:
     return None
 
 
+def build_decision_guidance(
+    *,
+    mood: str,
+    up: int,
+    down: int,
+    limit_up: int,
+    limit_down: int,
+    hot_funds: list[dict[str, Any]],
+    inflow_top: list[dict[str, Any]],
+) -> list[str]:
+    top_hot = "、".join(r.get("industry", "") for r in hot_funds[:3] if r.get("industry")) or "强势板块待确认"
+    top_in = "、".join(r.get("industry", "") for r in inflow_top[:3] if r.get("industry")) or top_hot
+    if "空头占优" in mood or (down > up * 1.25 and limit_down >= max(limit_up, 3)):
+        risk = "防守"
+        pace = "盘后不新增计划仓；次日只卖不买优先，除非竞价强修复并放量确认"
+        buy = "候选股降级为观察池，次日先看风险票是否止跌和跌停数量是否收缩"
+        sell = "复盘标记破位、亏损扩大、高位退潮持仓，次日按可卖数量优先处理"
+    elif "结构性偏弱" in mood or down >= up:
+        risk = "谨慎"
+        pace = "次日计划最多2-3只；开盘后先观察15分钟，单轮新开仓≤1笔"
+        buy = f"只保留资金净流入且板块联动方向：{top_in}；无承接不买"
+        sell = "弱于板块、跌破BBI/白线或尾盘回落的持仓列入减仓清单"
+    elif "多头占优" in mood:
+        risk = "进攻"
+        pace = "次日可在确认溢价后扩到4-5只；仍保留午后调仓空间"
+        buy = f"优先跟踪热门板块：{top_hot}；次日竞价有溢价且回踩不破再执行"
+        sell = "强势持仓继续跟踪，放量滞涨或回撤触发保护时兑现"
+    else:
+        risk = "平衡"
+        pace = "次日计划最多3-4只；先看竞价溢价和主线延续，再决定是否补仓"
+        buy = f"围绕资金净流入方向筛选：{top_in}；独立冲高和弱分支剔除"
+        sell = "持仓按强弱分层，低效仓位给更强主线让位"
+    return [
+        "🎯 **今日买卖指引**",
+        f"· 风险级别：{risk}",
+        f"· 开仓节奏：{pace}",
+        f"· 买入指引：{buy}",
+        f"· 卖出/风控：{sell}",
+    ]
+
+
 def build_report() -> str:
     if not is_trading_day_guess(NOW.date()):
         return ""
@@ -457,6 +498,17 @@ def build_report() -> str:
             lines.append(f"`{r['code']} {r['name']}` {r['pct']:+.2f}% | {fmt_amt_yuan(r['amount'])}")
     else:
         lines.append("数据暂不可用")
+    lines.append("")
+
+    lines.extend(build_decision_guidance(
+        mood=mood,
+        up=up,
+        down=down,
+        limit_up=limit_up,
+        limit_down=limit_down,
+        hot_funds=hot_funds,
+        inflow_top=inflow_top,
+    ))
     lines.append("")
 
     lines.append("💡 **操作提示**")

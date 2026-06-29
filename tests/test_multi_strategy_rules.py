@@ -56,6 +56,43 @@ class MultiStrategyRuleTests(unittest.TestCase):
 
         self.assertEqual(screen.select_trade_candidates([blocked, good]), [good])
 
+    def test_extract_industry_from_individual_info_rows(self):
+        rows = [
+            {"item": "股票简称", "value": "测试股份"},
+            {"item": "行业", "value": "半导体行业"},
+        ]
+
+        self.assertEqual(screen.extract_industry_from_individual_info(rows), "半导体")
+        self.assertEqual(
+            screen.extract_industry_from_individual_info([{"所属板块": "消费电子板块"}]),
+            "消费电子",
+        )
+
+    def test_extract_industry_from_cninfo_prefers_sw_short_name(self):
+        rows = [
+            {"分类标准": "中证行业分类标准", "行业中类": "游戏", "变更日期": "2021-12-17"},
+            {"分类标准": "申银万国行业分类标准", "行业中类": "游戏Ⅲ", "变更日期": "2021-07-30"},
+        ]
+
+        self.assertEqual(screen.extract_industry_from_cninfo_change(rows), "游戏")
+
+    def test_annotate_candidate_industries_adds_sector_alias_once(self):
+        display = [{"code": "600001", "name": "测试A"}]
+        trade = [{"code": "600001", "name": "测试A"}]
+        calls: list[str] = []
+
+        def fake_lookup(code: str) -> str:
+            calls.append(code)
+            return "银行板块"
+
+        screen.annotate_candidate_industries(display, trade, lookup=fake_lookup)
+
+        self.assertEqual(calls, ["600001"])
+        self.assertEqual(display[0]["industry"], "银行")
+        self.assertEqual(display[0]["sector"], "银行")
+        self.assertEqual(trade[0]["industry"], "银行")
+        self.assertEqual(trade[0]["sector"], "银行")
+
     def test_persona_strategies_are_registered(self):
         old = os.environ.get(screen.PERSONA_STRATEGY_ENV)
         try:

@@ -343,6 +343,73 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("601999", state["positions"])
         self.assertIn("持仓已达", decision["execution_blocked_reason"])
 
+    def test_market_guidance_derives_morning_position_pace(self):
+        reports = [{
+            "title": "A股竞价盘前总结",
+            "time": "2026-06-24 09:25:00",
+            "content": "\n".join([
+                "🎯 **今日买卖指引**",
+                "· 风险级别：平衡",
+                "· 开仓节奏：上午最多2-3只；先试错1笔",
+            ]),
+        }]
+
+        ctx = trader.derive_market_strategy_context(reports, datetime(2026, 6, 24, 10, 0, 0))
+
+        self.assertEqual(ctx["tone"], "balanced")
+        self.assertEqual(ctx["max_open_positions"], min(3, trader.MAX_OPEN_POSITIONS))
+        self.assertEqual(ctx["max_new_buys_per_decision"], 1)
+        self.assertIn("午盘前", ctx["session_note"])
+
+    def test_execute_actions_uses_market_guidance_position_cap(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        original_market_context = trader.current_market_strategy_context
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "上午连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "新股", "source": "test"}
+            trader.current_market_strategy_context = lambda now=None: {
+                "tone_label": "平衡",
+                "max_open_positions": 3,
+                "max_new_buys_per_decision": 1,
+                "max_total_position_pct": trader.MAX_TOTAL_POSITION_PCT,
+                "min_cash_reserve_pct": trader.MIN_CASH_RESERVE_PCT,
+                "buy_budget_multiplier": 1.0,
+                "allow_new_buys": True,
+            }
+            positions = {
+                f"60010{i}": {
+                    "code": f"60010{i}",
+                    "name": f"持仓{i}",
+                    "qty": 100,
+                    "avg_cost": 10.0,
+                    "last_price": 10.0,
+                }
+                for i in range(3)
+            }
+            state = {"cash": 100000.0, "positions": positions, "trade_log": []}
+            decision = {"actions": [{"action": "BUY", "code": "601999", "name": "新股", "shares": 1000}]}
+            candidates = [{
+                "code": "601999",
+                "name": "新股",
+                "best_strategy": "b3_accelerate",
+                "best_score": 10.0,
+                "entry_threshold": 8.5,
+                "distance_pct": 1.0,
+                "actionable": True,
+                "hard_blockers": [],
+            }]
+
+            executed = trader.execute_actions(state, decision, candidates, True, "上午连续竞价交易时段")
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+            trader.current_market_strategy_context = original_market_context
+
+        self.assertEqual(executed, [])
+        self.assertNotIn("601999", state["positions"])
+        self.assertIn("盘面动态持仓已达3只上限", decision["execution_blocked_reason"])
+
     def test_morning_schedule_completed_during_lunch_defers_to_13(self):
         due_at = trader.deferred_execution_due_at(
             "2026-06-25 11:20",
@@ -954,6 +1021,55 @@ class SellStrategyRuleTests(unittest.TestCase):
         )
         self.assertEqual([p["time"] for p in state["daily_equity_history"]], ["2026-06-25 15:00:00"])
 
+    def test_non_trading_day_equity_points_are_pruned(self):
+        state = {
+            "equity_history": [
+                {"time": "2026-06-26 15:00:00", "equity": 100000.0},
+                {"time": "2026-06-27 11:29:00", "equity": 100500.0},
+            ],
+            "daily_equity_history": [
+                {"time": "2026-06-26 15:00:00", "equity": 100000.0},
+                {"time": "2026-06-27 11:29:00", "equity": 100500.0},
+            ],
+        }
+
+        changed = trader.prune_non_trading_day_equity_points(state)
+
+        self.assertTrue(changed)
+        self.assertEqual([p["time"] for p in state["equity_history"]], ["2026-06-26 15:00:00"])
+        self.assertEqual([p["time"] for p in state["daily_equity_history"]], ["2026-06-26 15:00:00"])
+
+    def test_intraday_curve_rebuild_skips_non_trading_day(self):
+        state = {
+            "cash": 1000.0,
+            "initial_cash": 1000.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "qty": 100,
+                    "avg_cost": 10.0,
+                    "last_price": 10.0,
+                    "intraday": {"points": [
+                        {"time": "09:30", "minute": 0, "price": 10.0},
+                        {"time": "11:29", "minute": 119, "price": 10.5},
+                    ]},
+                }
+            },
+            "trade_log": [],
+            "equity_history": [{"time": "2026-06-27 11:29:00", "equity": 2050.0}],
+            "daily_equity_history": [{"time": "2026-06-27 11:29:00", "equity": 2050.0}],
+        }
+
+        rebuilt = trader.rebuild_intraday_equity_curve(
+            state,
+            today="2026-06-27",
+            now=datetime(2026, 6, 27, 11, 29, 0),
+        )
+
+        self.assertFalse(rebuilt)
+        self.assertEqual(state["equity_history"], [])
+        self.assertEqual(state["daily_equity_history"], [])
+
     def test_daily_equity_history_is_normalized_to_latest_point_per_day(self):
         state = {
             "daily_equity_history": [
@@ -970,6 +1086,30 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(
             [(p["time"], p["equity"]) for p in state["daily_equity_history"]],
             [("2026-06-25 15:00:00", 101000.0), ("2026-06-26 10:00:00", 100500.0)],
+        )
+
+    def test_equity_history_is_sorted_by_time(self):
+        state = {
+            "equity_history": [
+                {"time": "2026-06-26 10:00:00", "equity": 100500.0},
+                {"time": "2026-06-25 15:00:00", "equity": 101000.0},
+            ],
+            "daily_equity_history": [
+                {"time": "2026-06-26 10:00:00", "equity": 100500.0},
+                {"time": "2026-06-25 15:00:00", "equity": 101000.0},
+            ],
+        }
+
+        changed = trader.sort_equity_history(state)
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [p["time"] for p in state["equity_history"]],
+            ["2026-06-25 15:00:00", "2026-06-26 10:00:00"],
+        )
+        self.assertEqual(
+            [p["time"] for p in state["daily_equity_history"]],
+            ["2026-06-25 15:00:00", "2026-06-26 10:00:00"],
         )
 
     def test_today_sold_stocks_are_aggregated_with_quote_delta(self):

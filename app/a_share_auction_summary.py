@@ -381,6 +381,51 @@ def write_report_pdf(text: str) -> Path | None:
     return None
 
 
+def build_decision_guidance(
+    *,
+    mood: str,
+    zt_count: int,
+    dt_count: int,
+    fund_hot: list[dict[str, Any]],
+    fund_in_top: list[dict[str, Any]],
+    composite_top: list[tuple[Any, dict[str, Any], dict[str, Any]]],
+) -> list[str]:
+    hot_dirs = "、".join(r.get("industry", "") for r in fund_hot[:3] if r.get("industry"))
+    if not hot_dirs and composite_top:
+        hot_dirs = "、".join(fr.get("industry", "") for _, fr, _ in composite_top[:3] if fr.get("industry"))
+    if not hot_dirs:
+        hot_dirs = "强势方向待开盘确认"
+    inflow_dirs = "、".join(r.get("industry", "") for r in fund_in_top[:3] if r.get("industry")) or hot_dirs
+
+    if "偏弱" in mood or dt_count > max(zt_count, 0):
+        risk = "防守"
+        pace = "上午只观察或卖出，原则上不新开仓；先等跌停/风险端收缩"
+        buy = "竞价强股只列观察，不追高开和独苗，至少等开盘15分钟承接确认"
+        sell = "已有弱仓若低开不修复、跌破BBI/白线或板块掉队，优先按纪律处理"
+    elif "进攻较强" in mood:
+        risk = "进攻"
+        pace = "上午最多2-3只，保留至少3个仓位给午后；单轮新开仓≤2笔"
+        buy = f"优先看封单/资金共振方向：{hot_dirs}；只买回封、回踩不破和板块联动"
+        sell = "弱于主线或开盘冲高回落的持仓可调出，给强主线留现金"
+    elif "一定进攻" in mood:
+        risk = "平衡"
+        pace = "上午最多2-3只；先试错1笔，10:30后再看是否加仓"
+        buy = f"围绕资金流入方向：{inflow_dirs}；高开过度和撤单明显的不买"
+        sell = "开盘不及预期、板块承接差的持仓先降风险"
+    else:
+        risk = "谨慎"
+        pace = "上午最多2只；本轮新开仓≤1笔，主要等待开盘5-15分钟确认"
+        buy = f"只看板块联动和资金净流入方向：{inflow_dirs}；独苗不追"
+        sell = "弱势持仓优先控仓，避免为了补票把上午仓位打满"
+    return [
+        "🎯 **今日买卖指引**",
+        f"· 风险级别：{risk}",
+        f"· 开仓节奏：{pace}",
+        f"· 买入指引：{buy}",
+        f"· 卖出/风控：{sell}",
+    ]
+
+
 def build_report() -> str:
     if not is_trading_day_guess(NOW.date()):
         return ""
@@ -595,6 +640,16 @@ def build_report() -> str:
         lines.append("· 看涨幅靠前+上涨家数占优板块，别追独苗")
     else:
         lines.append("· 强信号不密集，等开盘5-15分钟确认")
+    lines.append("")
+
+    lines.extend(build_decision_guidance(
+        mood=mood,
+        zt_count=zt_count,
+        dt_count=dt_count,
+        fund_hot=fund_hot,
+        fund_in_top=fund_in_top,
+        composite_top=composite_top,
+    ))
     lines.append("")
 
     lines.append("⚠️ **风险**")

@@ -17,7 +17,15 @@ class NiuoneDashboardArchiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
             env["DASHBOARD_HOME"] = tmp
-            sample = "牛牛大王，A股盘后总结\n\n市场情绪：测试。"
+            sample = """牛牛大王，A股盘后总结
+
+市场情绪：测试。
+
+🎯 **今日买卖指引**
+· 风险级别：谨慎
+· 开仓节奏：午后最多2-3只
+· 买入指引：只看主线
+"""
             code = f"""
 import importlib.util, json, sys
 from datetime import datetime, timezone
@@ -38,6 +46,7 @@ print(json.dumps({{
   'record_source_type': record.get('source_type'),
   'record_raw_path': record.get('raw_path'),
   'record_contains_sample': '市场情绪：测试' in record.get('content', ''),
+  'decision_guidance': (record.get('metadata') or {{}}).get('decision_guidance'),
 }}, ensure_ascii=False))
 """
             out = subprocess.check_output([sys.executable, "-c", textwrap.dedent(code)], env=env, text=True)
@@ -50,6 +59,7 @@ print(json.dumps({{
             self.assertEqual(data["record_source_type"], "market_monitor")
             self.assertEqual(data["record_raw_path"], str(expected_path))
             self.assertTrue(data["record_contains_sample"])
+            self.assertIn("风险级别：谨慎", data["decision_guidance"])
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ class IndicesDashboardApiTests(unittest.TestCase):
         mod._CACHE = {"ts": 0, "data": None}
         mod._qt_query = lambda codes: ""
         mod._sina_query = lambda codes: ""
+        mod._sina_us_index_query = lambda: ""
+        mod._fetch_minute_quote = lambda code: {}
 
         def minute_line(code):
             return [{"time": f"10:{i % 60:02d}", "minute": i, "price": 1000 + i} for i in range(120)]
@@ -34,7 +36,9 @@ class IndicesDashboardApiTests(unittest.TestCase):
             return [{"time": f"{i // 60:02d}:{i % 60:02d}", "price": 2000 + i} for i in range(240)]
 
         mod._fetch_minute_line = minute_line
+        mod._fetch_eastmoney_us_minute_line = lambda code: []
         mod._fetch_yahoo_minute_line = lambda symbol: minute_line(symbol)
+        mod._fetch_sina_us_minute_line = lambda symbol: []
         mod._fetch_sina_global_minute_line = global_line
         mod._fetch_kline = lambda code: [float(i) for i in range(80)]
 
@@ -56,8 +60,12 @@ class IndicesDashboardApiTests(unittest.TestCase):
         mod._CACHE = {"ts": 0, "data": None}
         mod._qt_query = lambda codes: ""
         mod._sina_query = lambda codes: ""
+        mod._sina_us_index_query = lambda: ""
+        mod._fetch_minute_quote = lambda code: {}
         mod._fetch_minute_line = lambda code: []
+        mod._fetch_eastmoney_us_minute_line = lambda code: []
         mod._fetch_yahoo_minute_line = lambda symbol: []
+        mod._fetch_sina_us_minute_line = lambda symbol: []
         mod._fetch_sina_global_minute_line = lambda symbol: []
         mod._fetch_kline = lambda code: [float(i) for i in range(20)]
 
@@ -67,6 +75,91 @@ class IndicesDashboardApiTests(unittest.TestCase):
         self.assertIn("market_groups", payload)
         self.assertEqual(len(payload["groups"]["domestic"]), 4)
         self.assertLess(time.time() - time.mktime(time.strptime(payload["generated_at"], "%Y-%m-%d %H:%M:%S")), 10)
+
+    def test_us_index_uses_tencent_minute_quote_and_yahoo_line(self):
+        mod = load_module()
+        mod.MINUTE_LINE_MAX_POINTS = 10
+        mod.INCLUDE_LEGACY_GROUPS = False
+        mod._CACHE = {"ts": 0, "data": None}
+        mod._qt_query = lambda codes: ""
+        mod._sina_query = lambda codes: ""
+        mod._sina_us_index_query = lambda: ""
+        mod._fetch_minute_quote = lambda code: {
+            "price": 52260.22,
+            "prev_close": 51876.11,
+            "change": 384.11,
+            "change_pct": 0.74,
+            "time": "2026-06-29 14:07:00",
+        } if code == "usDJI" else {}
+        mod._fetch_minute_line = lambda code: [{"time": "14:07", "price": 52260.22}] if code == "usDJI" else []
+        mod._fetch_eastmoney_us_minute_line = lambda code: []
+        mod._fetch_yahoo_minute_line = lambda symbol: [
+            {"time": "09:30", "price": 51995.14},
+            {"time": "09:31", "price": 52010.0},
+            {"time": "14:07", "price": 52260.22},
+        ] if symbol == "^DJI" else []
+        mod._fetch_sina_us_minute_line = lambda symbol: []
+        mod._fetch_sina_global_minute_line = lambda symbol: []
+        mod._fetch_kline = lambda code: []
+
+        payload = mod.fetch_indices_data()
+        dow = next(item for item in payload["items"] if item["key"] == "dow")
+
+        self.assertEqual(dow["price"], 52260.22)
+        self.assertEqual(dow["prev_close"], 51876.11)
+        self.assertEqual(len(dow["minute_line"]), 3)
+        self.assertEqual(dow["sparkline"], [])
+
+    def test_us_index_can_fallback_to_sina_minute_line(self):
+        mod = load_module()
+        mod.MINUTE_LINE_MAX_POINTS = 10
+        mod.INCLUDE_LEGACY_GROUPS = False
+        mod._CACHE = {"ts": 0, "data": None}
+        mod._qt_query = lambda codes: ""
+        mod._sina_query = lambda codes: ""
+        mod._sina_us_index_query = lambda: ""
+        mod._fetch_minute_quote = lambda code: {}
+        mod._fetch_minute_line = lambda code: []
+        mod._fetch_eastmoney_us_minute_line = lambda code: []
+        mod._fetch_yahoo_minute_line = lambda symbol: []
+        mod._fetch_sina_us_minute_line = lambda symbol: [
+            {"time": "09:30", "price": 25290.0},
+            {"time": "09:31", "price": 25300.0},
+        ] if symbol == ".IXIC" else []
+        mod._fetch_sina_global_minute_line = lambda symbol: []
+        mod._fetch_kline = lambda code: []
+
+        payload = mod.fetch_indices_data()
+        nas = next(item for item in payload["items"] if item["key"] == "nas")
+
+        self.assertEqual(len(nas["minute_line"]), 2)
+        self.assertEqual(nas["minute_line"][0]["price"], 25290.0)
+
+    def test_us_index_prefers_eastmoney_minute_line(self):
+        mod = load_module()
+        mod.MINUTE_LINE_MAX_POINTS = 10
+        mod.INCLUDE_LEGACY_GROUPS = False
+        mod._CACHE = {"ts": 0, "data": None}
+        mod._qt_query = lambda codes: ""
+        mod._sina_query = lambda codes: ""
+        mod._sina_us_index_query = lambda: ""
+        mod._fetch_minute_quote = lambda code: {}
+        mod._fetch_minute_line = lambda code: [{"time": "14:07", "price": 7434.0}] if code == "usINX" else []
+        mod._fetch_eastmoney_us_minute_line = lambda code: [
+            {"time": "09:30", "price": 7391.88},
+            {"time": "09:31", "price": 7398.0},
+            {"time": "14:07", "price": 7434.0},
+        ] if code == "usINX" else []
+        mod._fetch_yahoo_minute_line = lambda symbol: []
+        mod._fetch_sina_us_minute_line = lambda symbol: []
+        mod._fetch_sina_global_minute_line = lambda symbol: []
+        mod._fetch_kline = lambda code: []
+
+        payload = mod.fetch_indices_data()
+        spx = next(item for item in payload["items"] if item["key"] == "spx")
+
+        self.assertEqual(len(spx["minute_line"]), 3)
+        self.assertEqual(spx["minute_line"][0]["time"], "09:30")
 
 
 if __name__ == "__main__":
