@@ -2262,17 +2262,64 @@ ADMIN_HTML = r"""<!doctype html>
 <style>
 :root{color-scheme:dark;--bg:#07090d;--surface:#10151b;--surface2:#151b23;--line:#26313d;--line2:#334155;--text:#f3f6fb;--muted:#94a3b8;--soft:#cbd5e1;--accent:#2dd4bf;--blue:#60a5fa;--red:#fb7185;--green:#34d399;--yellow:#fbbf24}*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(180deg,#0b1016 0%,var(--bg) 48%,#050608 100%);color:var(--text);min-height:100vh}.admin-header{border-bottom:1px solid rgba(148,163,184,.16);background:rgba(7,9,13,.88);backdrop-filter:blur(16px);padding:22px clamp(16px,4vw,42px)}.admin-header-inner{max-width:1180px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.eyebrow{font-size:12px;font-weight:850;color:var(--accent);letter-spacing:.04em;margin-bottom:6px}h1{margin:0;font-size:30px;letter-spacing:0}h2{margin:0;font-size:18px;letter-spacing:0}p{margin:0}.muted{color:var(--muted)}.toplink{color:#dbeafe;text-decoration:none;border:1px solid rgba(148,163,184,.20);background:rgba(15,23,42,.62);border-radius:8px;padding:9px 12px;font-weight:850}.toplink:hover{border-color:rgba(96,165,250,.54);background:rgba(30,41,59,.72)}.admin-main{width:min(1180px,100%);margin:0 auto;padding:20px clamp(14px,4vw,42px) 34px;display:grid;gap:16px}.settings-form{display:grid;gap:14px}.settings-group{border:1px solid rgba(148,163,184,.16);border-radius:8px;background:rgba(16,21,27,.88);box-shadow:0 18px 56px rgba(0,0,0,.22);overflow:hidden}.settings-group-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid rgba(148,163,184,.12);background:rgba(21,27,35,.72)}.settings-group-note{color:var(--muted);font-size:13px;line-height:1.5;margin-top:5px}.settings-count{font-size:12px;color:#a7f3d0;border:1px solid rgba(45,212,191,.24);background:rgba(20,184,166,.10);border-radius:999px;padding:3px 8px;white-space:nowrap}.settings-list{display:grid}.setting-row{display:grid;grid-template-columns:minmax(170px,.72fr) minmax(250px,1fr) minmax(220px,.84fr);gap:16px;align-items:start;padding:16px 18px;border-top:1px solid rgba(148,163,184,.10)}.setting-row:first-child{border-top:0}.setting-copy{display:grid;gap:4px;min-width:0}.config-label{font-weight:850;color:#e5edf8;line-height:1.35}.setting-editor{min-width:0}.setting-editor input,.setting-editor select{width:100%;min-width:0}.setting-state{display:grid;gap:8px;min-width:0}.setting-state-item{display:grid;gap:3px}.setting-state-label{font-size:11px;color:#7b8aa0;font-weight:850}.config-meta{font-size:12px;color:#b6c2d2;max-width:100%;overflow-wrap:anywhere;line-height:1.45}.config-empty{color:#64748b}input,select,textarea,button{border:1px solid var(--line);background:#0b0f15;color:var(--text);border-radius:8px;padding:10px 12px;font:inherit;min-width:0}input:focus,select:focus,textarea:focus{outline:2px solid rgba(96,165,250,.70);outline-offset:1px;border-color:rgba(96,165,250,.62)}textarea{width:100%;min-height:460px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;resize:vertical}button{cursor:pointer;font-weight:850;background:linear-gradient(135deg,rgba(20,184,166,.92),rgba(96,165,250,.76));border:0;color:#061017}.save-button{min-height:42px;padding:10px 16px;justify-self:end;transition:transform .12s ease,filter .12s ease,background .12s ease}.save-button:disabled{cursor:wait;filter:saturate(.65);opacity:.82}.save-button.saved{background:linear-gradient(135deg,rgba(52,211,153,.95),rgba(45,212,191,.78))}.save-button.error{background:linear-gradient(135deg,rgba(251,113,133,.95),rgba(248,113,113,.76));color:#fff}.settings-actions{position:sticky;bottom:14px;z-index:3;display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:10px;border:1px solid rgba(148,163,184,.18);border-radius:8px;background:rgba(8,11,16,.86);backdrop-filter:blur(14px);box-shadow:0 18px 54px rgba(0,0,0,.30)}.settings-save-status{min-height:20px;font-size:13px;line-height:1.4;color:var(--muted);text-align:right;overflow-wrap:anywhere}.settings-save-status.ok{color:#86efac}.settings-save-status.error{color:#fecdd3}.settings-save-status.busy{color:#bfdbfe}.time-list-control{display:grid;gap:8px}.time-list-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:6px}.time-list-item{display:grid;grid-template-columns:minmax(92px,1fr) 34px;gap:4px;align-items:center}.time-list-item input{min-width:0}.time-list-add,.time-list-remove{display:inline-grid;place-items:center;padding:0;border-radius:8px;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.78);color:#dbeafe}.time-list-add{width:38px;height:38px;justify-self:start}.time-list-remove{width:34px;height:38px;color:#fecdd3}.okmsg{border:1px solid rgba(52,211,153,.28);background:rgba(6,78,59,.20);color:#bbf7d0;border-radius:8px;padding:11px 13px}.errmsg{border:1px solid rgba(251,113,133,.34);background:rgba(127,29,29,.22);color:#fecdd3;border-radius:8px;padding:11px 13px}@media(max-width:940px){.setting-row{grid-template-columns:1fr;gap:10px}.setting-state{grid-template-columns:repeat(2,minmax(0,1fr))}.save-button{width:100%}.settings-actions{position:static;align-items:stretch;flex-direction:column}.settings-save-status{text-align:left}}@media(max-width:620px){.admin-header{padding:18px 14px}.admin-main{padding:16px 12px 26px}.settings-group-head,.setting-row{padding:14px}.setting-state{grid-template-columns:1fr}.time-list-grid{grid-template-columns:1fr}.toplink{width:100%;text-align:center}}</style>
 <style>
+.admin-header{position:sticky;top:0;z-index:8;padding:16px clamp(16px,4vw,42px);background:rgba(7,10,14,.92);box-shadow:0 12px 34px rgba(0,0,0,.22)}
+.admin-header-inner{max-width:1320px}
+.eyebrow{color:#7dd3fc}
+h1{font-size:26px}
+.admin-main{width:min(1320px,100%);gap:18px}
+.settings-form{gap:18px}
+.settings-overview{display:flex;justify-content:space-between;align-items:flex-end;gap:18px;padding:18px 20px;border:1px solid rgba(148,163,184,.18);border-radius:8px;background:linear-gradient(135deg,rgba(14,19,27,.94),rgba(13,25,29,.86));box-shadow:0 18px 58px rgba(0,0,0,.24)}
+.settings-overview-copy{display:grid;gap:6px;min-width:0}
+.settings-overview-copy h2{font-size:20px}
+.settings-overview-copy .muted{font-size:13px;line-height:1.55;max-width:760px;overflow-wrap:anywhere}
+.settings-overview-stats{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.settings-stat{display:grid;gap:2px;min-width:86px;padding:9px 11px;border:1px solid rgba(148,163,184,.14);border-radius:8px;background:rgba(2,6,12,.34)}
+.settings-stat-value{font-size:18px;font-weight:900;color:#ecfeff;line-height:1}
+.settings-stat-label{font-size:11px;font-weight:850;color:#8ea4bb}
+.settings-shell{display:grid;grid-template-columns:210px minmax(0,1fr);gap:16px;align-items:start}
+.settings-sidebar{position:sticky;top:88px;display:grid;gap:10px;min-width:0;padding:12px;border:1px solid rgba(148,163,184,.16);border-radius:8px;background:rgba(10,14,20,.78);backdrop-filter:blur(14px);box-shadow:0 14px 42px rgba(0,0,0,.18)}
+.settings-nav-title{font-size:12px;font-weight:900;color:#e2e8f0;padding:0 4px 2px}
+.settings-nav{display:grid;gap:5px;min-width:0;max-width:100%}
+.settings-nav-link{display:grid;grid-template-columns:30px minmax(0,1fr) auto;align-items:center;gap:8px;min-height:36px;padding:7px 8px;border:1px solid transparent;border-radius:8px;color:#b9c6d7;text-decoration:none;font-size:13px}
+.settings-nav-link:hover,.settings-nav-link:focus-visible{color:#f8fafc;border-color:rgba(125,211,252,.28);background:rgba(14,165,233,.10);outline:0}
+.settings-nav-index{font-size:11px;font-weight:900;color:#67e8f9}
+.settings-nav-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-nav-count{font-size:11px;font-weight:850;color:#93a4b8}
+.settings-content{display:grid;gap:14px;min-width:0}
+.settings-group{scroll-margin-top:92px;background:rgba(12,17,24,.88);border-color:rgba(148,163,184,.18);box-shadow:0 16px 46px rgba(0,0,0,.20)}
+.settings-group-head{padding:15px 18px;background:linear-gradient(180deg,rgba(23,31,42,.88),rgba(16,23,32,.78))}
+.settings-count{border-radius:8px;color:#bae6fd;border-color:rgba(125,211,252,.22);background:rgba(14,165,233,.10)}
+.setting-row{grid-template-columns:minmax(150px,.62fr) minmax(280px,1fr) minmax(190px,.66fr);gap:18px;padding:14px 18px;transition:background .12s ease,border-color .12s ease}
+.setting-row:hover{background:rgba(148,163,184,.045)}
+.config-label{font-size:14px}
+.setting-editor{display:grid;gap:7px}
+.setting-editor input,.setting-editor select,.setting-editor textarea{width:100%}
+.setting-state{grid-template-columns:1fr;gap:7px}
+.setting-state-item{padding:8px 10px;border:1px solid rgba(148,163,184,.10);border-radius:8px;background:rgba(2,6,12,.22)}
+input,select,textarea{background:rgba(5,10,16,.96);border-color:rgba(100,116,139,.70)}
+input:hover,select:hover,textarea:hover{border-color:rgba(125,211,252,.42)}
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,#93c5fd 50%),linear-gradient(135deg,#93c5fd 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}
+.settings-actions{right:clamp(14px,4vw,42px);left:auto;margin-left:auto;max-width:540px;border-color:rgba(125,211,252,.22);background:rgba(7,11,17,.90)}
+.settings-save-status{flex:1}
 .save-button{box-shadow:0 10px 20px rgba(0,0,0,.22),0 1px 0 rgba(255,255,255,.20) inset;transition:transform .08s ease,filter .08s ease,background .12s ease,box-shadow .08s ease}
 .save-button:hover:not(:disabled){filter:brightness(1.05);transform:translateY(-1px)}
 .save-button:active,.save-button.pressed{transform:translateY(2px) scale(.985);filter:brightness(.88);box-shadow:0 3px 8px rgba(0,0,0,.28),0 2px 8px rgba(0,0,0,.30) inset}
 .strategy-multi-control{display:grid;gap:8px}
-.strategy-option{display:grid;grid-template-columns:18px minmax(0,1fr);gap:9px;align-items:start;border:1px solid rgba(148,163,184,.14);border-radius:8px;background:rgba(15,23,42,.50);padding:9px 10px;cursor:pointer}
+.strategy-option{display:grid;grid-template-columns:18px minmax(0,1fr);gap:9px;align-items:start;border:1px solid rgba(148,163,184,.16);border-radius:8px;background:rgba(15,23,42,.54);padding:10px 11px;cursor:pointer;transition:border-color .12s ease,background .12s ease,transform .12s ease}
+.strategy-option:hover{border-color:rgba(125,211,252,.32);background:rgba(30,41,59,.62)}
 .strategy-option input{width:16px;min-width:16px;height:16px;margin:2px 0 0;padding:0;accent-color:var(--accent)}
 .strategy-option-main{display:grid;gap:3px;min-width:0}
 .strategy-option-title{display:flex;align-items:center;gap:7px;color:#e5edf8;font-weight:850;line-height:1.25}
 .strategy-option-dot{width:8px;height:8px;border-radius:3px;background:var(--strategy-color,#94a3b8);box-shadow:0 0 12px var(--strategy-color,#94a3b8);flex:0 0 auto}
 .strategy-option-desc{color:#94a3b8;font-size:12px;line-height:1.45}
 .preset-strategy-textarea{min-height:168px;font-family:inherit;font-size:13px;line-height:1.55}
+.time-list-grid{grid-template-columns:repeat(auto-fill,minmax(126px,1fr))}
+.time-list-add,.time-list-remove{transition:border-color .12s ease,background .12s ease,color .12s ease}
+.time-list-add:hover,.time-list-remove:hover{border-color:rgba(125,211,252,.38);background:rgba(30,41,59,.72)}
+.okmsg,.errmsg{box-shadow:0 12px 34px rgba(0,0,0,.18)}
+@media(max-width:1120px){.settings-shell{grid-template-columns:1fr}.settings-sidebar{position:static;top:auto}.settings-nav{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px}.settings-nav-link{grid-template-columns:auto minmax(max-content,1fr) auto;flex:0 0 auto}.settings-actions{max-width:none}}
+@media(max-width:940px){.settings-overview{align-items:stretch;flex-direction:column}.settings-overview-stats{justify-content:flex-start}.setting-row{grid-template-columns:1fr}.setting-state{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){h1{font-size:24px}.settings-overview{padding:15px}.settings-overview-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.settings-stat{min-width:0}.settings-nav-link{min-height:34px}.settings-group-head{gap:10px}.settings-count{align-self:flex-start}.setting-state{grid-template-columns:1fr}.settings-actions{right:auto}}
 </style>
 </head><body><header class="admin-header"><div class="admin-header-inner"><div><div class="eyebrow">牛牛大作手</div><h1>设置</h1></div><a class="toplink" href="/">返回首页</a></div></header>
 <main class="admin-main">
@@ -6111,6 +6158,20 @@ def render_env_input(item: dict[str, Any]) -> str:
     return f"<input type='{input_type}' name='env__{escaped_name}' value='{html.escape(value)}'>"
 
 
+def admin_group_anchor(group_name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", group_name.lower()).strip("-")
+    if slug:
+        return f"settings-{slug}"
+    digest = hashlib.sha1(group_name.encode("utf-8")).hexdigest()[:8]
+    return f"settings-{digest}"
+
+
+def render_nav_label(label: str) -> str:
+    if len(label) < 2:
+        return html.escape(label)
+    return html.escape(label[0]) + f"<span>{html.escape(label[1:])}</span>"
+
+
 def render_env_config_table(payload: dict[str, Any]) -> str:
     us_feature_enabled = False
     groups: list[dict[str, Any]] = []
@@ -6120,13 +6181,15 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
             us_feature_enabled = str(item.get("effective") or item.get("file_value") or "").strip().lower() in {"1", "true", "yes", "on"}
         group = str(item.get("group") or "其他")
         if current_group is None or current_group["name"] != group:
-            current_group = {"name": group, "items": []}
+            current_group = {"name": group, "items": [], "anchor": admin_group_anchor(group)}
             groups.append(current_group)
         current_group["items"].append(item)
 
     sections: list[str] = []
+    nav_items: list[str] = []
     for group in groups:
         group_name = str(group["name"])
+        group_anchor = str(group["anchor"])
         note = ADMIN_GROUP_NOTES.get(group_name, "")
         note_html = f"<p class='settings-group-note'>{html.escape(note)}</p>" if note else ""
         rows: list[str] = []
@@ -6165,8 +6228,16 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
                 gated_attrs += " hidden aria-hidden='true'"
             else:
                 gated_attrs += " aria-hidden='false'"
+        nav_items.append(
+            f"<a class='settings-nav-link' href='#{group_anchor}'{gated_attrs}>"
+            f"<span class='settings-nav-index'>{len(nav_items) + 1:02d}</span>"
+            f"<span class='settings-nav-label'>{render_nav_label(group_name)}</span>"
+            f"<span class='settings-nav-count'>{len(group['items'])}</span>"
+            "</a>"
+        )
         sections.append(
             "<section class='settings-group'"
+            f" id='{group_anchor}'"
             + gated_attrs
             + ">"
             "<div class='settings-group-head'>"
@@ -6181,7 +6252,27 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
 
     return (
         "<form id='env-config-form' class='settings-form' method='post' action='/admin/config/env'>"
+        "<div id='config' class='settings-overview'>"
+        "<div class='settings-overview-copy'>"
+        "<h2>业务配置</h2>"
+        "<p class='muted'>按分组维护运行参数、模型接入、任务时间和策略开关；保存后会写入本地配置并同步可热应用项。</p>"
+        "</div>"
+        "<div class='settings-overview-stats'>"
+        f"<div class='settings-stat'><span class='settings-stat-value'>{len(groups)}</span><span class='settings-stat-label'>分组</span></div>"
+        f"<div class='settings-stat'><span class='settings-stat-value'>{len(payload['items'])}</span><span class='settings-stat-label'>配置项</span></div>"
+        "</div>"
+        "</div>"
+        "<div class='settings-shell'>"
+        "<aside class='settings-sidebar' aria-label='设置分组'>"
+        "<div class='settings-nav-title'>分组</div>"
+        "<nav class='settings-nav'>"
+        + "".join(nav_items)
+        + "</nav>"
+        "</aside>"
+        "<div class='settings-content'>"
         + "".join(sections)
+        + "</div>"
+        "</div>"
         + "<div class='settings-actions'>"
         "<div class='settings-save-status' data-env-save-status role='status' aria-live='polite'></div>"
         "<button class='save-button' data-env-save-button type='submit'>保存业务配置</button>"
