@@ -507,20 +507,25 @@ def fetch_us_market_summary(
     prefer_archive: bool = True,
     use_model: bool = True,
     strict_model: bool = False,
+    indices_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if prefer_archive:
         cached = load_cached_summary_for_today(now)
         if cached:
             return cached
-    cache_key = f"{previous_us_session_date((now or datetime.now(CN_TZ))).strftime('%Y-%m-%d')}:{'model' if use_model else 'rules'}"
+    source_key = str((indices_payload or {}).get("generated_at") or "") if indices_payload is not None else ""
+    cache_key = f"{previous_us_session_date((now or datetime.now(CN_TZ))).strftime('%Y-%m-%d')}:{'model' if use_model else 'rules'}:{source_key}"
     current_ts = time.time()
     cached = _CACHE.get("data")
     if cached and _CACHE.get("key") == cache_key and current_ts - float(_CACHE.get("ts") or 0) < CACHE_TTL_SECONDS:
         return cached
     try:
-        from indices_dashboard_api import fetch_indices_data
+        if indices_payload is None:
+            from indices_dashboard_api import fetch_indices_data
 
-        payload = fetch_indices_data()
+            payload = fetch_indices_data()
+        else:
+            payload = indices_payload
         data = build_us_market_summary_from_indices(payload, now=now)
         if use_model:
             try:

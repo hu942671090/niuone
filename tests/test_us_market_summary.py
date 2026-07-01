@@ -172,6 +172,33 @@ class UsMarketSummaryTests(unittest.TestCase):
         self.assertTrue(loaded["cached_archive"])
         self.assertEqual(loaded["generated_at"], "2026-06-30 08:00:00")
 
+    def test_fetch_fast_rules_path_uses_provided_indices_without_grok(self):
+        mod = load_module()
+        original_call = mod._call_grok_api
+        try:
+            mod._call_grok_api = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not call Grok"))
+            payload = {
+                "generated_at": "2026-07-01 08:00:00",
+                "items": [
+                    {"key": "dow", "name": "道琼斯指数", "price": 39000, "change_pct": 0.1},
+                    {"key": "nas", "name": "纳斯达克指数", "price": 18000, "change_pct": 0.2},
+                    {"key": "spx", "name": "标普500指数", "price": 5200, "change_pct": 0.3},
+                ],
+            }
+
+            summary = mod.fetch_us_market_summary(
+                datetime(2026, 7, 2, 8, 0, tzinfo=mod.CN_TZ),
+                prefer_archive=False,
+                use_model=False,
+                indices_payload=payload,
+            )
+        finally:
+            mod._call_grok_api = original_call
+
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["source_generated_at"], "2026-07-01 08:00:00")
+        self.assertNotIn("model_error", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

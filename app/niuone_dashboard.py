@@ -48,7 +48,7 @@ from strategy_registry import (
     normalize_strategy_list_update,
     strategy_settings_options,
 )
-from us_market_summary import fetch_us_market_summary
+from us_market_summary import fetch_us_market_summary, load_cached_summary_for_today
 
 try:
     import yaml  # type: ignore
@@ -622,6 +622,23 @@ def run_dashboard_helper(script_name: str, fallback: dict[str, Any], timeout: in
         return json.loads(raw)
     except Exception as exc:
         return {**fallback, "error": str(exc)}
+
+
+def produce_indices_data() -> dict[str, Any]:
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "indices",
+            os.path.join(os.path.dirname(__file__), "indices_dashboard_api.py"),
+        )
+        if spec and spec.loader:
+            indices_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(indices_mod)
+            raw_result = indices_mod.fetch_indices_data()
+            return raw_result if isinstance(raw_result, dict) else {"items": raw_result}
+        return {"items": []}
+    except Exception as exc:
+        return {"items": [], "error": str(exc)}
 
 
 def apply_hot_stocks_sort(data: dict[str, Any], sort_by: str) -> dict[str, Any]:
@@ -1446,6 +1463,27 @@ def cache_get_json(cache_key: str, ttl: int, producer) -> tuple[bytes, bool]:
                     API_RESPONSE_CACHE.pop(old_key, None)
                     API_CACHE_KEY_LOCKS.pop(old_key, None)
         return payload, False
+
+
+def cached_json_data(cache_key: str, ttl: int, producer, fallback: dict[str, Any]) -> dict[str, Any]:
+    payload, _ = cache_get_json(cache_key, ttl, producer)
+    try:
+        data = json.loads(payload.decode("utf-8", "ignore"))
+        return data if isinstance(data, dict) else dict(fallback)
+    except Exception as exc:
+        return {**fallback, "error": str(exc)}
+
+
+def produce_us_market_summary_data() -> dict[str, Any]:
+    archived = load_cached_summary_for_today()
+    if archived:
+        return archived
+    indices_payload = cached_json_data("indices", API_TTLS["indices"], produce_indices_data, {"items": []})
+    return fetch_us_market_summary(
+        prefer_archive=False,
+        use_model=False,
+        indices_payload=indices_payload,
+    )
 
 
 def is_allowed_x_media_url(url: str) -> bool:
@@ -3466,24 +3504,37 @@ function refreshVisibleUsQuotes() {
   }).catch(e => console.error('us quotes refresh error', e));
 }
 async function loadIndicesDataInBg() {
-  try {
-    const [idx, sec, hot, mf, mkf, usSummary] = await Promise.all([
-      fetch('/api/indices').then(r => r.ok ? r.json() : Promise.resolve({})),
-      Promise.resolve(sectorData),
-      fetch('/api/hot_stocks').then(r => r.ok ? r.json() : Promise.resolve({})),
-      fetch('/api/money_flow').then(r => r.ok ? r.json() : Promise.resolve({})),
-      fetch('/api/market_flow').then(r => r.ok ? r.json() : Promise.resolve({})),
-      fetch('/api/us_market_summary').then(r => r.ok ? r.json() : Promise.resolve({available:false, error:'load_failed'}))
-    ]);
-    indicesData = idx; sectorData = sec; hotStocksData = hot; moneyFlowData = mf; marketFlowData = mkf;
-    usMarketSummaryData = usSummary || {available:false};
+  const fetchJson = (url, fallback) => fetch(url).then(r => r.ok ? r.json() : fallback);
+  const refreshMarket = () => {
     if (activeCategory === 'market_monitor') render();
     saveViewState();
-  } catch(e) {
-    usMarketSummaryData = {available:false, error:String(e), loading:false};
-    if (activeCategory === 'market_monitor') render();
-    saveViewState();
+  };
+  const applyResult = (label, promise, onData, onError) => promise.then(data => {
+    onData(data);
+    refreshMarket();
+    return data;
+  }).catch(e => {
+    console.error(label + ' load error', e);
+    if (onError) onError(e);
+    refreshMarket();
+    return null;
+  });
+  if (!usMarketSummaryData.generated_at && !usMarketSummaryData.summary) {
+    usMarketSummaryData = {...usMarketSummaryData, loading: true};
   }
+  const tasks = [
+    applyResult('indices', fetchJson('/api/indices', {}), data => { indicesData = data || {}; }),
+    applyResult('hot stocks', fetchJson('/api/hot_stocks', {}), data => { hotStocksData = data || {}; }),
+    applyResult('money flow', fetchJson('/api/money_flow', {inflow: [], outflow: []}), data => { moneyFlowData = data || {inflow: [], outflow: []}; }),
+    applyResult('market flow', fetchJson('/api/market_flow', {total_inflow_yi: null}), data => { marketFlowData = data || {total_inflow_yi: null}; }),
+    applyResult(
+      'us market summary',
+      fetchJson('/api/us_market_summary', {available:false, error:'load_failed'}),
+      data => { usMarketSummaryData = data || {available:false}; },
+      e => { usMarketSummaryData = {available:false, error:String(e), loading:false}; }
+    ),
+  ];
+  await Promise.allSettled(tasks);
 }
 async function loadIndices() {
   try {
@@ -6725,20 +6776,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json_cached("practice_benchmarks", API_TTLS["practice_benchmarks"], get_practice_benchmarks, edge_ttl=API_TTLS["practice_benchmarks"], browser_ttl=10)
             return
         if parsed.path == "/api/indices":
-            def produce_indices():
-                try:
-                    import importlib.util
-                    spec = importlib.util.spec_from_file_location("indices",
-                        os.path.join(os.path.dirname(__file__), "indices_dashboard_api.py"))
-                    if spec and spec.loader:
-                        indices_mod = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(indices_mod)
-                        raw_result = indices_mod.fetch_indices_data()
-                        return raw_result if isinstance(raw_result, dict) else {"items": raw_result}
-                    return {"items": []}
-                except Exception as exc:
-                    return {"items": [], "error": str(exc)}
-            self.send_json_cached("indices", API_TTLS["indices"], produce_indices, edge_ttl=API_TTLS["indices"], browser_ttl=15)
+            self.send_json_cached("indices", API_TTLS["indices"], produce_indices_data, edge_ttl=API_TTLS["indices"], browser_ttl=15)
             return
         if parsed.path == "/api/sectors":
             self.send_json_cached("sectors", API_TTLS["sectors"], lambda: run_dashboard_helper("sectors_dashboard_api.py", {"sectors": [], "items": [], "gain_top": [], "loss_top": []}, timeout=120), edge_ttl=API_TTLS["sectors"], browser_ttl=15)
@@ -6766,7 +6804,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json_cached(cache_key, API_TTLS["us_quotes"], lambda: fetch_us_quotes(symbols), edge_ttl=API_TTLS["us_quotes"], browser_ttl=10)
             return
         if parsed.path == "/api/us_market_summary":
-            self.send_json_cached("us_market_summary", API_TTLS["us_market_summary"], fetch_us_market_summary, edge_ttl=API_TTLS["us_market_summary"], browser_ttl=30)
+            self.send_json_cached("us_market_summary", API_TTLS["us_market_summary"], produce_us_market_summary_data, edge_ttl=API_TTLS["us_market_summary"], browser_ttl=30)
             return
         if parsed.path == "/api/money_flow":
             self.send_json_cached("money_flow", API_TTLS["money_flow"], lambda: run_dashboard_helper("money_flow_dashboard_api.py", {"inflow": [], "outflow": []}, timeout=120), edge_ttl=API_TTLS["money_flow"], browser_ttl=15)
