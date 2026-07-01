@@ -5086,7 +5086,7 @@ function marketHeadingInfo(raw) {
   const titleParts = titleSource.split(/[·|]/).map(x => x.trim()).filter(Boolean);
   const title = (titleParts[0] || titleSource).replace(/[:：]$/, '').trim();
   const hasMarkdownHeading = /\*\*.+\*\*/.test(String(raw || ''));
-  const knownHeading = /^(市场概况|竞价情绪|热门板块|资金流向|强势个股|成交活跃|操作提示|风险|复合热度|涨停封单|封单|重点观察)/.test(title);
+  const knownHeading = /^(市场概况|竞价情绪|开盘价强弱|热门板块|竞价强势板块|资金流向|强势个股|成交活跃|竞价成交活跃|操作提示|风险|复合热度|涨停封单|封单|跌停风险|重点观察)/.test(title);
   if (!hasMarkdownHeading && !knownHeading) return null;
   return {
     title: title || '盘面小节',
@@ -5144,7 +5144,7 @@ function marketSummaryMetrics(sections) {
   for (const line of overview.items || []) {
     const clean = cleanMarketLine(line).replace(/^💬\s*/, '').trim();
     for (const part of clean.split(/[|·]/).map(x => x.trim()).filter(Boolean)) {
-      const m = part.match(/^(涨停池|跌停池|成交额|样本|上涨|下跌|平盘|涨停|跌停)\s*([+\-]?\d[\d,.]*(?:\.\d+)?\s*(?:只|亿|万亿|万|%)?)/);
+      const m = part.match(/^(涨停池|跌停池|竞价额|竞价量|成交额|样本|高开|平开|低开|强高开|深低开|上涨|下跌|平盘|涨停|跌停)\s*([+\-]?\d[\d,.]*(?:\.\d+)?\s*(?:只|亿手|万手|手|亿|万亿|万|%)?)/);
       if (!m || seen.has(m[1])) continue;
       seen.add(m[1]);
       metrics.push({label: m[1], value: m[2].replace(/\s+/g, ''), tone: marketMetricTone(m[1], m[2])});
@@ -5155,7 +5155,7 @@ function marketSummaryMetrics(sections) {
 }
 function isMarketMetricLine(line) {
   const clean = cleanMarketLine(line).replace(/^💬\s*/, '').trim();
-  return /(?:^|[|·]\s*)(涨停池|跌停池|成交额|样本|上涨|下跌|平盘|涨停|跌停)\s*[+\-]?\d/.test(clean);
+  return /(?:^|[|·]\s*)(涨停池|跌停池|竞价额|竞价量|成交额|样本|高开|平开|低开|强高开|深低开|上涨|下跌|平盘|涨停|跌停)\s*[+\-]?\d/.test(clean);
 }
 function renderMarketOverview(parsed) {
   const mood = marketMoodLine(parsed.sections);
@@ -5181,7 +5181,7 @@ function marketSectionDisplayItems(section) {
 function renderMarketSignedText(text, options = {}) {
   const source = String(text || '');
   const colorUnsignedMoney = !!options.colorUnsignedMoney;
-  const pattern = /((?:sh|sz|bj)?\d{6}\s+[*A-Za-z\u4e00-\u9fa5][*A-Za-z0-9\u4e00-\u9fa5·]{1,12})|([+\-]\d[\d,.]*(?:\.\d+)?\s*(?:%|万亿|亿|万|元)?|\d[\d,.]*(?:\.\d+)?\s*(?:万亿|亿))/gi;
+  const pattern = /((?:sh|sz|bj)?\d{6}\s+[*A-Za-z\u4e00-\u9fa5][*A-Za-z0-9\u4e00-\u9fa5·]{1,12})|([+\-]\d[\d,.]*(?:\.\d+)?\s*(?:%|万亿|亿手|万手|手|亿|万|元)?|\d[\d,.]*(?:\.\d+)?\s*(?:万亿|亿手|万手|手|亿))/gi;
   let html = '';
   let last = 0;
   for (const match of source.matchAll(pattern)) {
@@ -5223,7 +5223,7 @@ function renderMarketSection(section) {
   if (!items.length && /市场概况|竞价情绪/.test(section.title || '')) return '';
   if (!items.length && !section.meta) return '';
   const tone = section.tone || '';
-  const wide = /热门板块|资金流向/.test(section.title || '') ? ' wide' : '';
+  const wide = /热门板块|竞价强势板块|资金流向|竞价成交活跃/.test(section.title || '') ? ' wide' : '';
   const count = items.length ? `<span class="market-section-count">${items.length} 条</span>` : '';
   const meta = section.meta ? `<span class="market-section-count">${esc(section.meta)}</span>` : count;
   const body = items.map(line => renderMarketDetailLine(line, tone)).filter(Boolean).join('');

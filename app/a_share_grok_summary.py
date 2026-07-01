@@ -187,7 +187,7 @@ def call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = 1800) -> 
 def build_a_share_grok_messages(local_report: str, *, title: str) -> list[dict[str, str]]:
     system = (
         "你是牛牛1号的A股盘面监控策略分析师。"
-        "你会收到一份由本地规则生成的A股盘面快照，里面包含涨跌家数、涨跌停、成交额、资金流、热门板块和强势个股。"
+        "你会收到一份由本地规则生成的A股盘面快照，可能包含涨跌家数、涨跌停、成交额、竞价成交额、开盘强弱、封单、资金流、热门板块和强势个股。"
         "你的任务是基于这些已给数据，补强盘面总结和买卖指引。"
         "不要编造未给出的新闻、政策、公司事件、资金数据或实时行情；如果数据不足，必须明确保守处理。"
         "必须输出严格JSON，不要Markdown，不要代码块，不要URL。"
@@ -216,7 +216,7 @@ def build_a_share_grok_messages(local_report: str, *, title: str) -> list[dict[s
 要求：
 - guidance_lines 返回 4 到 7 条，短句但可执行。
 - 不要输出收益承诺，不要建议满仓，不要说“必涨/确定”。
-- 如果涨少跌多、跌停不弱或资金流分散，买入节奏必须收紧。
+- 如果涨少跌多、跌停不弱、竞价低开较多、竞价成交额断档或资金流分散，买入节奏必须收紧。
 - 如果市场明显强，仍要强调只做板块联动、回封、回踩不破或右侧确认。
 """.strip()
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
