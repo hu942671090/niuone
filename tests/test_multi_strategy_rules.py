@@ -12,6 +12,16 @@ import multi_strategy_screen as screen  # noqa: E402
 
 
 class MultiStrategyRuleTests(unittest.TestCase):
+    def setUp(self):
+        self._saved_strategy_source = os.environ.get(screen.STRATEGY_SOURCE_ENV)
+        os.environ[screen.STRATEGY_SOURCE_ENV] = "builtin"
+
+    def tearDown(self):
+        if self._saved_strategy_source is None:
+            os.environ.pop(screen.STRATEGY_SOURCE_ENV, None)
+        else:
+            os.environ[screen.STRATEGY_SOURCE_ENV] = self._saved_strategy_source
+
     def test_recent_b1_indices_require_core_negative_j(self):
         rows = [{"j": None, "open": 10.0, "close": 10.0} for _ in range(10)]
         rows[4]["j"] = -9.5
@@ -102,6 +112,7 @@ class MultiStrategyRuleTests(unittest.TestCase):
             self.assertIn("li_daxiao_bottom", screen.STRATEGY_SCORERS)
             self.assertNotIn("buffett_value", screen.STRATEGY_SCORERS)
             self.assertEqual(screen.STRATEGY_META["shaofu_b1"]["family"], "persona")
+            self.assertEqual(screen.STRATEGY_META["breakout"]["family"], "local")
             self.assertEqual(screen.enabled_persona_strategy_ids(), {"zettaranc"})
         finally:
             if old is None:
@@ -118,11 +129,14 @@ class MultiStrategyRuleTests(unittest.TestCase):
             self.assertNotIn("li_daxiao_bottom", active)
             self.assertNotIn("shaofu_b1", active)
             self.assertIn("trend_pullback", active)
+            self.assertIn("breakout", active)
 
             os.environ[screen.PERSONA_STRATEGY_ENV] = "zettaranc,li_daxiao_bottom,buffett_value"
             active = screen.active_strategy_scorers()
             self.assertNotIn("buffett_value", active)
             self.assertNotIn("li_daxiao_bottom", active)
+            self.assertNotIn("trend_pullback", active)
+            self.assertNotIn("breakout", active)
             self.assertIn("shaofu_b1", active)
             self.assertIn("b3_accelerate", active)
 
@@ -131,6 +145,15 @@ class MultiStrategyRuleTests(unittest.TestCase):
             self.assertIn("li_daxiao_bottom", active)
             self.assertNotIn("shaofu_b1", active)
             self.assertNotIn("b3_accelerate", active)
+            self.assertNotIn("trend_pullback", active)
+            self.assertNotIn("breakout", active)
+
+            os.environ[screen.PERSONA_STRATEGY_ENV] = "base"
+            active = screen.active_strategy_scorers()
+            self.assertIn("trend_pullback", active)
+            self.assertIn("breakout", active)
+            self.assertNotIn("li_daxiao_bottom", active)
+            self.assertNotIn("shaofu_b1", active)
 
             os.environ[screen.PERSONA_STRATEGY_ENV] = ""
             active = screen.active_strategy_scorers()
@@ -138,6 +161,23 @@ class MultiStrategyRuleTests(unittest.TestCase):
             self.assertNotIn("li_daxiao_bottom", active)
             self.assertNotIn("shaofu_b1", active)
             self.assertIn("trend_pullback", active)
+        finally:
+            if old is None:
+                os.environ.pop(screen.PERSONA_STRATEGY_ENV, None)
+            else:
+                os.environ[screen.PERSONA_STRATEGY_ENV] = old
+
+    def test_preset_text_source_disables_persona_scorers(self):
+        old = os.environ.get(screen.PERSONA_STRATEGY_ENV)
+        try:
+            os.environ[screen.STRATEGY_SOURCE_ENV] = "preset_text"
+            os.environ[screen.PERSONA_STRATEGY_ENV] = "li_daxiao_bottom"
+            active = screen.active_strategy_scorers()
+
+            self.assertNotIn("li_daxiao_bottom", active)
+            self.assertNotIn("shaofu_b1", active)
+            self.assertIn("trend_pullback", active)
+            self.assertIn("breakout", active)
         finally:
             if old is None:
                 os.environ.pop(screen.PERSONA_STRATEGY_ENV, None)

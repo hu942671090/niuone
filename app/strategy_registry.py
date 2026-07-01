@@ -7,7 +7,31 @@ from typing import Any
 
 
 PERSONA_STRATEGY_ENV = "DASHBOARD_ENABLED_PERSONA_STRATEGIES"
+STRATEGY_SOURCE_ENV = "DASHBOARD_STRATEGY_SOURCE"
+PRESET_STRATEGY_TEXT_ENV = "DASHBOARD_PRESET_STRATEGY_TEXT"
+STRATEGY_SOURCE_BUILTIN = "builtin"
+STRATEGY_SOURCE_PERSONA = STRATEGY_SOURCE_BUILTIN
+STRATEGY_SOURCE_PRESET_TEXT = "preset_text"
+PRESET_STRATEGY_TEXT_MAX_CHARS = 8000
+BASIC_STRATEGY_GROUP_ID = "base"
+DEFAULT_BUILTIN_STRATEGY_GROUP_ID = "zettaranc"
 DEPRECATED_STRATEGY_OPTION_IDS = {"buffett_value"}
+DEPRECATED_STRATEGY_SOURCE_ALIASES = {"persona": STRATEGY_SOURCE_BUILTIN}
+
+STRATEGY_SOURCE_OPTIONS: tuple[dict[str, str], ...] = (
+    {
+        "id": STRATEGY_SOURCE_BUILTIN,
+        "label": "内置策略",
+        "desc": "在基础策略、Z哥、李大霄中选择一个参与选股和买卖决策",
+        "color": "#60a5fa",
+    },
+    {
+        "id": STRATEGY_SOURCE_PRESET_TEXT,
+        "label": "预设文字",
+        "desc": "由买卖决策模型把输入文字优化为本轮选股和买卖规则",
+        "color": "#2dd4bf",
+    },
+)
 
 STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "b3_accelerate": {
@@ -213,12 +237,26 @@ def strategy_ids_for_persona(persona: str) -> tuple[str, ...]:
 
 
 CONFIGURABLE_STRATEGY_GROUPS: dict[str, dict[str, Any]] = {
+    BASIC_STRATEGY_GROUP_ID: {
+        "id": BASIC_STRATEGY_GROUP_ID,
+        "label": "基础策略",
+        "desc": "突破确认、趋势回踩",
+        "color": "#60a5fa",
+        "strategy_ids": strategy_ids_for_family("local"),
+    },
     "zettaranc": {
         "id": "zettaranc",
         "label": "Z哥",
-        "desc": "少妇B1、B2确认、B3中继、超级B1",
+        "desc": "少妇B1、B2确认、B3中继、超级B1、卖出风控",
         "color": "#f97316",
         "strategy_ids": strategy_ids_for_persona("zettaranc"),
+    },
+    "li_daxiao_bottom": {
+        "id": "li_daxiao_bottom",
+        "label": "李大霄",
+        "desc": "低估蓝筹、底部发育、逆向情绪和去杠杆防守代理",
+        "color": "#f59e0b",
+        "strategy_ids": ("li_daxiao_bottom",),
     },
 }
 
@@ -242,11 +280,45 @@ def configurable_strategy_option_ids() -> tuple[str, ...]:
 
 def default_enabled_persona_strategies_value() -> str:
     options = configurable_strategy_option_ids()
+    if DEFAULT_BUILTIN_STRATEGY_GROUP_ID in options:
+        return DEFAULT_BUILTIN_STRATEGY_GROUP_ID
     return options[0] if options else ""
 
 
+def normalize_strategy_source_update(value: str | None) -> str:
+    source = str(value or STRATEGY_SOURCE_BUILTIN).strip()
+    source = DEPRECATED_STRATEGY_SOURCE_ALIASES.get(source, source)
+    allowed = {item["id"] for item in STRATEGY_SOURCE_OPTIONS}
+    if source not in allowed:
+        raise ValueError(f"未知策略来源: {source}")
+    return source
+
+
+def active_strategy_source(raw: str | None = None) -> str:
+    if raw is None:
+        raw = os.environ.get(STRATEGY_SOURCE_ENV)
+    return normalize_strategy_source_update(raw)
+
+
+def preset_text_strategy_active(raw: str | None = None) -> bool:
+    return active_strategy_source(raw) == STRATEGY_SOURCE_PRESET_TEXT
+
+
+def normalize_preset_strategy_text_update(value: str | None) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(text) > PRESET_STRATEGY_TEXT_MAX_CHARS:
+        raise ValueError(f"预设文字策略最多 {PRESET_STRATEGY_TEXT_MAX_CHARS} 字")
+    return text.replace("\n", "\\n")
+
+
+def decode_preset_strategy_text(value: str | None) -> str:
+    text = str(value or "")
+    text = text.replace("\\r\\n", "\n").replace("\\n", "\n")
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 def normalize_strategy_list_update(value: str, *, family: str = "persona") -> str:
-    allowed = set(configurable_strategy_option_ids() if family == "persona" else strategy_ids_for_family(family))
+    allowed = set(configurable_strategy_option_ids() if family in {"persona", "builtin"} else strategy_ids_for_family(family))
     normalized: list[str] = []
     seen: set[str] = set()
     for raw in str(value or "").replace("，", ",").split(","):
@@ -260,12 +332,16 @@ def normalize_strategy_list_update(value: str, *, family: str = "persona") -> st
         if strategy_id not in seen:
             seen.add(strategy_id)
             normalized.append(strategy_id)
-        if family == "persona" and normalized:
+        if family in {"persona", "builtin"} and normalized:
             break
+    if family in {"persona", "builtin"} and not normalized:
+        return BASIC_STRATEGY_GROUP_ID
     return ",".join(normalized)
 
 
-def enabled_persona_strategy_ids(raw: str | None = None) -> set[str]:
+def enabled_persona_strategy_ids(raw: str | None = None, strategy_source_raw: str | None = None) -> set[str]:
+    if preset_text_strategy_active(strategy_source_raw):
+        return set()
     if raw is None:
         raw = os.environ.get(PERSONA_STRATEGY_ENV)
     if raw is None:
@@ -274,13 +350,12 @@ def enabled_persona_strategy_ids(raw: str | None = None) -> set[str]:
     return set(normalized.split(",")) if normalized else set()
 
 
-def enabled_strategy_ids(enabled_persona_raw: str | None = None) -> set[str]:
-    enabled = {
-        key
-        for key, definition in STRATEGY_DEFINITIONS.items()
-        if definition.get("family") == "local"
-    }
-    enabled_options = enabled_persona_strategy_ids(enabled_persona_raw)
+def enabled_strategy_ids(enabled_persona_raw: str | None = None, strategy_source_raw: str | None = None) -> set[str]:
+    enabled: set[str] = set()
+    if preset_text_strategy_active(strategy_source_raw):
+        enabled_options = {BASIC_STRATEGY_GROUP_ID}
+    else:
+        enabled_options = enabled_persona_strategy_ids(enabled_persona_raw, strategy_source_raw)
     for option_id in enabled_options:
         group = CONFIGURABLE_STRATEGY_GROUPS.get(option_id)
         if group:
@@ -290,13 +365,13 @@ def enabled_strategy_ids(enabled_persona_raw: str | None = None) -> set[str]:
     return enabled
 
 
-def enabled_strategy_meta(enabled_persona_raw: str | None = None) -> dict[str, dict[str, Any]]:
-    enabled = enabled_strategy_ids(enabled_persona_raw)
+def enabled_strategy_meta(enabled_persona_raw: str | None = None, strategy_source_raw: str | None = None) -> dict[str, dict[str, Any]]:
+    enabled = enabled_strategy_ids(enabled_persona_raw, strategy_source_raw)
     return {key: value for key, value in STRATEGY_META.items() if key in enabled}
 
 
-def enabled_strategy_score_profiles(enabled_persona_raw: str | None = None) -> dict[str, dict[str, Any]]:
-    enabled = enabled_strategy_ids(enabled_persona_raw)
+def enabled_strategy_score_profiles(enabled_persona_raw: str | None = None, strategy_source_raw: str | None = None) -> dict[str, dict[str, Any]]:
+    enabled = enabled_strategy_ids(enabled_persona_raw, strategy_source_raw)
     return {key: value for key, value in STRATEGY_SCORE_PROFILES.items() if key in enabled}
 
 

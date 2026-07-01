@@ -49,6 +49,7 @@ from niuone_paths import get_dashboard_env_file, get_dashboard_home
 from strategy_registry import (
     DISPLAY_STRATEGY_ORDER,
     PERSONA_STRATEGY_ENV,
+    STRATEGY_SOURCE_ENV,
     STRATEGY_DEFINITIONS,
     STRATEGY_META,
     STRATEGY_SCORE_PROFILES,
@@ -130,17 +131,21 @@ def enabled_persona_strategy_setting() -> str | None:
     return dashboard_env_value(PERSONA_STRATEGY_ENV)
 
 
+def strategy_source_setting() -> str | None:
+    return dashboard_env_value(STRATEGY_SOURCE_ENV)
+
+
 def active_strategy_scorers() -> dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | None]]:
-    enabled = enabled_strategy_ids(enabled_persona_strategy_setting())
+    enabled = enabled_strategy_ids(enabled_persona_strategy_setting(), strategy_source_setting())
     return {strategy_id: scorer for strategy_id, scorer in STRATEGY_SCORERS.items() if strategy_id in enabled}
 
 
 def active_strategy_meta() -> dict[str, dict[str, Any]]:
-    return enabled_strategy_meta(enabled_persona_strategy_setting())
+    return enabled_strategy_meta(enabled_persona_strategy_setting(), strategy_source_setting())
 
 
 def active_strategy_score_profiles() -> dict[str, dict[str, Any]]:
-    return enabled_strategy_score_profiles(enabled_persona_strategy_setting())
+    return enabled_strategy_score_profiles(enabled_persona_strategy_setting(), strategy_source_setting())
 
 
 def with_strategy_profile(strategy_name: str, payload: dict[str, Any]) -> dict[str, Any]:

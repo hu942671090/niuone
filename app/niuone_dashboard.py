@@ -36,7 +36,15 @@ from niuone_paths import get_dashboard_env_file, get_dashboard_home, get_local_d
 import push_history
 from strategy_registry import (
     PERSONA_STRATEGY_ENV,
+    PRESET_STRATEGY_TEXT_ENV,
+    PRESET_STRATEGY_TEXT_MAX_CHARS,
+    STRATEGY_SOURCE_BUILTIN,
+    STRATEGY_SOURCE_ENV,
+    STRATEGY_SOURCE_OPTIONS,
+    decode_preset_strategy_text,
     default_enabled_persona_strategies_value,
+    normalize_preset_strategy_text_update,
+    normalize_strategy_source_update,
     normalize_strategy_list_update,
     strategy_settings_options,
 )
@@ -199,7 +207,9 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股及买卖决策时间点", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
     {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "09:30", "effect": "runtime"},
     {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "14:45", "effect": "runtime"},
-    {"name": PERSONA_STRATEGY_ENV, "label": "当前人格策略", "group": "选股策略", "kind": "strategy_single", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},
+    {"name": STRATEGY_SOURCE_ENV, "label": "当前策略来源", "group": "选股策略", "kind": "strategy_source", "default": "builtin", "effect": "runtime"},
+    {"name": PERSONA_STRATEGY_ENV, "label": "内置策略", "group": "选股策略", "kind": "strategy_single", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},
+    {"name": PRESET_STRATEGY_TEXT_ENV, "label": "预设文字策略", "group": "选股策略", "kind": "preset_strategy_text", "default": "", "effect": "runtime"},
     {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "B1 扫描超时秒数", "group": "任务调度", "kind": "int", "default": "360", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "B1 漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "label": "B1 运行中陈旧秒数", "group": "任务调度", "kind": "int", "default": "900", "effect": "restart"},
@@ -280,7 +290,9 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_B1_SCHEDULE_TIMES",
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
+    STRATEGY_SOURCE_ENV,
     PERSONA_STRATEGY_ENV,
+    PRESET_STRATEGY_TEXT_ENV,
     "DASHBOARD_US_MARKET_SUMMARY_CRON",
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
@@ -307,7 +319,9 @@ TRADER_RUNTIME_ENV_NAMES = {
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
     "DASHBOARD_TIME_STOP_EXIT_TIME",
+    STRATEGY_SOURCE_ENV,
     PERSONA_STRATEGY_ENV,
+    PRESET_STRATEGY_TEXT_ENV,
 }
 ENV_GROUP_ORDER = [
     "牛牛美股",
@@ -774,7 +788,7 @@ def get_practice_payload_fast() -> dict[str, Any]:
         payload["pause_since"] = state.get("pause_since", "")
         strategy_performance = trader.track_strategy_performance(state) if hasattr(trader, "track_strategy_performance") else {}
         payload["strategy_performance"] = compact_strategy_performance(strategy_performance)
-        payload["trade_rule_note"] = "A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。系统自动卖出：买入K线/前低止损、防卖飞5分评分、B3开盘离场检查09:30、B2/超级B1尾盘离场检查14:45、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。"
+        payload["trade_rule_note"] = "A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。系统底线风控：买入K线/前低止损、峰值回撤/ATR吊灯保护、持仓超25日退出；Z哥卖出风控：防卖飞5分评分、B3开盘离场检查09:30、B2/超级B1尾盘离场检查14:45、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
         payload["snapshot_mode"] = "fast"
         return payload
     except Exception as exc:
@@ -1617,6 +1631,10 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         return normalize_handle_list_update(value)
     if kind in {"strategy_multi", "strategy_single"}:
         return normalize_strategy_list_update(value)
+    if kind == "strategy_source":
+        return normalize_strategy_source_update(value)
+    if kind == "preset_strategy_text":
+        return normalize_preset_strategy_text_update(value)
     return value
 
 
@@ -1781,7 +1799,7 @@ ADMIN_GROUP_NOTES = {
     "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。留空则跳过。",
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。",
     "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
-    "选股策略": "选择参与 A 股扫描的人格策略；基础趋势/突破策略始终保留。",
+    "选股策略": "在内置策略和预设文字策略中选择一个激活；内置策略可选基础策略、Z哥或李大霄。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
 }
@@ -1887,6 +1905,12 @@ def friendly_strategy_list_text(value: str) -> str:
     return "、".join(labels.get(strategy_id, strategy_id) for strategy_id in split_strategy_values(value))
 
 
+def friendly_strategy_source_text(value: str) -> str:
+    normalized = normalize_strategy_source_update(value)
+    labels = {str(item["id"]): str(item["label"]) for item in STRATEGY_SOURCE_OPTIONS}
+    return labels.get(normalized, normalized)
+
+
 def x_watchlist_state_accounts(path: Path | None = None) -> list[str]:
     if path is None:
         path = Path(os.environ.get("DASHBOARD_X_WATCHLIST_STATE") or str(CRON_STATE_DIR / "x_watchlist_latest.json")).expanduser()
@@ -1968,6 +1992,10 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_handle_list_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"strategy_multi", "strategy_single"}:
             normalized[name] = normalize_strategy_list_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "strategy_source":
+            normalized[name] = normalize_strategy_source_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "preset_strategy_text":
+            normalized[name] = normalize_preset_strategy_text_update(normalized[name])
     return normalized
 
 
@@ -2001,8 +2029,12 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             normalize_env_update(name, value, "time")
         elif name == "X_WATCHLIST_ACCOUNTS":
             normalize_handle_list_update(value)
+        elif name == STRATEGY_SOURCE_ENV:
+            normalize_strategy_source_update(value)
         elif name == PERSONA_STRATEGY_ENV:
             normalize_strategy_list_update(value)
+        elif name == PRESET_STRATEGY_TEXT_ENV:
+            normalize_preset_strategy_text_update(value)
         elif name in {"X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "DASHBOARD_INDICES_TTL_SECONDS"} and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
@@ -2043,11 +2075,13 @@ def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str
         except (TypeError, ValueError):
             pass
 
-    if PERSONA_STRATEGY_ENV in changed_names:
+    if changed_names & {STRATEGY_SOURCE_ENV, PERSONA_STRATEGY_ENV, PRESET_STRATEGY_TEXT_ENV}:
         B1_CANDIDATE_REFRESH_LAST_TS = 0.0
         with API_RESPONSE_LOCK:
             API_RESPONSE_CACHE.pop("b1_screen", None)
-        applied.append("persona_strategies")
+        applied.append("strategy_settings")
+        if PERSONA_STRATEGY_ENV in changed_names:
+            applied.append("persona_strategies")
 
     if changed_names & TRADER_RUNTIME_ENV_NAMES:
         TRADER_MODULE = None
@@ -2149,6 +2183,25 @@ def build_admin_config_payload() -> dict[str, Any]:
                 "default": friendly_handle_list_text(default_value),
                 "handle_values": split_handle_values(edit_value),
             })
+        if schema.get("kind") == "strategy_source" and not secret:
+            edit_value = normalize_strategy_source_update(str(file_value or default_value))
+            state_value = env_values.get(name) if name in env_values else (fallback_value or default_value)
+            item.update({
+                "effective": friendly_strategy_source_text(effective),
+                "file_value": edit_value,
+                "file_state": friendly_strategy_source_text(state_value),
+                "default": friendly_strategy_source_text(default_value),
+                "strategy_source_options": list(STRATEGY_SOURCE_OPTIONS),
+            })
+        if schema.get("kind") == "preset_strategy_text" and not secret:
+            state_value = env_values.get(name) if name in env_values else (fallback_value or default_value)
+            item.update({
+                "effective": decode_preset_strategy_text(effective),
+                "file_value": decode_preset_strategy_text(str(file_value or "")),
+                "file_state": decode_preset_strategy_text(state_value),
+                "default": decode_preset_strategy_text(default_value),
+                "preset_strategy_max_chars": PRESET_STRATEGY_TEXT_MAX_CHARS,
+            })
         if schema.get("kind") in {"strategy_multi", "strategy_single"} and not secret:
             edit_source = str(file_value or "")
             if name not in env_values and name not in os.environ and fallback_value:
@@ -2219,6 +2272,7 @@ ADMIN_HTML = r"""<!doctype html>
 .strategy-option-title{display:flex;align-items:center;gap:7px;color:#e5edf8;font-weight:850;line-height:1.25}
 .strategy-option-dot{width:8px;height:8px;border-radius:3px;background:var(--strategy-color,#94a3b8);box-shadow:0 0 12px var(--strategy-color,#94a3b8);flex:0 0 auto}
 .strategy-option-desc{color:#94a3b8;font-size:12px;line-height:1.45}
+.preset-strategy-textarea{min-height:168px;font-family:inherit;font-size:13px;line-height:1.55}
 </style>
 </head><body><header class="admin-header"><div class="admin-header-inner"><div><div class="eyebrow">牛牛大作手</div><h1>设置</h1></div><a class="toplink" href="/">返回首页</a></div></header>
 <main class="admin-main">
@@ -2234,16 +2288,38 @@ function syncUsFeatureSettings() {
     section.setAttribute('aria-hidden', enabled ? 'false' : 'true');
   });
 }
+function currentStrategySource() {
+  var checked = document.querySelector('[data-strategy-source-toggle]:checked');
+  return checked ? checked.value : 'builtin';
+}
+function syncStrategySourceSettings() {
+  var source = currentStrategySource();
+  document.querySelectorAll('[data-strategy-source-gated]').forEach(function(section) {
+    var enabled = section.getAttribute('data-strategy-source-gated') === source;
+    section.hidden = !enabled;
+    section.setAttribute('aria-hidden', enabled ? 'false' : 'true');
+  });
+}
 document.addEventListener('DOMContentLoaded', syncUsFeatureSettings);
+document.addEventListener('DOMContentLoaded', syncStrategySourceSettings);
 syncUsFeatureSettings();
+syncStrategySourceSettings();
 function handleUsFeatureToggle(event) {
   var target = event.target;
   if (target && target.matches && target.matches('[data-feature-toggle="us"]')) {
     syncUsFeatureSettings();
   }
 }
+function handleStrategySourceToggle(event) {
+  var target = event.target;
+  if (target && target.matches && target.matches('[data-strategy-source-toggle]')) {
+    syncStrategySourceSettings();
+  }
+}
 document.addEventListener('input', handleUsFeatureToggle);
 document.addEventListener('change', handleUsFeatureToggle);
+document.addEventListener('input', handleStrategySourceToggle);
+document.addEventListener('change', handleStrategySourceToggle);
 function pulseSaveButton(button) {
   if (!button) return;
   button.classList.add('pressed');
@@ -2337,6 +2413,7 @@ document.addEventListener('submit', function(event) {
     });
   }).then(function(payload) {
     syncUsFeatureSettings();
+    syncStrategySourceSettings();
     setEnvSaveFeedback(form, 'ok', businessSaveMessage(payload));
   }).catch(function(error) {
     setEnvSaveFeedback(form, 'error', error && error.message ? error.message : '保存失败，请稍后重试');
@@ -5967,6 +6044,40 @@ def render_env_input(item: dict[str, Any]) -> str:
             "aria-label='添加作者' title='添加作者'>+</button></div>"
             "<div class='config-meta'>X/Twitter handle</div>"
         )
+    if kind == "strategy_source":
+        current = normalize_strategy_source_update(value)
+        field_name = f"env__{escaped_name}"
+        option_html = []
+        for option in item.get("strategy_source_options") or STRATEGY_SOURCE_OPTIONS:
+            source_id = str(option.get("id") or "")
+            if not source_id:
+                continue
+            checked = " checked" if source_id == current else ""
+            label = html.escape(str(option.get("label") or source_id))
+            desc = html.escape(str(option.get("desc") or ""))
+            color = html.escape(str(option.get("color") or "#94a3b8"))
+            option_html.append(
+                f"<label class='strategy-option' style='--strategy-color:{color}'>"
+                f"<input type='radio' name='{field_name}' value='{html.escape(source_id)}'{checked} data-strategy-source-toggle>"
+                "<span class='strategy-option-main'>"
+                f"<span class='strategy-option-title'><span class='strategy-option-dot'></span>{label}</span>"
+                f"<span class='strategy-option-desc'>{desc}</span>"
+                "</span>"
+                "</label>"
+            )
+        return (
+            "<div class='strategy-multi-control'>"
+            + "".join(option_html)
+            + "</div><div class='config-meta'>内置策略和预设文字二选一激活</div>"
+        )
+    if kind == "preset_strategy_text":
+        max_chars = int(item.get("preset_strategy_max_chars") or PRESET_STRATEGY_TEXT_MAX_CHARS)
+        return (
+            f"<textarea class='preset-strategy-textarea' name='env__{escaped_name}' "
+            f"maxlength='{max_chars}' spellcheck='false' placeholder='例如：只做主线强趋势回踩，买入后跌破5日线离场；盈利超过8%后分批止盈。'>"
+            f"{html.escape(value)}</textarea>"
+            "<div class='config-meta'>激活后由买卖决策模型优化为选股、买入、卖出和仓位规则</div>"
+        )
     if kind in {"strategy_multi", "strategy_single"}:
         selected = set(item.get("strategy_values") or split_strategy_values(value))
         field_name = f"env__{escaped_name}"
@@ -5994,7 +6105,7 @@ def render_env_input(item: dict[str, Any]) -> str:
             f"<div class='strategy-multi-control'>"
             f"<input type='hidden' name='{field_name}' value=''>"
             + "".join(option_html)
-            + "</div><div class='config-meta'>每次只启用一个人格策略</div>"
+            + "</div><div class='config-meta'>每次只启用一个内置策略</div>"
         )
     input_type = "number" if kind == "int" else "text"
     return f"<input type='{input_type}' name='env__{escaped_name}' value='{html.escape(value)}'>"
@@ -6033,6 +6144,10 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
                     row_attrs += " hidden aria-hidden='true'"
                 else:
                     row_attrs += " aria-hidden='false'"
+            if name == PERSONA_STRATEGY_ENV:
+                row_attrs += f" data-strategy-source-gated='{STRATEGY_SOURCE_BUILTIN}'"
+            elif name == PRESET_STRATEGY_TEXT_ENV:
+                row_attrs += " data-strategy-source-gated='preset_text'"
             rows.append(
                 f"<div {row_attrs}>"
                 f"<div class='setting-copy'><div class='config-label'>{html.escape(label)}</div></div>"

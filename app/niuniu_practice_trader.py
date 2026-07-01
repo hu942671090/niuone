@@ -30,10 +30,15 @@ from typing import Any
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
 from niuone_paths import get_dashboard_home
 from strategy_registry import (
+    PRESET_STRATEGY_TEXT_ENV,
     PERSONA_STRATEGY_ENV,
+    STRATEGY_SOURCE_ENV,
+    STRATEGY_SOURCE_PRESET_TEXT,
     STRATEGY_DEFINITIONS,
     STRATEGY_POSITION_LIMIT_PCT,
+    active_strategy_source,
     classify_strategy_text,
+    decode_preset_strategy_text,
     enabled_strategy_ids,
     known_strategy_ids,
     strategy_prompt_labels,
@@ -107,7 +112,9 @@ def load_dashboard_env() -> None:
         "DASHBOARD_MIN_CASH_RESERVE_PCT",
         "DASHBOARD_MARKET_GUIDANCE_ENABLED",
         "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
+        STRATEGY_SOURCE_ENV,
         PERSONA_STRATEGY_ENV,
+        PRESET_STRATEGY_TEXT_ENV,
         "CROSSDESK_BASE_URL",
         "CROSSDESK_API_KEY",
     }
@@ -3420,6 +3427,37 @@ def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
     return f"【消息面预检（实时搜索）】\n{content.strip()}"
 
 
+def current_strategy_source() -> str:
+    return active_strategy_source(os.environ.get(STRATEGY_SOURCE_ENV))
+
+
+def current_preset_strategy_text() -> str:
+    return decode_preset_strategy_text(os.environ.get(PRESET_STRATEGY_TEXT_ENV, ""))
+
+
+def active_strategy_ids_for_decision() -> set[str]:
+    return enabled_strategy_ids(os.environ.get(PERSONA_STRATEGY_ENV), os.environ.get(STRATEGY_SOURCE_ENV))
+
+
+def format_preset_strategy_section(source: str, preset_text: str) -> str:
+    if source != STRATEGY_SOURCE_PRESET_TEXT:
+        return "预设文字策略：本轮设置页未启用。"
+    if not preset_text:
+        return (
+            "预设文字策略（当前激活）：未填写预设文字。"
+            "本轮不得新开仓，只能按既有持仓风控卖出或HOLD。"
+        )
+    return f"""预设文字策略（当前激活）：
+用户原文：
+{preset_text}
+
+执行方式：
+1. 先将用户原文分析并优化成清晰的选股条件、买入触发、卖出/止损止盈、仓位和时间纪律。
+2. 将优化后的规则作为本轮主策略，用它筛选候选股并决定买卖；内置策略偏好本轮不生效，基础策略只作为候选池。
+3. 若用户规则含糊、互相冲突或突破A股交易/账户风控硬约束，按更保守的解释执行；无法确认则HOLD。
+4. 返回JSON的summary和reason里简短体现预设文字策略的核心规则。"""
+
+
 def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, Any],
                         trade_allowed: bool, trade_reason: str) -> dict[str, Any]:
     # Provider selection: most models use the configured OpenAI-compatible endpoint;
@@ -3456,7 +3494,11 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
     # 自适应参数（市场情绪驱动）
     adaptive = get_adaptive_params()
     # 多战法上下文：统计战法分布，给每个候选标注最优战法
-    active_strategy_ids = enabled_strategy_ids(os.environ.get(PERSONA_STRATEGY_ENV))
+    strategy_source = current_strategy_source()
+    preset_strategy_text = current_preset_strategy_text()
+    preset_strategy_section = format_preset_strategy_section(strategy_source, preset_strategy_text)
+    strategy_source_label = "预设文字策略" if strategy_source == STRATEGY_SOURCE_PRESET_TEXT else "内置策略"
+    active_strategy_ids = active_strategy_ids_for_decision()
     strategy_labels = strategy_prompt_labels(active_strategy_ids)
     # Build compact candidate list with strategy context
     cand_lines = []
@@ -3507,8 +3549,22 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 1. B3中继：确定性最高但盈亏比最低，只做贴近B2、振幅小、J不过热的箭在弦上，T+1 {B3_EXIT_HHMM}开盘不涨走
 2. B2确认：必须放量长阳、一阳穿多线、J<55、B1后3日内；偏滞后或离BBI远就是追高，不买；T+2 {TIME_EXIT_HHMM}尾盘不延续走
 3. 少妇B1：交易级B1按J≤-10执行；J≤12但未到负值只观察。必须缩量、N型上移、黄线/BBI附近、上方压力不重；3天不涨走
-4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑，未兑现到窗口日{TIME_EXIT_HHMM}尾盘走""" if zettaranc_enabled else "Z哥：本轮设置页未启用。"
-    persona_strategy_section = "\n".join(persona_strategy_lines) or "- 暂无启用的拟人化扩展策略"
+4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑，未兑现到窗口日{TIME_EXIT_HHMM}尾盘走
+
+Z哥卖出风控（属于Z哥体系）：
+- 买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护
+- B3仅在{B3_EXIT_HHMM}做开盘离场检查，B2/超级B1仅在{TIME_EXIT_HHMM}做尾盘离场检查""" if zettaranc_enabled else "Z哥：本轮设置页未启用，Z哥买入战法和卖出风控不作为本轮新增仓依据。"
+    base_strategy_enabled = any(
+        STRATEGY_DEFINITIONS.get(strategy_id, {}).get("family") == "local"
+        for strategy_id in active_strategy_ids
+    )
+    base_strategy_section = """基础策略：
+1. 突破确认：优先看有效突破和回踩不破，再作为确认仓处理
+2. 趋势回踩：强趋势股回踩BBI/EMA不破，按低吸仓处理""" if base_strategy_enabled else "基础策略：本轮设置页未启用。"
+    if strategy_source == STRATEGY_SOURCE_PRESET_TEXT:
+        persona_strategy_section = "- 本轮设置页未启用人格策略"
+    else:
+        persona_strategy_section = "\n".join(persona_strategy_lines) or "- 暂无启用的拟人化扩展策略"
     decision_portfolio = compact_portfolio_for_decision(portfolio)
 
     prompt = f"""你是A股模拟账户交易决策器。账户初始资金100万，只做A股模拟交易，不是真实下单。
@@ -3520,7 +3576,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 - 单票目标仓位不超过总资产{MAX_SINGLE_POSITION_PCT:g}%；总持仓不超过{MAX_TOTAL_POSITION_PCT:g}%；至少保留{MIN_CASH_RESERVE_PCT:g}%现金。
 - 今日盘面监控指引优先收紧买入节奏；若动态上限低于静态上限，必须按动态上限决策，不能上午把{MAX_OPEN_POSITIONS}只买满。
 - 首次建仓必须小仓试错；按注册策略仓位上限执行：{position_limit_desc}；尾盘(14:30后)原则上不新开仓。
-- 自动卖出规则：买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、B3仅在{B3_EXIT_HHMM}做开盘离场检查，B2/超级B1仅在{TIME_EXIT_HHMM}做尾盘离场检查、持仓超25日退出
+- 系统底线风控：买入K线/前低止损、-4%硬止损、持仓超25日退出；防卖飞、卤煮、S1/S2/S3、出货五式、白线/黄线等归属于下方 Z哥卖出风控
 - 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出
 - 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场
 - 同板块持仓不超过2只（避免集中风险）
@@ -3530,6 +3586,8 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 - 盈亏比过滤：优先选盈亏比≥2:1的票（上涨空间/下跌空间），盈亏比<1.5自动标记风险 ← 新增
 - 波动率仓位：20日波动>3.5%→仓位×0.7，波动<1.5%→仓位×1.3 ← 新增
 - 融资+大宗信号：优先买入融资净买入+大宗溢价的票，谨慎对待融资偿还+大宗折价的票 ← 新增
+
+当前激活策略来源：{strategy_source_label}
 
 【多战法选股原则 — 回测优化版(v4，含Z哥)】
 基于50只主板票×120天历史回测数据优化：
@@ -3543,12 +3601,12 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
 
 {zettaranc_strategy_section}
 
-非Z哥补充策略：
-- 突破确认 — 优先看有效突破和回踩不破
-- 趋势回踩 — 需要趋势确认后再买
+{base_strategy_section}
 
 拟人化扩展策略（风格化量化代理，不代表本人观点）：
 {persona_strategy_section}
+
+{preset_strategy_section}
 
 ⚠️ 突破确认信号虽然少但质量高，不要因为它频率低就忽略。
 ⚠️ 有风险标记的候选股，请结合其近期消息面（利空/减持/监管）综合判断，不要只看技术面。
@@ -4194,8 +4252,9 @@ def get_dashboard_payload() -> dict[str, Any]:
         f"买入硬约束：最多{MAX_OPEN_POSITIONS}只持仓、单轮最多{MAX_NEW_BUYS_PER_DECISION}笔新仓、"
         f"午盘前默认最多{MORNING_MAX_OPEN_POSITIONS}只，并按最新盘面监控动态收紧；"
         f"单票≤{MAX_SINGLE_POSITION_PCT:g}%、总仓≤{MAX_TOTAL_POSITION_PCT:g}%、现金≥{MIN_CASH_RESERVE_PCT:g}%。"
-        f"系统自动卖出：-4%硬止损/买入K线前低止损、防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
-        f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护、持仓超25日退出。"
+        f"系统底线风控：-4%硬止损/买入K线前低止损、峰值回撤/ATR吊灯保护、持仓超25日退出；"
+        f"Z哥卖出风控：防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
+        f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
         f"买入按万一免五计费。"
     )
     payload["fee_rule"] = {

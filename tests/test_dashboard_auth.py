@@ -59,7 +59,13 @@ class DashboardAuthTests(unittest.TestCase):
         self.original_cron_state_dir = dashboard.CRON_STATE_DIR
         self.saved_env = {
             name: os.environ.get(name)
-            for name in ('X_WATCHLIST_ACCOUNTS', 'DASHBOARD_X_WATCHLIST_STATE', dashboard.PERSONA_STRATEGY_ENV)
+            for name in (
+                'X_WATCHLIST_ACCOUNTS',
+                'DASHBOARD_X_WATCHLIST_STATE',
+                dashboard.STRATEGY_SOURCE_ENV,
+                dashboard.PERSONA_STRATEGY_ENV,
+                dashboard.PRESET_STRATEGY_TEXT_ENV,
+            )
         }
         for name in self.saved_env:
             os.environ.pop(name, None)
@@ -568,10 +574,23 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('买卖决策模型', body)
         self.assertIn('选股及买卖决策时间点', body)
         self.assertIn('选股策略', body)
-        self.assertIn('当前人格策略', body)
+        self.assertIn('当前策略来源', body)
+        self.assertIn('内置策略', body)
+        self.assertIn('预设文字策略', body)
+        self.assertIn("name='env__DASHBOARD_STRATEGY_SOURCE'", body)
+        self.assertIn("value='builtin'", body)
+        self.assertIn("value='preset_text'", body)
+        self.assertIn("data-strategy-source-toggle", body)
+        self.assertIn("data-strategy-source-gated='builtin'", body)
+        self.assertIn("data-strategy-source-gated='preset_text'", body)
+        self.assertIn("name='env__DASHBOARD_PRESET_STRATEGY_TEXT'", body)
+        self.assertIn('preset-strategy-textarea', body)
+        self.assertIn("document.addEventListener('input', handleStrategySourceToggle);", body)
         self.assertIn("name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
         self.assertIn("type='radio' name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
         self.assertNotIn("type='checkbox' name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
+        self.assertIn("value='base'", body)
+        self.assertIn('基础策略', body)
         self.assertIn("value='zettaranc'", body)
         self.assertIn('Z哥', body)
         self.assertNotIn('Z哥体系', body)
@@ -581,7 +600,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('李大霄底部', body)
         self.assertNotIn("value='buffett_value'", body)
         self.assertNotIn('巴菲特价值', body)
-        self.assertIn('每次只启用一个人格策略', body)
+        self.assertIn('每次只启用一个内置策略', body)
+        self.assertIn('内置策略和预设文字二选一激活', body)
         self.assertIn('盘面监控生产时间点', body)
         self.assertIn('A股盘面模型总结', body)
         self.assertIn("name='env__A_SHARE_MODEL_SUMMARY_ENABLED'", body)
@@ -695,6 +715,22 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(item['file_value'], '')
         self.assertEqual(item['handle_values'], [])
         self.assertEqual(item['effective'], '')
+
+    def test_admin_config_decodes_preset_strategy_text(self):
+        dashboard.DASHBOARD_ENV_FILE.write_text(
+            "DASHBOARD_STRATEGY_SOURCE=preset_text\n"
+            "DASHBOARD_PRESET_STRATEGY_TEXT='强趋势回踩\\n跌破5日线离场'\n",
+            encoding='utf-8',
+        )
+
+        payload = dashboard.build_admin_config_payload()
+        source_item = next(item for item in payload['items'] if item['name'] == dashboard.STRATEGY_SOURCE_ENV)
+        text_item = next(item for item in payload['items'] if item['name'] == dashboard.PRESET_STRATEGY_TEXT_ENV)
+
+        self.assertEqual(source_item['effective'], '预设文字')
+        self.assertEqual(source_item['file_value'], 'preset_text')
+        self.assertEqual(text_item['file_value'], '强趋势回踩\n跌破5日线离场')
+        self.assertEqual(text_item['effective'], '强趋势回踩\n跌破5日线离场')
 
     def test_business_settings_are_local_to_dashboard_env(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE
@@ -903,7 +939,9 @@ class DashboardAuthTests(unittest.TestCase):
                 'env__DASHBOARD_MARKET_AUCTION_CRON': '09:26',
                 'env__DASHBOARD_US_RATING_CRON': '10:30',
                 'env__X_WATCHLIST_ACCOUNTS': ['', '@Foo', 'bar', 'foo'],
+                'env__DASHBOARD_STRATEGY_SOURCE': 'preset_text',
                 'env__DASHBOARD_ENABLED_PERSONA_STRATEGIES': ['', 'li_daxiao_bottom'],
+                'env__DASHBOARD_PRESET_STRATEGY_TEXT': '只做主线强趋势回踩\n跌破5日线离场',
                 'env__DASHBOARD_HOME': '/tmp/should-not-be-written',
             }, doseq=True).encode('utf-8')
             handler = FakeHandler(
@@ -945,6 +983,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('b1_schedule_times', response['runtime']['applied'])
         self.assertIn('indices_ttl', response['runtime']['applied'])
         self.assertIn('persona_strategies', response['runtime']['applied'])
+        self.assertIn('strategy_settings', response['runtime']['applied'])
         self.assertIn('trader_runtime', response['runtime']['applied'])
         self.assertEqual(parsed['DASHBOARD_US_FEATURES_ENABLED'], '1')
         self.assertEqual(parsed['DASHBOARD_GROK_MODEL'], 'grok-test')
@@ -957,7 +996,9 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
         self.assertEqual(parsed['X_WATCHLIST_ACCOUNTS'], 'foo,bar')
+        self.assertEqual(parsed['DASHBOARD_STRATEGY_SOURCE'], 'preset_text')
         self.assertEqual(parsed['DASHBOARD_ENABLED_PERSONA_STRATEGIES'], 'li_daxiao_bottom')
+        self.assertEqual(parsed['DASHBOARD_PRESET_STRATEGY_TEXT'], '只做主线强趋势回踩\\n跌破5日线离场')
         self.assertEqual(runtime_b1_times, ('09:25', '10:00', '14:50'))
         self.assertEqual(runtime_indices_ttl, 20)
         self.assertNotIn('DASHBOARD_HOME', parsed)
