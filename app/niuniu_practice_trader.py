@@ -23,7 +23,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1604,36 +1604,92 @@ def market_session_phase(now: datetime | None = None) -> str:
     return "after_close"
 
 
+def previous_a_share_trading_day_text(now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    try:
+        previous = str(trading_day_status(now, allow_refresh=False).get("previous_trading_day") or "")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", previous):
+            return previous
+    except Exception:
+        pass
+    cur = now.date()
+    for _ in range(10):
+        cur -= timedelta(days=1)
+        if cur.weekday() < 5:
+            return cur.strftime("%Y-%m-%d")
+    return ""
+
+
+def _market_monitor_report_from_record(record: dict[str, Any]) -> dict[str, Any] | None:
+    time_text = str(record.get("time_text") or record.get("time") or "")
+    content = str(record.get("content") or "")
+    if not content.strip():
+        return None
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return {
+        "title": record.get("title") or record.get("chat_label") or "盘面监控",
+        "time": time_text,
+        "content": content,
+        "metadata": metadata,
+    }
+
+
+def _market_report_date_text(report: dict[str, Any]) -> str:
+    text = str(report.get("time") or "")
+    m = re.search(r"\d{4}-\d{2}-\d{2}", text)
+    return m.group(0) if m else ""
+
+
+def _is_post_close_market_report(report: dict[str, Any]) -> bool:
+    title = str(report.get("title") or "")
+    content = str(report.get("content") or "")
+    if any(keyword in title for keyword in ("盘后", "收盘")):
+        return True
+    if "次日盘前指引" in content or "次日买卖计划" in content:
+        return True
+    m = re.search(r"\d{2}:\d{2}", str(report.get("time") or ""))
+    return bool(m and m.group(0) >= "15:00")
+
+
 def load_today_market_monitor_reports(now: datetime | None = None, limit: int = 3) -> list[dict[str, Any]]:
-    """Load today's latest archived market-monitor reports for trading context."""
+    """Load current-day market reports plus prior close guidance when still relevant."""
     if not MARKET_GUIDANCE_ENABLED:
         return []
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
+    previous_trading_day = previous_a_share_trading_day_text(now)
+    phase = market_session_phase(now)
     try:
         import push_history as _push_history
         data = _push_history.query_messages(category="market_monitor", limit=MARKET_REPORT_LOOKBACK)
     except Exception:
         return []
-    reports: list[dict[str, Any]] = []
+    same_day_reports: list[dict[str, Any]] = []
+    previous_close_report: dict[str, Any] | None = None
     for record in data.get("records") or []:
         if not isinstance(record, dict):
             continue
-        time_text = str(record.get("time_text") or record.get("time") or "")
-        if not time_text.startswith(today):
+        report = _market_monitor_report_from_record(record)
+        if not report:
             continue
-        content = str(record.get("content") or "")
-        if not content.strip():
-            continue
-        reports.append({
-            "title": record.get("title") or record.get("chat_label") or "盘面监控",
-            "time": time_text,
-            "content": content,
-            "metadata": record.get("metadata") or {},
-        })
-        if len(reports) >= limit:
-            break
+        report_date = _market_report_date_text(report)
+        if report_date == today:
+            same_day_reports.append(report)
+        elif (
+            previous_close_report is None
+            and report_date == previous_trading_day
+            and _is_post_close_market_report(report)
+        ):
+            previous_close_report = report
+
+    limit = max(int(limit or 1), 1)
+    reports = same_day_reports[:limit]
+    if previous_close_report and (phase in {"morning", "lunch"} or not reports) and len(reports) < limit:
+        reports.append(previous_close_report)
     return reports
+
+
+load_current_market_monitor_reports = load_today_market_monitor_reports
 
 
 def extract_market_guidance_lines(content: str, metadata: dict[str, Any] | None = None, max_lines: int = 8) -> list[str]:

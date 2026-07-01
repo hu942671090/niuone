@@ -3,6 +3,7 @@ import os
 import json
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -372,6 +373,80 @@ class SellStrategyRuleTests(unittest.TestCase):
         ]))
 
         self.assertEqual(lines, ["风险级别：谨慎", "开仓节奏：次日最多1笔"])
+
+    def test_market_guidance_loads_prior_close_before_today_reports(self):
+        original_push_history = sys.modules.get("push_history")
+        previous_close = {
+            "title": "A股盘后总结",
+            "time_text": "2026-07-01 15:10:02",
+            "content": "\n".join([
+                "🎯 **次日盘前指引**",
+                "· 风险级别：进攻",
+                "· 开仓节奏：次日可正常试错",
+            ]),
+            "metadata": {
+                "decision_guidance": ["风险级别：进攻", "开仓节奏：次日可正常试错"],
+            },
+        }
+        sys.modules["push_history"] = types.SimpleNamespace(
+            query_messages=lambda **kwargs: {"records": [previous_close]}
+        )
+        try:
+            reports = trader.load_today_market_monitor_reports(datetime(2026, 7, 2, 9, 20, 0))
+        finally:
+            if original_push_history is None:
+                sys.modules.pop("push_history", None)
+            else:
+                sys.modules["push_history"] = original_push_history
+
+        ctx = trader.derive_market_strategy_context(reports, datetime(2026, 7, 2, 9, 20, 0))
+        self.assertEqual([r["time"] for r in reports], ["2026-07-01 15:10:02"])
+        self.assertEqual(ctx["tone"], "offensive")
+        self.assertEqual(ctx["source_title"], "A股盘后总结")
+        self.assertEqual(ctx["source_time"], "2026-07-01 15:10:02")
+
+    def test_market_guidance_keeps_today_auction_ahead_of_prior_close(self):
+        original_push_history = sys.modules.get("push_history")
+        auction_report = {
+            "title": "A股竞价盘前总结",
+            "time_text": "2026-07-02 09:25:09",
+            "content": "\n".join([
+                "🎯 **今日买卖指引**",
+                "· 风险级别：谨慎",
+                "· 开仓节奏：先观察再试错",
+            ]),
+            "metadata": {
+                "decision_guidance": ["风险级别：谨慎", "开仓节奏：先观察再试错"],
+            },
+        }
+        previous_close = {
+            "title": "A股盘后总结",
+            "time_text": "2026-07-01 15:10:02",
+            "content": "\n".join([
+                "🎯 **次日盘前指引**",
+                "· 风险级别：进攻",
+                "· 开仓节奏：次日可正常试错",
+            ]),
+            "metadata": {
+                "decision_guidance": ["风险级别：进攻", "开仓节奏：次日可正常试错"],
+            },
+        }
+        sys.modules["push_history"] = types.SimpleNamespace(
+            query_messages=lambda **kwargs: {"records": [auction_report, previous_close]}
+        )
+        try:
+            reports = trader.load_today_market_monitor_reports(datetime(2026, 7, 2, 9, 26, 0))
+        finally:
+            if original_push_history is None:
+                sys.modules.pop("push_history", None)
+            else:
+                sys.modules["push_history"] = original_push_history
+
+        ctx = trader.derive_market_strategy_context(reports, datetime(2026, 7, 2, 9, 26, 0))
+        self.assertEqual([r["time"] for r in reports], ["2026-07-02 09:25:09", "2026-07-01 15:10:02"])
+        self.assertEqual(ctx["tone"], "cautious")
+        self.assertEqual(ctx["source_title"], "A股竞价盘前总结")
+        self.assertEqual(ctx["source_time"], "2026-07-02 09:25:09")
 
     def test_execute_actions_uses_market_guidance_position_cap(self):
         original_execution_time = trader.is_a_share_execution_time
