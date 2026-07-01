@@ -7,9 +7,9 @@ import json
 import re
 import time
 import urllib.request
-import os
 from pathlib import Path
 
+from dashboard_json_cache import read_json_cache, write_json_cache
 from niuone_paths import get_dashboard_home
 
 CACHE_BASE = get_dashboard_home(Path(__file__).resolve().parents[1]) / "cron" / "output"
@@ -98,15 +98,21 @@ def _compute():
 
 
 def fetch_sector_data():
+    empty = {"sectors": [], "items": [], "gain_top": [], "loss_top": []}
+    cached = read_json_cache(CACHE_PATH, CACHE_TTL)
+    if cached is not None:
+        return cached
     try:
-        if CACHE_PATH.exists() and time.time() - CACHE_PATH.stat().st_mtime < CACHE_TTL:
-            return json.loads(CACHE_PATH.read_text())
         data = _compute()
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False))
+        write_json_cache(CACHE_PATH, data)
         return data
     except Exception as e:
-        return {"sectors": [], "items": [], "gain_top": [], "loss_top": [], "error": str(e)}
+        stale = read_json_cache(CACHE_PATH)
+        if stale is not None:
+            stale["stale_cache"] = True
+            stale["error"] = str(e)
+            return stale
+        return {**empty, "error": str(e)}
 
 if __name__ == '__main__':
     print(json.dumps(fetch_sector_data(), ensure_ascii=False, indent=2))

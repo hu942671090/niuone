@@ -610,6 +610,20 @@ def run_dashboard_helper(script_name: str, fallback: dict[str, Any], timeout: in
         return {**fallback, "error": str(exc)}
 
 
+def apply_hot_stocks_sort(data: dict[str, Any], sort_by: str) -> dict[str, Any]:
+    payload = dict(data or {})
+    sort_key = (sort_by or "amount").strip().lower()
+    if sort_key in ("turnover", "turnover_top"):
+        payload["items"] = payload.get("turnover_top", [])
+    elif sort_key in ("volume", "volume_top"):
+        payload["items"] = payload.get("volume_top", [])
+    elif sort_key in ("gain", "hot"):
+        payload["items"] = payload.get("gain_top", [])
+    else:
+        payload["items"] = payload.get("amount_top", payload.get("items", []))
+    return payload
+
+
 def get_practice_payload() -> dict[str, Any]:
     try:
         trader = get_trader_module()
@@ -6524,7 +6538,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json_cached("sectors", API_TTLS["sectors"], lambda: run_dashboard_helper("sectors_dashboard_api.py", {"sectors": [], "items": [], "gain_top": [], "loss_top": []}, timeout=120), edge_ttl=API_TTLS["sectors"], browser_ttl=15)
             return
         if parsed.path == "/api/hot_stocks":
-            self.send_json_cached("hot_stocks", API_TTLS["hot_stocks"], lambda: run_dashboard_helper("hot_stocks_dashboard_api.py", {"items": [], "amount_top": [], "turnover_top": [], "volume_top": []}, timeout=120), edge_ttl=API_TTLS["hot_stocks"], browser_ttl=15)
+            params = parse_qs(parsed.query)
+            sort_by = (params.get("sort_by", ["amount"])[0] or "amount").strip().lower()
+            if sort_by not in {"amount", "amount_top", "turnover", "turnover_top", "volume", "volume_top", "gain", "hot"}:
+                sort_by = "amount"
+
+            def produce_hot_stocks():
+                data = run_dashboard_helper(
+                    "hot_stocks_dashboard_api.py",
+                    {"items": [], "amount_top": [], "turnover_top": [], "volume_top": [], "gain_top": []},
+                    timeout=120,
+                )
+                return apply_hot_stocks_sort(data, sort_by)
+
+            self.send_json_cached(f"hot_stocks:{sort_by}", API_TTLS["hot_stocks"], produce_hot_stocks, edge_ttl=API_TTLS["hot_stocks"], browser_ttl=15)
             return
         if parsed.path == "/api/us_quotes":
             params = parse_qs(parsed.query)

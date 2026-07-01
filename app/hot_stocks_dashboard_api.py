@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """hot_stocks_dashboard_api.py — A股成交额/换手率/涨幅排行榜（腾讯行情）"""
 import json
-import os
 import re
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from dashboard_json_cache import read_json_cache, write_json_cache
 from niuone_paths import get_dashboard_home
 
 MAIN_PREFIX = ("600", "601", "603", "605", "000", "001", "002", "003")
@@ -113,24 +113,28 @@ def _compute():
 
 
 def fetch_hot_stocks(sort_by="amount"):
+    empty = {"items": [], "amount_top": [], "turnover_top": [], "volume_top": [], "gain_top": []}
     try:
-        if CACHE_PATH.exists() and time.time() - CACHE_PATH.stat().st_mtime < CACHE_TTL:
-            data = json.loads(CACHE_PATH.read_text())
-        else:
+        data = read_json_cache(CACHE_PATH, CACHE_TTL)
+        if data is None:
             data = _compute()
-            CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False))
-        if sort_by in ("turnover", "turnover_top"):
-            data["items"] = data.get("turnover_top", [])
-        elif sort_by in ("volume", "volume_top"):
-            data["items"] = data.get("volume_top", [])
-        elif sort_by in ("gain", "hot"):
-            data["items"] = data.get("gain_top", [])
-        else:
-            data["items"] = data.get("amount_top", data.get("items", []))
-        return data
+            write_json_cache(CACHE_PATH, data)
     except Exception as e:
-        return {"items": [], "amount_top": [], "turnover_top": [], "volume_top": [], "gain_top": [], "error": str(e)}
+        data = read_json_cache(CACHE_PATH)
+        if data is not None:
+            data["stale_cache"] = True
+            data["error"] = str(e)
+        else:
+            data = {**empty, "error": str(e)}
+    if sort_by in ("turnover", "turnover_top"):
+        data["items"] = data.get("turnover_top", [])
+    elif sort_by in ("volume", "volume_top"):
+        data["items"] = data.get("volume_top", [])
+    elif sort_by in ("gain", "hot"):
+        data["items"] = data.get("gain_top", [])
+    else:
+        data["items"] = data.get("amount_top", data.get("items", []))
+    return data
 
 if __name__ == '__main__':
     print(json.dumps(fetch_hot_stocks(), ensure_ascii=False, indent=2))
