@@ -169,11 +169,11 @@ NiuOne 的 A 股策略筛选和模拟交易规则中，参考并实现了 [zetta
 
 策略元数据集中在 `app/strategy_registry.py`。新增拟人化策略时，优先在注册表里增加 `label/color/desc/scorer/profile/position_limit_pct/aliases`，再在 `app/multi_strategy_screen.py` 中实现对应 `score_xxx(rows)` 评分函数。扫描器会自动遍历注册表里的 scorer，并把 `strategy_meta` 输出给 dashboard 和模拟交易模块。设置页的“选股策略”一次只启用一个人格，当前可在 Z哥和拟人化扩展策略之间切换。当前已内置一个风格化扩展示例：
 
-- **李大霄**：用高流动性、低位区、缩量企稳和低波动作为“蓝筹底部”代理信号。
+- **李大霄**：参考 [li-daxiao-skill](https://github.com/sherjy/li-daxiao-skill) 的“政策、价值、底部发育、逆向情绪、杠杆风控”框架，用主板高流动性蓝筹、低位企稳、低换手、缩量低波动、反追高和反“黑五类”作为可执行代理信号。
 
 卖出侧包含买入K线/前低止损、硬止损、防卖飞评分、卤煮半仓、S1/S2/S3逃顶、出货五式、白线/BBI破位、峰值回撤/ATR吊灯保护，以及 B3、B2、超级B1 的时间离场纪律。
 
-本项目仅在本地模拟交易和研究辅助场景中使用这些公开整理的战法规则，不代表原作者背书，也不构成任何投资建议。若继续扩展或二次分发相关策略说明，请同时保留对 zettaranc-skill 的引用。
+本项目仅在本地模拟交易和研究辅助场景中使用这些公开整理的战法规则，不代表原作者背书，也不构成任何投资建议。若继续扩展或二次分发相关策略说明，请同时保留对 zettaranc-skill 与 li-daxiao-skill 的引用。
 
 ## 文档
 

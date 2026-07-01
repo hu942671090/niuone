@@ -151,6 +151,11 @@ class MultiStrategyRuleTests(unittest.TestCase):
             "bottom_zone": False,
             "stabilizing": False,
             "bluechip_liquidity_proxy": True,
+            "value_anchor_proxy": True,
+            "anti_black_five_proxy": True,
+            "not_fresh_listing_proxy": True,
+            "no_chase_zone": True,
+            "speculation_heat": False,
             "breakdown_risk": False,
             "volatility_20d_pct": 2.0,
             "risk_flags": [],
@@ -159,6 +164,30 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertFalse(payload["actionable"])
         self.assertIn("未处低位区", payload["hard_blockers"])
         self.assertIn("底部未企稳", payload["hard_blockers"])
+
+    def test_li_daxiao_profile_blocks_speculative_chasing(self):
+        payload = screen.with_strategy_profile("li_daxiao_bottom", {
+            "score": 9.0,
+            "distance_pct": 3.2,
+            "bottom_zone": True,
+            "stabilizing": True,
+            "bluechip_liquidity_proxy": True,
+            "value_anchor_proxy": False,
+            "anti_black_five_proxy": False,
+            "not_fresh_listing_proxy": False,
+            "no_chase_zone": False,
+            "speculation_heat": True,
+            "breakdown_risk": False,
+            "volatility_20d_pct": 2.0,
+            "risk_flags": [],
+        })
+
+        self.assertFalse(payload["actionable"])
+        self.assertIn("低估蓝筹代理不足", payload["hard_blockers"])
+        self.assertIn("黑五类/题材热度代理偏高", payload["hard_blockers"])
+        self.assertIn("次新代理风险", payload["hard_blockers"])
+        self.assertIn("李大霄不追高", payload["hard_blockers"])
+        self.assertIn("换手/涨幅过热", payload["hard_blockers"])
 
 
 if __name__ == "__main__":

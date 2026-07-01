@@ -3494,8 +3494,10 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
         if definition.get("family") != "persona" or definition.get("persona") == "zettaranc" or strategy_id not in active_strategy_ids:
             continue
         profile = definition.get("profile") or {}
+        heuristics = profile.get("decision_heuristics") or []
+        heuristic_text = "；纪律：" + "；".join(str(item) for item in heuristics) if heuristics else ""
         persona_strategy_lines.append(
-            f"- {definition.get('label')} — {definition.get('desc')}；定位：{profile.get('score_basis', '-')}"
+            f"- {definition.get('label')} — {definition.get('desc')}；定位：{profile.get('score_basis', '-')}{heuristic_text}"
         )
     zettaranc_enabled = any(
         STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona") == "zettaranc"
