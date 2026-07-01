@@ -185,10 +185,23 @@ def call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = 1800) -> 
 
 
 def build_a_share_grok_messages(local_report: str, *, title: str) -> list[dict[str, str]]:
+    title_text = str(title or "")
+    if "盘后" in title_text:
+        target_guidance = "次日盘前指引"
+        timing_requirement = "这是一份盘后报告，guidance_lines 必须写成次日盘前可执行计划，覆盖竞价确认、开盘15分钟承接、仓位节奏、卖出风控；不要写今天剩余交易时段。"
+    elif "午盘" in title_text:
+        target_guidance = "午后买卖指引"
+        timing_requirement = "这是一份午盘报告，guidance_lines 必须写成午后交易计划，覆盖主线延续、13:00后承接、仓位节奏和卖出风控。"
+    elif "竞价" in title_text or "盘前" in title_text:
+        target_guidance = "盘前买卖指引"
+        timing_requirement = "这是一份盘前/竞价报告，guidance_lines 必须写成今日开盘后的执行计划，覆盖开盘确认、上午节奏和卖出风控。"
+    else:
+        target_guidance = "买卖指引"
+        timing_requirement = "guidance_lines 必须结合报告标题判断是盘中、盘后还是盘前，并写成对应交易时段的执行计划。"
     system = (
         "你是牛牛1号的A股盘面监控策略分析师。"
         "你会收到一份由本地规则生成的A股盘面快照，可能包含涨跌家数、涨跌停、成交额、竞价成交额、开盘强弱、封单、资金流、热门板块和强势个股。"
-        "你的任务是基于这些已给数据，补强盘面总结和买卖指引。"
+        f"你的任务是基于这些已给数据，补强盘面总结和{target_guidance}。"
         "不要编造未给出的新闻、政策、公司事件、资金数据或实时行情；如果数据不足，必须明确保守处理。"
         "必须输出严格JSON，不要Markdown，不要代码块，不要URL。"
     )
@@ -215,6 +228,7 @@ def build_a_share_grok_messages(local_report: str, *, title: str) -> list[dict[s
 
 要求：
 - guidance_lines 返回 4 到 7 条，短句但可执行。
+- {timing_requirement}
 - 不要输出收益承诺，不要建议满仓，不要说“必涨/确定”。
 - 如果涨少跌多、跌停不弱、竞价低开较多、竞价成交额断档或资金流分散，买入节奏必须收紧。
 - 如果市场明显强，仍要强调只做板块联动、回封、回踩不破或右侧确认。
@@ -270,10 +284,10 @@ def _remove_original_guidance(local_report: str) -> str:
     in_guidance = False
     for line in lines:
         clean = line.strip()
-        if "今日买卖指引" in clean:
+        if any(key in clean for key in ("今日买卖指引", "午后买卖指引", "次日买卖计划", "次日盘前指引", "盘前买卖指引")):
             in_guidance = True
             continue
-        if in_guidance and clean.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "⚠️", "🌡️", "💡")) and "**" in clean:
+        if in_guidance and clean.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "🧭", "⚠️", "🌡️", "💡")) and "**" in clean:
             in_guidance = False
         if in_guidance:
             continue
@@ -292,6 +306,8 @@ def render_grok_a_share_report(local_report: str, parsed: dict[str, Any], *, tit
     risks = [str(x).strip().lstrip("·- ").strip() for x in parsed.get("risk_lines") or [] if str(x).strip()]
     if not any(line.startswith("风险级别") for line in guidance):
         guidance.insert(0, f"风险级别：{tone_label}")
+    title_text = str(title or "")
+    guidance_title = "次日盘前指引" if "盘后" in title_text else ("午后买卖指引" if "午盘" in title_text else "今日买卖指引")
 
     lines = [
         f"牛牛大王，{title}来了：",
@@ -300,7 +316,7 @@ def render_grok_a_share_report(local_report: str, parsed: dict[str, Any], *, tit
         f"生成模型 `{A_SHARE_MODEL_SUMMARY_MODEL}`",
         f"💬 {summary}",
         "",
-        "🎯 **今日买卖指引**",
+        f"🎯 **{guidance_title}**",
     ]
     lines.extend(f"· {line}" for line in guidance[:8])
     if focus:

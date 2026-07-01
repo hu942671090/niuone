@@ -73,6 +73,60 @@ class AShareGrokSummaryTests(unittest.TestCase):
         self.assertNotIn("风险级别：平衡", report)
         self.assertIn("`通信` +1.20%", report)
 
+    def test_close_report_uses_next_day_premarket_heading(self):
+        mod = load_module()
+        original_call = mod.call_grok_api
+        original_model = mod.A_SHARE_MODEL_SUMMARY_MODEL
+        try:
+            mod.A_SHARE_MODEL_SUMMARY_MODEL = "model-test"
+            captured = {}
+
+            def fake_call(messages, max_tokens=1800):
+                captured["prompt"] = messages[-1]["content"]
+                return json.dumps({
+                    "tone": "cautious",
+                    "tone_label": "谨慎",
+                    "summary": "盘后结构分化，次日先看竞价是否承接。",
+                    "guidance_lines": [
+                        "风险级别：谨慎",
+                        "开仓节奏：次日最多1笔，开盘15分钟后确认。",
+                        "买入指引：只看半导体资金延续和回踩不破。",
+                        "卖出/风控：低开不修复和弱于板块的持仓先处理。",
+                    ],
+                    "focus_lines": ["观察半导体竞价溢价"],
+                    "risk_lines": ["跌停扩散则暂停新开仓"],
+                }, ensure_ascii=False)
+
+            mod.call_grok_api = fake_call
+            local_report = """牛牛大王，A股盘后总结来了：
+
+📊 **市场概况**
+上涨 `1800` · 下跌 `3100`
+
+🎯 **次日买卖计划**
+· 风险级别：平衡
+· 开仓节奏：次日计划最多3-4只
+
+🧭 **次日盘前指引**
+· 盘前基准：风险级别 `平衡`
+· 竞价确认：半导体有溢价
+
+📌 **次日关注池**
+· 主线方向：`半导体`
+"""
+
+            report = mod.apply_grok_to_a_share_report(local_report, title="A股盘后总结")
+        finally:
+            mod.call_grok_api = original_call
+            mod.A_SHARE_MODEL_SUMMARY_MODEL = original_model
+
+        self.assertIn("次日盘前可执行计划", captured["prompt"])
+        self.assertIn("🎯 **次日盘前指引**", report)
+        self.assertNotIn("🎯 **今日买卖指引**", report)
+        self.assertLess(report.index("开仓节奏：次日最多1笔"), report.index("本地规则快照"))
+        self.assertNotIn("风险级别：平衡", report)
+        self.assertIn("次日关注池", report)
+
 
 if __name__ == "__main__":
     unittest.main()

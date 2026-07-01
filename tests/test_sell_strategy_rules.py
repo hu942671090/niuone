@@ -361,6 +361,18 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(ctx["max_new_buys_per_decision"], 1)
         self.assertIn("午盘前", ctx["session_note"])
 
+    def test_market_guidance_extracts_next_day_premarket_heading(self):
+        lines = trader.extract_market_guidance_lines("\n".join([
+            "🎯 **次日盘前指引**",
+            "· 风险级别：谨慎",
+            "· 开仓节奏：次日最多1笔",
+            "",
+            "📌 **次日关注池**",
+            "· 主线方向：半导体",
+        ]))
+
+        self.assertEqual(lines, ["风险级别：谨慎", "开仓节奏：次日最多1笔"])
+
     def test_execute_actions_uses_market_guidance_position_cap(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote

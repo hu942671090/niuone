@@ -47,6 +47,13 @@ def is_trading_day_guess(day: dt.date) -> bool:
     return day.weekday() < 5
 
 
+def next_trading_day_guess(day: dt.date) -> dt.date:
+    nxt = day + dt.timedelta(days=1)
+    while not is_trading_day_guess(nxt):
+        nxt += dt.timedelta(days=1)
+    return nxt
+
+
 def safe_float(x: Any, default: float = 0.0) -> float:
     try:
         if x is None:
@@ -480,12 +487,107 @@ def build_decision_guidance(
         buy = f"围绕资金净流入方向筛选：{top_in}；独立冲高和弱分支剔除"
         sell = "持仓按强弱分层，低效仓位给更强主线让位"
     return [
-        "🎯 **今日买卖指引**",
+        "🎯 **次日买卖计划**",
         f"· 风险级别：{risk}",
         f"· 开仓节奏：{pace}",
         f"· 买入指引：{buy}",
         f"· 卖出/风控：{sell}",
     ]
+
+
+def _join_industries(names: list[str], fallback: str) -> str:
+    cleaned = []
+    for name in names:
+        name = str(name or "").strip()
+        if name and name not in cleaned:
+            cleaned.append(name)
+    return "、".join(cleaned[:3]) or fallback
+
+
+def _format_stock_brief(rows: list[dict[str, Any]], *, include_pct: bool = True) -> str:
+    items = []
+    for r in rows[:3]:
+        name = str(r.get("name") or "").strip()
+        if not name:
+            continue
+        if include_pct:
+            items.append(f"{name} {safe_float(r.get('pct')):+.2f}%")
+        else:
+            items.append(name)
+    return "、".join(items)
+
+
+def build_next_day_premarket_guidance(
+    *,
+    rows: list[dict[str, Any]],
+    mood: str,
+    up: int,
+    down: int,
+    limit_up: int,
+    limit_down: int,
+    total_amt: float,
+    hot_funds: list[dict[str, Any]],
+    inflow_top: list[dict[str, Any]],
+    outflow_top: list[dict[str, Any]],
+    breadth_ind: list[Any],
+    top_gain: list[dict[str, Any]],
+    top_turnover: list[dict[str, Any]],
+) -> list[str]:
+    next_day = next_trading_day_guess(NOW.date()).strftime("%Y-%m-%d")
+    lines = [f"🧭 **次日盘前指引** · {next_day}"]
+    if not rows:
+        lines.append("· 盘前基准：数据缺失，不生成新增仓计划；先用交易软件重建涨跌家数、成交额和涨跌停")
+        lines.append("· 竞价确认：只看风险端是否收缩、指数是否低开修复、持仓是否弱于所属板块")
+        lines.append("· 开仓条件：没有全市场快照时默认不开新仓，等开盘15分钟承接确认")
+        lines.append("· 卖出/风控：已有仓位按既定止损/破位/弱于板块规则处理")
+        return lines
+
+    fund_dirs = [r.get("industry", "") for r in hot_funds[:3]]
+    inflow_dirs = [r.get("industry", "") for r in inflow_top[:3]]
+    breadth_dirs = [ind for _, ind, *_ in breadth_ind[:3]]
+    strong_dirs = _join_industries(fund_dirs or breadth_dirs, "强势方向待竞价确认")
+    money_dirs = _join_industries(inflow_dirs or fund_dirs or breadth_dirs, strong_dirs)
+    active_names = _format_stock_brief(top_turnover, include_pct=True) or "成交额前排股"
+    strong_names = _format_stock_brief(top_gain, include_pct=True) or "涨幅前排股"
+    outflow_dirs = _join_industries([r.get("industry", "") for r in outflow_top[:3]], "流出方向待复核")
+
+    if "空头占优" in mood or (down > up * 1.25 and limit_down >= max(limit_up, 3)):
+        risk = "防守"
+        budget = "0-1笔试错，优先卖出弱仓"
+        auction = "风险票低开数量收缩、跌停不扩散，才允许从观察切到试错"
+        buy_rule = "只看资金净流入方向的低吸确认，不追高开独苗"
+        fail_rule = "跌停继续增加、昨日强势股低开低走或指数跌破前低，全天暂停新开仓"
+    elif "结构性偏弱" in mood or down >= up:
+        risk = "谨慎"
+        budget = "最多1笔新开仓，先观察开盘15分钟"
+        auction = f"`{money_dirs}` 有溢价且前排不炸，才保留买点"
+        buy_rule = "买点必须贴近均线/BBI，放量承接后再执行"
+        fail_rule = "资金流入方向没有持续成交额，或成交额前排冲高回落，计划降级观察"
+    elif "多头占优" in mood:
+        risk = "进攻"
+        budget = "可准备2笔以内，但必须分批，保留午后调仓空间"
+        auction = f"`{strong_dirs}` 前排有溢价，涨停/强势股晋级不掉队"
+        buy_rule = "优先做回封、回踩不破或开盘15分钟右侧确认"
+        fail_rule = "高开低走、封板率下降或强势股放量滞涨，进攻计划降一级"
+    else:
+        risk = "平衡"
+        budget = "1-2笔以内，先确认主线延续再动手"
+        auction = f"`{money_dirs}` 竞价不弱，成交额前排没有明显核按钮"
+        buy_rule = "只做板块联动，不做独立脉冲；弱分支等二次确认"
+        fail_rule = "量能不足、主线切换太快或跌停端抬头，保持现金"
+
+    lines.append(f"· 盘前基准：风险级别 `{risk}`，计划节奏 `{budget}`；收盘样本成交额 {fmt_amt_yuan(total_amt)}")
+    lines.append(f"· 竞价确认：{auction}")
+    lines.append(f"· 开仓条件：{buy_rule}")
+    lines.append(f"· 卖出/风控：弱于板块、低开不修复、冲高回落或跌破BBI/白线的持仓优先处理")
+    lines.append(f"· 失效条件：{fail_rule}")
+    lines.append("")
+    lines.append("📌 **次日关注池**")
+    lines.append(f"· 主线方向：`{strong_dirs}`；资金确认方向：`{money_dirs}`")
+    lines.append(f"· 成交额前排：{active_names}")
+    lines.append(f"· 强势验证：{strong_names}")
+    lines.append(f"· 风险观察：跌停 `{limit_down}` vs 涨停 `{limit_up}`；重点避开 `{outflow_dirs}` 的弱修复冲高")
+    return lines
 
 
 def build_report() -> str:
@@ -526,8 +628,8 @@ def build_report() -> str:
     top_gain = sorted(rows, key=lambda x: (x["pct"], x["amount"]), reverse=True)[:8]
     top_turnover = sorted(rows, key=lambda x: x["amount"], reverse=True)[:8]
     hot_funds = sorted(funds, key=lambda x: x["heat"], reverse=True)[:6]
-    inflow_top = sorted(funds, key=lambda x: x["net"], reverse=True)[:5]
-    outflow_top = sorted(funds, key=lambda x: x["net"])[:5]
+    inflow_top = [r for r in sorted(funds, key=lambda x: x["net"], reverse=True) if r["net"] > 0][:5]
+    outflow_top = [r for r in sorted(funds, key=lambda x: x["net"]) if r["net"] < 0][:5]
 
     ind_stats = defaultdict(lambda: {"count": 0, "up": 0, "amount": 0.0, "leaders": []})
     for r in rows:
@@ -618,13 +720,32 @@ def build_report() -> str:
     ))
     lines.append("")
 
-    lines.append("💡 **操作提示**")
+    if MODE == "close":
+        lines.extend(build_next_day_premarket_guidance(
+            rows=rows,
+            mood=mood,
+            up=up,
+            down=down,
+            limit_up=limit_up,
+            limit_down=limit_down,
+            total_amt=total_amt,
+            hot_funds=hot_funds,
+            inflow_top=inflow_top,
+            outflow_top=outflow_top,
+            breadth_ind=breadth_ind,
+            top_gain=top_gain,
+            top_turnover=top_turnover,
+        ))
+        lines.append("")
+
+    lines.append("💡 **盘前执行规则**" if MODE == "close" else "💡 **操作提示**")
     if MODE == "midday":
         lines.append("· 看强板块扩散、龙头回封/不破均线")
         lines.append("· 量能不足则降低追高意愿")
     else:
-        lines.append("· 复盘筛：板块强度 + 辨识度 + BBI右侧确认")
-        lines.append("· 次日竞价看溢价，无溢价则降低预期")
+        lines.append("· 9:25只确认溢价、封单和风险端，不抢跑无承接高开")
+        lines.append("· 9:30-9:45看主线成交额延续，弱于板块的持仓先处理")
+        lines.append("· 无溢价、无量能、无板块联动时，候选股自动降级观察")
     lines.append("· 板块联动 + BBI右侧优先，不追单纯J值低")
     lines.append("")
 

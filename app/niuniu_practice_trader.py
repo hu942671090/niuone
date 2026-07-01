@@ -1651,10 +1651,10 @@ def extract_market_guidance_lines(content: str, metadata: dict[str, Any] | None 
             if in_section and out:
                 break
             continue
-        if "买卖指引" in line:
+        if any(key in line for key in ("买卖指引", "买卖计划", "盘前指引")):
             in_section = True
             continue
-        if in_section and line.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "⚠️", "🌡️")) and "**" in line:
+        if in_section and line.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "🧭", "⚠️", "🌡️", "💡")) and "**" in line:
             break
         if in_section:
             out.append(line.lstrip("·- ").strip())

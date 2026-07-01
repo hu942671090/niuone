@@ -69,10 +69,10 @@ def extract_decision_guidance(content: str) -> list[str]:
             if in_section and guidance:
                 break
             continue
-        if "买卖指引" in clean:
+        if any(key in clean for key in ("买卖指引", "买卖计划", "盘前指引")):
             in_section = True
             continue
-        if in_section and clean.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "⚠️", "🌡️")) and "**" in clean:
+        if in_section and clean.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "🧭", "⚠️", "🌡️", "💡")) and "**" in clean:
             break
         if in_section:
             guidance.append(clean.lstrip("·- ").strip())

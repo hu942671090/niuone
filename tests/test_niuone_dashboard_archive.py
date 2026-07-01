@@ -6,6 +6,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import importlib.util
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,24 @@ SRC = ROOT / "app"
 
 
 class NiuoneDashboardArchiveTests(unittest.TestCase):
+    def test_extract_decision_guidance_accepts_premarket_heading(self):
+        sys.path.insert(0, str(SRC))
+        spec = importlib.util.spec_from_file_location("archive_under_test", SRC / "niuone_dashboard_archive.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        guidance = mod.extract_decision_guidance("""牛牛大王，A股盘后总结来了：
+
+🎯 **次日盘前指引**
+· 风险级别：谨慎
+· 开仓节奏：次日最多1笔
+
+📌 **次日关注池**
+· 主线方向：半导体
+""")
+
+        self.assertEqual(guidance, ["风险级别：谨慎", "开仓节奏：次日最多1笔"])
+
     def test_archive_market_report_writes_file_and_push_history_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
