@@ -448,6 +448,77 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(ctx["source_title"], "A股竞价盘前总结")
         self.assertEqual(ctx["source_time"], "2026-07-02 09:25:09")
 
+    def test_market_guidance_includes_overnight_us_as_overlay(self):
+        original_push_history = sys.modules.get("push_history")
+        auction_report = {
+            "title": "A股竞价盘前总结",
+            "time_text": "2026-07-02 09:25:09",
+            "content": "\n".join([
+                "🎯 **今日买卖指引**",
+                "· 风险级别：进攻",
+                "· 开仓节奏：可正常试错",
+            ]),
+            "metadata": {
+                "decision_guidance": ["风险级别：进攻", "开仓节奏：可正常试错"],
+            },
+        }
+        us_report = {
+            "title": "隔夜美股盘面总结",
+            "time_text": "2026-07-02 08:00:00",
+            "content": "\n".join([
+                "牛牛大王，隔夜美股盘面总结来了：",
+                "📊 **美股概况** · 2026-07-02 08:00:00",
+                "💬 隔夜美股偏弱或分化，今日不急着追高。",
+                "",
+                "🎯 **今日买卖指引**",
+                "· 风险级别：谨慎",
+                "· 买入节奏：降低预算，先观察开盘 15 分钟。",
+                "· 选股方向：只看有资金承接的科技映射和强趋势票。",
+            ]),
+            "metadata": {
+                "decision_guidance": [
+                    "风险级别：谨慎",
+                    "买入节奏：降低预算，先观察开盘 15 分钟。",
+                    "选股方向：只看有资金承接的科技映射和强趋势票。",
+                ],
+                "summary": "隔夜美股偏弱或分化，今日不急着追高。",
+            },
+        }
+        previous_close = {
+            "title": "A股盘后总结",
+            "time_text": "2026-07-01 15:10:02",
+            "content": "\n".join([
+                "🎯 **次日盘前指引**",
+                "· 风险级别：平衡",
+                "· 开仓节奏：次日可正常试错",
+            ]),
+        }
+        sys.modules["push_history"] = types.SimpleNamespace(
+            query_messages=lambda **kwargs: {"records": [auction_report, us_report, previous_close]}
+        )
+        try:
+            reports = trader.load_today_market_monitor_reports(datetime(2026, 7, 2, 9, 26, 0))
+        finally:
+            if original_push_history is None:
+                sys.modules.pop("push_history", None)
+            else:
+                sys.modules["push_history"] = original_push_history
+
+        ctx = trader.derive_market_strategy_context(reports, datetime(2026, 7, 2, 9, 26, 0))
+        prompt = trader.format_market_strategy_context_for_prompt(ctx)
+
+        self.assertEqual(
+            [r["time"] for r in reports],
+            ["2026-07-02 09:25:09", "2026-07-02 08:00:00", "2026-07-01 15:10:02"],
+        )
+        self.assertEqual(ctx["tone"], "offensive")
+        self.assertEqual(ctx["source_title"], "A股竞价盘前总结")
+        self.assertEqual(ctx["overnight_us"]["tone"], "cautious")
+        self.assertEqual(ctx["max_new_buys_per_decision"], 1)
+        self.assertLessEqual(ctx["max_total_position_pct"], 60.0)
+        self.assertIn("【隔夜美股盘面】", prompt)
+        self.assertIn("降低预算", prompt)
+
     def test_execute_actions_uses_market_guidance_position_cap(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote

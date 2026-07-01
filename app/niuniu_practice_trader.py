@@ -1588,6 +1588,7 @@ MARKET_GUIDANCE_ENABLED = env_bool("DASHBOARD_MARKET_GUIDANCE_ENABLED", True)
 MORNING_MAX_OPEN_POSITIONS = env_int("DASHBOARD_MORNING_MAX_OPEN_POSITIONS", min(3, MAX_OPEN_POSITIONS))
 MORNING_MAX_OPEN_POSITIONS = max(1, min(MAX_OPEN_POSITIONS, MORNING_MAX_OPEN_POSITIONS))
 MARKET_REPORT_LOOKBACK = 12
+OVERNIGHT_US_MARKET_TITLE = "隔夜美股盘面总结"
 
 
 def market_session_phase(now: datetime | None = None) -> str:
@@ -1651,6 +1652,40 @@ def _is_post_close_market_report(report: dict[str, Any]) -> bool:
     return bool(m and m.group(0) >= "15:00")
 
 
+def _is_overnight_us_market_report(report: dict[str, Any]) -> bool:
+    title = str(report.get("title") or "")
+    content = str(report.get("content") or "")
+    return (
+        OVERNIGHT_US_MARKET_TITLE in title
+        or "隔夜美股盘面总结" in content
+        or ("美股概况" in content and "关键资产" in content)
+    )
+
+
+def _load_cached_overnight_us_market_report(now: datetime | None = None) -> dict[str, Any] | None:
+    try:
+        import us_market_summary as _us_market_summary
+
+        summary = _us_market_summary.load_cached_summary_for_today(now)
+        if not summary:
+            return None
+        guidance = [f"风险级别：{summary.get('tone_label') or '中性'}"]
+        guidance.extend(str(line).strip() for line in (summary.get("guidance_lines") or []) if str(line).strip())
+        content = _us_market_summary.build_us_market_report_text(summary)
+        return {
+            "title": OVERNIGHT_US_MARKET_TITLE,
+            "time": str(summary.get("generated_at") or ""),
+            "content": content,
+            "metadata": {
+                "decision_guidance": guidance[:8],
+                "summary": summary.get("summary") or "",
+                "target_us_date": summary.get("target_us_date") or "",
+            },
+        }
+    except Exception:
+        return None
+
+
 def load_today_market_monitor_reports(now: datetime | None = None, limit: int = 3) -> list[dict[str, Any]]:
     """Load current-day market reports plus prior close guidance when still relevant."""
     if not MARKET_GUIDANCE_ENABLED:
@@ -1663,8 +1698,9 @@ def load_today_market_monitor_reports(now: datetime | None = None, limit: int = 
         import push_history as _push_history
         data = _push_history.query_messages(category="market_monitor", limit=MARKET_REPORT_LOOKBACK)
     except Exception:
-        return []
+        data = {"records": []}
     same_day_reports: list[dict[str, Any]] = []
+    overnight_us_report: dict[str, Any] | None = None
     previous_close_report: dict[str, Any] | None = None
     for record in data.get("records") or []:
         if not isinstance(record, dict):
@@ -1674,7 +1710,11 @@ def load_today_market_monitor_reports(now: datetime | None = None, limit: int = 
             continue
         report_date = _market_report_date_text(report)
         if report_date == today:
-            same_day_reports.append(report)
+            if _is_overnight_us_market_report(report):
+                if overnight_us_report is None:
+                    overnight_us_report = report
+            else:
+                same_day_reports.append(report)
         elif (
             previous_close_report is None
             and report_date == previous_trading_day
@@ -1683,8 +1723,16 @@ def load_today_market_monitor_reports(now: datetime | None = None, limit: int = 
             previous_close_report = report
 
     limit = max(int(limit or 1), 1)
-    reports = same_day_reports[:limit]
-    if previous_close_report and (phase in {"morning", "lunch"} or not reports) and len(reports) < limit:
+    if overnight_us_report is None:
+        overnight_us_report = _load_cached_overnight_us_market_report(now)
+
+    same_day_limit = max(limit - (1 if overnight_us_report else 0), 1) if same_day_reports else 0
+    reports = same_day_reports[:same_day_limit]
+    if not reports and previous_close_report:
+        reports.append(previous_close_report)
+    if overnight_us_report and len(reports) < limit:
+        reports.append(overnight_us_report)
+    if previous_close_report and reports and previous_close_report not in reports and phase in {"morning", "lunch"} and len(reports) < limit:
         reports.append(previous_close_report)
     return reports
 
@@ -1755,6 +1803,64 @@ def classify_market_guidance_tone(text: str) -> str:
     return "neutral"
 
 
+def _market_tone_label(tone: str) -> str:
+    return {
+        "offensive": "进攻",
+        "balanced": "平衡",
+        "neutral": "中性",
+        "cautious": "谨慎",
+        "defensive": "防守",
+    }.get(tone, "中性")
+
+
+def _extract_market_report_summary_line(report: dict[str, Any]) -> str:
+    metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+    summary = str(metadata.get("summary") or "").strip()
+    if summary:
+        return summary
+    for line in str(report.get("content") or "").splitlines():
+        clean = line.strip()
+        if clean.startswith("💬"):
+            return clean.lstrip("💬").strip()
+    return ""
+
+
+def _overnight_us_context_from_report(report: dict[str, Any] | None) -> dict[str, Any]:
+    if not report:
+        return {"available": False}
+    metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else None
+    guidance = extract_market_guidance_lines(str(report.get("content") or ""), metadata, max_lines=8)
+    tone_text = "\n".join(guidance) or str(report.get("content") or "")
+    tone = classify_market_guidance_tone(tone_text)
+    return {
+        "available": True,
+        "tone": tone,
+        "tone_label": _market_tone_label(tone),
+        "source_title": report.get("title") or OVERNIGHT_US_MARKET_TITLE,
+        "source_time": report.get("time") or "",
+        "summary": _extract_market_report_summary_line(report),
+        "guidance_lines": guidance,
+    }
+
+
+def _apply_overnight_us_adjustment(ctx: dict[str, Any]) -> None:
+    overnight_us = ctx.get("overnight_us") if isinstance(ctx.get("overnight_us"), dict) else {}
+    if not overnight_us or not overnight_us.get("available"):
+        return
+    tone = str(overnight_us.get("tone") or "neutral")
+    if tone == "defensive":
+        ctx["max_open_positions"] = min(int(ctx.get("max_open_positions", MAX_OPEN_POSITIONS)), min(MAX_OPEN_POSITIONS, 3))
+        ctx["max_new_buys_per_decision"] = min(int(ctx.get("max_new_buys_per_decision", MAX_NEW_BUYS_PER_DECISION)), 1)
+        ctx["max_total_position_pct"] = min(float(ctx.get("max_total_position_pct", MAX_TOTAL_POSITION_PCT)), 50.0)
+        ctx["min_cash_reserve_pct"] = max(float(ctx.get("min_cash_reserve_pct", MIN_CASH_RESERVE_PCT)), 45.0)
+        ctx["buy_budget_multiplier"] = min(float(ctx.get("buy_budget_multiplier", 1.0)), 0.55)
+    elif tone == "cautious":
+        ctx["max_new_buys_per_decision"] = min(int(ctx.get("max_new_buys_per_decision", MAX_NEW_BUYS_PER_DECISION)), 1)
+        ctx["max_total_position_pct"] = min(float(ctx.get("max_total_position_pct", MAX_TOTAL_POSITION_PCT)), 60.0)
+        ctx["min_cash_reserve_pct"] = max(float(ctx.get("min_cash_reserve_pct", MIN_CASH_RESERVE_PCT)), 35.0)
+        ctx["buy_budget_multiplier"] = min(float(ctx.get("buy_budget_multiplier", 1.0)), 0.8)
+
+
 def _market_context_base(now: datetime | None = None) -> dict[str, Any]:
     phase = market_session_phase(now)
     return {
@@ -1774,6 +1880,7 @@ def _market_context_base(now: datetime | None = None) -> dict[str, Any]:
         "source_title": "",
         "source_time": "",
         "session_note": "",
+        "overnight_us": {"available": False},
     }
 
 
@@ -1781,27 +1888,23 @@ def derive_market_strategy_context(reports: list[dict[str, Any]] | None, now: da
     """Turn the latest market-monitor summaries into enforceable trading limits."""
     ctx = _market_context_base(now)
     reports = [r for r in (reports or []) if isinstance(r, dict)]
-    latest = reports[0] if reports else {}
+    overnight_us_report = next((r for r in reports if _is_overnight_us_market_report(r)), None)
+    primary_reports = [r for r in reports if not _is_overnight_us_market_report(r)]
+    latest = (primary_reports or reports)[0] if reports else {}
     guidance_lines = extract_market_guidance_lines(
         str(latest.get("content") or ""),
         latest.get("metadata") if isinstance(latest.get("metadata"), dict) else None,
     ) if latest else []
     tone_text = "\n".join(guidance_lines) or str(latest.get("content") or "")
     tone = classify_market_guidance_tone(tone_text)
-    tone_labels = {
-        "offensive": "进攻",
-        "balanced": "平衡",
-        "neutral": "中性",
-        "cautious": "谨慎",
-        "defensive": "防守",
-    }
     ctx.update({
         "available": bool(reports),
         "tone": tone,
-        "tone_label": tone_labels.get(tone, "中性"),
+        "tone_label": _market_tone_label(tone),
         "guidance_lines": guidance_lines,
         "source_title": latest.get("title") or "",
         "source_time": latest.get("time") or "",
+        "overnight_us": _overnight_us_context_from_report(overnight_us_report),
         "reports": [
             {
                 "title": r.get("title") or "盘面监控",
@@ -1837,6 +1940,8 @@ def derive_market_strategy_context(reports: list[dict[str, Any]] | None, now: da
         ctx["min_cash_reserve_pct"] = max(MIN_CASH_RESERVE_PCT, 60.0)
         ctx["buy_budget_multiplier"] = 0.0
 
+    _apply_overnight_us_adjustment(ctx)
+
     if ctx["phase"] in {"morning", "lunch"}:
         before = int(ctx["max_open_positions"])
         ctx["max_open_positions"] = min(before, MORNING_MAX_OPEN_POSITIONS)
@@ -1859,16 +1964,19 @@ def current_market_strategy_context(now: datetime | None = None) -> dict[str, An
 
 
 def compact_market_strategy_context(ctx: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: ctx.get(key)
-        for key in (
-            "enabled", "available", "tone", "tone_label", "phase", "max_open_positions",
-            "max_new_buys_per_decision", "max_total_position_pct", "min_cash_reserve_pct",
-            "buy_budget_multiplier", "allow_new_buys", "source_title", "source_time",
-            "session_note", "guidance_lines",
-        )
-        if ctx.get(key) not in (None, "", [])
-    }
+    out: dict[str, Any] = {}
+    for key in (
+        "enabled", "available", "tone", "tone_label", "phase", "max_open_positions",
+        "max_new_buys_per_decision", "max_total_position_pct", "min_cash_reserve_pct",
+        "buy_budget_multiplier", "allow_new_buys", "source_title", "source_time",
+        "session_note", "guidance_lines", "overnight_us",
+    ):
+        value = ctx.get(key)
+        if key == "overnight_us" and not (isinstance(value, dict) and value.get("available")):
+            continue
+        if value not in (None, "", []):
+            out[key] = value
+    return out
 
 
 def format_market_strategy_context_for_prompt(ctx: dict[str, Any]) -> str:
@@ -1889,6 +1997,21 @@ def format_market_strategy_context_for_prompt(ctx: dict[str, Any]) -> str:
         lines.append(str(ctx.get("session_note")))
     if ctx.get("source_title") or ctx.get("source_time"):
         lines.append(f"最新来源：{ctx.get('source_title') or '盘面监控'} {ctx.get('source_time') or ''}".strip())
+    overnight_us = ctx.get("overnight_us") if isinstance(ctx.get("overnight_us"), dict) else {}
+    if overnight_us.get("available"):
+        lines.append("【隔夜美股盘面】")
+        lines.append(
+            f"风险级别：{overnight_us.get('tone_label', '中性')}；"
+            f"来源：{overnight_us.get('source_title') or OVERNIGHT_US_MARKET_TITLE} {overnight_us.get('source_time') or ''}".strip()
+        )
+        if overnight_us.get("summary"):
+            lines.append(f"摘要：{overnight_us.get('summary')}")
+        us_guidance = [
+            str(line).strip()
+            for line in (overnight_us.get("guidance_lines") or [])
+            if str(line).strip() and not str(line).strip().startswith("风险级别")
+        ]
+        lines.extend(f"- {line}" for line in us_guidance[:6])
     guidance = ctx.get("guidance_lines") or []
     if guidance:
         lines.extend(f"- {line}" for line in guidance[:8])
