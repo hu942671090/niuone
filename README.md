@@ -3,6 +3,8 @@
 [![CI](https://github.com/kunkundi/niuone/actions/workflows/ci.yml/badge.svg)](https://github.com/kunkundi/niuone/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+🌐 在线体验：<https://niuone.cn/>
+
 NiuOne 是一个本地优先的市场研究工作台，面向个人研究、策略观察和模拟交易场景，整合 A 股行情面板、策略筛选、X 关注列表监控、美股机构评级摘要与定时归档，方便集中查看、跟踪和复盘市场信息。
 
 > NiuOne 仅用于研究、信息整理和个人决策辅助，不构成任何投资建议。
