@@ -293,6 +293,127 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(executed[0]["buy_strategy"], "b3_accelerate")
         self.assertEqual(decision["actions"][0]["reason"], executed[0]["reason"])
 
+    def test_execute_actions_marks_buy_strategy_for_next_decision(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "测试股", "source": "test"}
+            state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            decision = {
+                "actions": [{
+                    "action": "BUY", "code": "600000", "name": "测试股",
+                    "shares": 1000, "reason": "B3中继评分10.0达标，小仓试错",
+                }]
+            }
+            candidates = [{
+                "code": "600000",
+                "name": "测试股",
+                "best_strategy": "b3_accelerate",
+                "best_score": 10.0,
+                "entry_threshold": 8.5,
+                "distance_pct": 1.2,
+                "actionable": True,
+                "hard_blockers": [],
+                "risk_flags": [],
+            }]
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                candidates,
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(len(executed), 1)
+        pos = state["positions"]["600000"]
+        self.assertEqual(pos["buy_strategy"], "b3_accelerate")
+        self.assertEqual(pos["strategy_mark"]["strategy_id"], "b3_accelerate")
+        self.assertEqual(executed[0]["strategy_mark"]["strategy_id"], "b3_accelerate")
+        self.assertEqual(executed[0]["order_position_pct"], 10.0)
+        self.assertEqual(executed[0]["position_after_trade_pct"], 10.0)
+        self.assertEqual(executed[0]["total_position_after_trade_pct"], 10.0)
+        self.assertEqual(decision["actions"][0]["strategy_mark"]["strategy_id"], "b3_accelerate")
+        self.assertEqual(decision["actions"][0]["order_position_pct"], 10.0)
+
+        compact = trader.compact_portfolio_for_decision(trader.enrich_portfolio(state))
+        compact_pos = compact["positions"][0]
+        self.assertEqual(compact_pos["strategy_mark"]["strategy_id"], "b3_accelerate")
+        self.assertEqual(compact_pos["strategy_mark_id"], "b3_accelerate")
+        self.assertEqual(compact_pos["position_pct"], 10.0)
+        self.assertEqual(compact_pos["strategy_mark_history"][-1]["action"], "BUY")
+
+    def test_execute_actions_marks_sell_rule_on_remaining_position(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "测试股", "source": "test"}
+            state = {
+                "cash": 0.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "avg_cost": 9.0,
+                        "last_price": 10.0,
+                        "buy_strategy": "b2_confirm",
+                        "entry_reason": "B2确认评分9.0达标",
+                        "buy_date_lots": {"2026-01-01": 1000},
+                    }
+                },
+                "trade_log": [],
+            }
+            trader.apply_entry_strategy_mark(
+                state["positions"]["600000"],
+                "b2_confirm",
+                "B2确认评分9.0达标",
+            )
+            decision = {
+                "actions": [{
+                    "action": "SELL", "code": "600000", "name": "测试股",
+                    "shares": 500, "reason": "卖出评分降至2分，先减仓",
+                }]
+            }
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [],
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]["strategy_mark"]["strategy_id"], "b2_confirm")
+        self.assertEqual(executed[0]["exit_rule"], "sell_score")
+        self.assertEqual(executed[0]["exit_strategy_mark"]["exit_rule"], "sell_score")
+        self.assertEqual(executed[0]["order_position_pct"], 50.0)
+        self.assertEqual(executed[0]["position_before_trade_pct"], 100.0)
+        self.assertEqual(executed[0]["position_after_trade_pct"], 50.0)
+        self.assertEqual(executed[0]["total_position_after_trade_pct"], 50.0)
+        pos = state["positions"]["600000"]
+        self.assertEqual(pos["qty"], 500)
+        self.assertEqual(pos["last_exit_rule"], "sell_score")
+        self.assertEqual(pos["last_exit_strategy_mark"]["entry_strategy_id"], "b2_confirm")
+
+        compact = trader.compact_portfolio_for_decision(trader.enrich_portfolio(state))
+        compact_pos = compact["positions"][0]
+        self.assertEqual(compact_pos["strategy_mark"]["strategy_id"], "b2_confirm")
+        self.assertAlmostEqual(compact_pos["position_pct"], 50.02, places=2)
+        self.assertEqual(compact_pos["last_exit_rule"], "sell_score")
+        self.assertEqual(compact_pos["strategy_mark_history"][-1]["action"], "SELL")
+
     def test_execute_actions_blocks_non_actionable_buy_candidate(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
@@ -412,7 +533,9 @@ class SellStrategyRuleTests(unittest.TestCase):
 
         self.assertEqual(executed, [])
         self.assertEqual(state["positions"], {})
-        self.assertIn("模型买入仓位2000股超出风控预算", decision["execution_blocked_reason"])
+        self.assertIn("模型买入仓位2000股", decision["execution_blocked_reason"])
+        self.assertIn("约20.0%总权益", decision["execution_blocked_reason"])
+        self.assertIn("超出风控预算", decision["execution_blocked_reason"])
         self.assertIn("不自动缩小", decision["execution_blocked_reason"])
 
     def test_execute_actions_blocks_non_lot_model_size_without_rounding(self):
@@ -1120,6 +1243,7 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertIn("基础策略只作为候选池", prompt)
         self.assertIn("本轮设置页未启用人格策略", prompt)
         self.assertIn("每条 BUY/SELL 的仓位大小由你决定", prompt)
+        self.assertIn("参考价或成交价 × shares ÷ 当前总权益 × 100%", prompt)
         self.assertIn("执行层不会替你补默认仓位", prompt)
         self.assertIn("不会把过大的买入/卖出自动缩小", prompt)
         self.assertIn('"target_position_pct"', prompt)

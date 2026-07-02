@@ -218,6 +218,16 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_PENDING_DECISION_POLL_SECONDS", "label": "延迟成交检查秒数", "group": "任务调度", "kind": "int", "default": "5", "effect": "restart"},
     {"name": "DASHBOARD_DECISION_MAX_TOKENS", "label": "决策最大输出长度", "group": "买卖决策模型", "kind": "int", "default": "6000", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_TIMEOUT", "label": "决策请求超时", "group": "买卖决策模型", "kind": "int", "default": "180", "effect": "next_run"},
+    {"name": "DASHBOARD_DECISION_INTELLIGENCE_ENABLED", "label": "启用全局情报包", "group": "买卖决策模型", "kind": "bool", "default": "1", "effect": "next_run"},
+    {"name": "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", "label": "情报包缓存秒数", "group": "买卖决策模型", "kind": "int", "default": "75", "effect": "next_run"},
+    {"name": "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS", "label": "情报榜单条数", "group": "买卖决策模型", "kind": "int", "default": "5", "effect": "next_run"},
+    {"name": "DASHBOARD_MARKET_GUIDANCE_ENABLED", "label": "启用盘面指引控仓", "group": "买卖决策模型", "kind": "bool", "default": "1", "effect": "next_run"},
+    {"name": "DASHBOARD_MAX_OPEN_POSITIONS", "label": "最大持仓只数", "group": "买卖决策模型", "kind": "int", "default": "6", "effect": "next_run"},
+    {"name": "DASHBOARD_MAX_NEW_BUYS_PER_DECISION", "label": "单轮最大新买入", "group": "买卖决策模型", "kind": "int", "default": "2", "effect": "next_run"},
+    {"name": "DASHBOARD_MAX_SINGLE_POSITION_PCT", "label": "单票仓位上限%", "group": "买卖决策模型", "kind": "text", "default": "10", "effect": "next_run"},
+    {"name": "DASHBOARD_MAX_TOTAL_POSITION_PCT", "label": "总仓位上限%", "group": "买卖决策模型", "kind": "text", "default": "80", "effect": "next_run"},
+    {"name": "DASHBOARD_MIN_CASH_RESERVE_PCT", "label": "最低现金比例%", "group": "买卖决策模型", "kind": "text", "default": "20", "effect": "next_run"},
+    {"name": "DASHBOARD_MORNING_MAX_OPEN_POSITIONS", "label": "午盘前持仓上限", "group": "买卖决策模型", "kind": "int", "default": "3", "effect": "next_run"},
 
     {"name": "DASHBOARD_US_FEATURES_ENABLED", "label": "开启牛牛美股", "group": "牛牛美股", "kind": "bool", "default": "0", "effect": "next_run"},
     {"name": "US_RATING_BASE_URL", "label": "美股评级 API Base URL", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
@@ -287,6 +297,16 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_DECISION_API_KEY",
     "DASHBOARD_DECISION_MAX_TOKENS",
     "DASHBOARD_DECISION_TIMEOUT",
+    "DASHBOARD_DECISION_INTELLIGENCE_ENABLED",
+    "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
+    "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
+    "DASHBOARD_MARKET_GUIDANCE_ENABLED",
+    "DASHBOARD_MAX_OPEN_POSITIONS",
+    "DASHBOARD_MAX_NEW_BUYS_PER_DECISION",
+    "DASHBOARD_MAX_SINGLE_POSITION_PCT",
+    "DASHBOARD_MAX_TOTAL_POSITION_PCT",
+    "DASHBOARD_MIN_CASH_RESERVE_PCT",
+    "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
     "DASHBOARD_B1_SCHEDULE_TIMES",
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
@@ -316,6 +336,16 @@ TRADER_RUNTIME_ENV_NAMES = {
     "DASHBOARD_DECISION_API_KEY",
     "DASHBOARD_DECISION_MAX_TOKENS",
     "DASHBOARD_DECISION_TIMEOUT",
+    "DASHBOARD_DECISION_INTELLIGENCE_ENABLED",
+    "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
+    "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
+    "DASHBOARD_MARKET_GUIDANCE_ENABLED",
+    "DASHBOARD_MAX_OPEN_POSITIONS",
+    "DASHBOARD_MAX_NEW_BUYS_PER_DECISION",
+    "DASHBOARD_MAX_SINGLE_POSITION_PCT",
+    "DASHBOARD_MAX_TOTAL_POSITION_PCT",
+    "DASHBOARD_MIN_CASH_RESERVE_PCT",
+    "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
     "DASHBOARD_TIME_STOP_EXIT_TIME",
@@ -2073,9 +2103,26 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             normalize_strategy_list_update(value)
         elif name == PRESET_STRATEGY_TEXT_ENV:
             normalize_preset_strategy_text_update(value)
-        elif name in {"X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "DASHBOARD_INDICES_TTL_SECONDS"} and str(value or "").strip():
+        elif name in {
+            "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
+            "DASHBOARD_INDICES_TTL_SECONDS",
+            "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
+            "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
+            "DASHBOARD_MAX_OPEN_POSITIONS",
+            "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
+        } and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
+        elif name == "DASHBOARD_MAX_NEW_BUYS_PER_DECISION" and str(value or "").strip():
+            if int(value) < 0:
+                raise ValueError(f"{name} 必须大于等于 0")
+        elif name in {
+            "DASHBOARD_MAX_SINGLE_POSITION_PCT",
+            "DASHBOARD_MAX_TOTAL_POSITION_PCT",
+            "DASHBOARD_MIN_CASH_RESERVE_PCT",
+        } and str(value or "").strip():
+            if float(value) < 0:
+                raise ValueError(f"{name} 必须大于等于 0")
         elif name == "DASHBOARD_CRON_MAX_ATTEMPTS" and str(value or "").strip():
             if int(value) < 1:
                 raise ValueError(f"{name} 必须大于等于 1")

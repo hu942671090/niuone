@@ -102,6 +102,9 @@ def load_dashboard_env() -> None:
         "DASHBOARD_DECISION_API_KEY",
         "DASHBOARD_DECISION_MAX_TOKENS",
         "DASHBOARD_DECISION_TIMEOUT",
+        "DASHBOARD_DECISION_INTELLIGENCE_ENABLED",
+        "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
+        "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
         "DASHBOARD_B3_EXIT_TIME",
         "DASHBOARD_TIME_EXIT_TIME",
         "DASHBOARD_TIME_STOP_EXIT_TIME",
@@ -1074,6 +1077,8 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
         day_low_pct = (day_low_float / prev_close_float - 1) * 100 if day_low_float > 0 and prev_close_float > 0 else None
         buy_date_lots = pos.get("buy_date_lots") or {}
         today_buy_qty = min(qty, int(buy_date_lots.get(today, 0) or 0)) if isinstance(buy_date_lots, dict) else 0
+        strategy_mark = compact_position_strategy_mark(pos)
+        strategy_history = pos.get("strategy_mark_history") if isinstance(pos.get("strategy_mark_history"), list) else []
         total_mv += mv
         row = {
             "code": code,
@@ -1100,6 +1105,14 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
             "bought_today": today_buy_qty > 0,
             "buy_strategy": pos.get("buy_strategy") or "",
             "entry_reason": pos.get("entry_reason") or "",
+            "strategy_mark": strategy_mark,
+            "strategy_mark_id": strategy_mark.get("strategy_id") or "",
+            "strategy_mark_label": strategy_mark.get("label") or "",
+            "strategy_mark_history": strategy_history[-4:],
+            "last_exit_rule": pos.get("last_exit_rule") or "",
+            "last_exit_label": pos.get("last_exit_label") or "",
+            "last_exit_reason": pos.get("last_exit_reason") or "",
+            "last_exit_strategy_mark": pos.get("last_exit_strategy_mark") or {},
             "exit_state": {
                 "highest_price": pos.get("highest_price"),
                 "max_pnl_pct": pos.get("max_pnl_pct"),
@@ -1127,6 +1140,8 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
         rows.append(row)
     cash = float(state.get("cash") or 0)
     total_equity = cash + total_mv
+    for row in rows:
+        row["position_pct"] = position_pct_of_equity(row.get("market_value"), total_equity)
     return {
         "generated_at": now_ts(),
         "initial_cash": float(state.get("initial_cash") or INITIAL_CASH),
@@ -1256,6 +1271,17 @@ def portfolio_market_value(positions: dict[str, Any]) -> float:
 def portfolio_total_equity_for_limits(cash: float, positions: dict[str, Any]) -> float:
     total = float(cash or 0) + portfolio_market_value(positions)
     return total if total > 0 else float(cash or 0)
+
+
+def position_pct_of_equity(value: float | int | None, total_equity: float | int | None) -> float | None:
+    try:
+        value_float = float(value or 0)
+        equity_float = float(total_equity or 0)
+    except (TypeError, ValueError):
+        return None
+    if equity_float <= 0:
+        return None
+    return round(value_float / equity_float * 100, 2)
 
 
 def strategy_position_limit_pct(strategy: str) -> float:
@@ -1611,6 +1637,10 @@ MORNING_MAX_OPEN_POSITIONS = env_int("DASHBOARD_MORNING_MAX_OPEN_POSITIONS", min
 MORNING_MAX_OPEN_POSITIONS = max(1, min(MAX_OPEN_POSITIONS, MORNING_MAX_OPEN_POSITIONS))
 MARKET_REPORT_LOOKBACK = 12
 OVERNIGHT_US_MARKET_TITLE = "隔夜美股盘面总结"
+DECISION_INTELLIGENCE_ENABLED = env_bool("DASHBOARD_DECISION_INTELLIGENCE_ENABLED", True)
+DECISION_INTELLIGENCE_TTL_SECONDS = max(15, env_int("DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", 75))
+DECISION_INTELLIGENCE_MAX_ITEMS = max(1, min(8, env_int("DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS", 5)))
+DECISION_INTELLIGENCE_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 
 
 def market_session_phase(now: datetime | None = None) -> str:
@@ -2075,6 +2105,452 @@ def format_market_strategy_context_for_prompt(ctx: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _compact_number(value: Any, digits: int = 2) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        number = float(str(value).replace(",", "").replace("%", "").strip())
+        if not math.isfinite(number):
+            return None
+        return round(number, digits)
+    except Exception:
+        return None
+
+
+def _compact_text(value: Any, limit: int = 80) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _source_status(data: dict[str, Any] | None) -> str:
+    if not isinstance(data, dict) or not data:
+        return "empty"
+    if data.get("error"):
+        return "stale" if data.get("stale_cache") else "error"
+    if data.get("stale_cache"):
+        return "stale"
+    return "ok"
+
+
+def _fetch_decision_source(label: str, fetcher, empty: dict[str, Any]) -> dict[str, Any]:
+    try:
+        payload = fetcher()
+        if isinstance(payload, dict):
+            return payload
+        return {**empty, "error": f"{label} returned {type(payload).__name__}"}
+    except Exception as exc:
+        return {**empty, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def fetch_global_decision_sources(force: bool = False) -> dict[str, Any]:
+    """Fetch reusable dashboard market channels for model decisions.
+
+    Each producer already has its own cache/stale fallback. This wrapper adds a
+    short decision-level cache so a single B1 decision does not refetch the same
+    dashboard channels several times.
+    """
+    if not DECISION_INTELLIGENCE_ENABLED:
+        return {"enabled": False, "generated_at": now_ts(), "sources": {}}
+    now_value = time.time()
+    cached = DECISION_INTELLIGENCE_CACHE.get("data")
+    if (
+        not force
+        and isinstance(cached, dict)
+        and now_value - float(DECISION_INTELLIGENCE_CACHE.get("ts") or 0) < DECISION_INTELLIGENCE_TTL_SECONDS
+    ):
+        return cached
+
+    data: dict[str, Any] = {"enabled": True, "generated_at": now_ts(), "sources": {}}
+    try:
+        from indices_dashboard_api import fetch_indices_data
+        data["sources"]["indices"] = _fetch_decision_source(
+            "indices",
+            fetch_indices_data,
+            {"items": []},
+        )
+    except Exception as exc:
+        data["sources"]["indices"] = {"items": [], "error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        from sectors_dashboard_api import fetch_sector_data
+        data["sources"]["sectors"] = _fetch_decision_source(
+            "sectors",
+            fetch_sector_data,
+            {"gain_top": [], "loss_top": [], "items": []},
+        )
+    except Exception as exc:
+        data["sources"]["sectors"] = {"gain_top": [], "loss_top": [], "items": [], "error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        from money_flow_dashboard_api import fetch_money_flow
+        data["sources"]["money_flow"] = _fetch_decision_source(
+            "money_flow",
+            fetch_money_flow,
+            {"inflow": [], "outflow": []},
+        )
+    except Exception as exc:
+        data["sources"]["money_flow"] = {"inflow": [], "outflow": [], "error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        from hot_stocks_dashboard_api import fetch_hot_stocks
+        data["sources"]["hot_stocks"] = _fetch_decision_source(
+            "hot_stocks",
+            lambda: fetch_hot_stocks("amount"),
+            {"items": [], "amount_top": [], "turnover_top": [], "gain_top": []},
+        )
+    except Exception as exc:
+        data["sources"]["hot_stocks"] = {
+            "items": [],
+            "amount_top": [],
+            "turnover_top": [],
+            "gain_top": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        from market_flow_dashboard_api import fetch_market_flow
+        data["sources"]["market_flow"] = _fetch_decision_source(
+            "market_flow",
+            fetch_market_flow,
+            {"total_inflow_yi": None, "total_outflow_yi": None, "net_flow_yi": None},
+        )
+    except Exception as exc:
+        data["sources"]["market_flow"] = {
+            "total_inflow_yi": None,
+            "total_outflow_yi": None,
+            "net_flow_yi": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    DECISION_INTELLIGENCE_CACHE.update({"ts": now_value, "data": data})
+    return data
+
+
+def compact_indices_for_decision(payload: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
+    wanted_order = {
+        "sh": 10, "sz": 11, "cyb": 12, "kc50": 13,
+        "a50_fut": 20,
+        "dow": 30, "nas": 31, "spx": 32,
+        "spx_fut": 40, "nas_fut": 41, "dow_fut": 42,
+        "xau": 50, "brent": 51,
+    }
+    items: list[dict[str, Any]] = []
+    for raw in payload.get("items") or []:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "")
+        market_type = str(raw.get("market_type") or "")
+        if key not in wanted_order and market_type not in {"a_index", "us_index", "a_futures", "us_futures", "commodity"}:
+            continue
+        item = {
+            "key": key,
+            "name": raw.get("name") or key,
+            "market_type": market_type,
+            "price": _compact_number(raw.get("price"), 3),
+            "change_pct": _compact_number(raw.get("change_pct"), 2),
+            "time": raw.get("time") or "",
+        }
+        items.append(item)
+    max_items = limit or DECISION_INTELLIGENCE_MAX_ITEMS * 3
+    return sorted(items, key=lambda row: wanted_order.get(str(row.get("key") or ""), 999))[:max_items]
+
+
+def _compact_rank_rows(rows: list[Any], *, pct_key: str = "pct", value_key: str | None = None,
+                       limit: int | None = None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        row = {
+            "name": raw.get("name") or raw.get("leader") or raw.get("code") or "",
+            "code": raw.get("code") or "",
+            "pct": _compact_number(raw.get(pct_key), 2),
+        }
+        if value_key:
+            row[value_key] = _compact_number(raw.get(value_key), 2)
+        if raw.get("leader"):
+            row["leader"] = raw.get("leader")
+        if raw.get("amount_yi") is not None:
+            row["amount_yi"] = _compact_number(raw.get("amount_yi"), 2)
+        if raw.get("turnover") is not None:
+            row["turnover"] = _compact_number(raw.get("turnover"), 2)
+        out.append({k: v for k, v in row.items() if v not in (None, "", [])})
+    return out[: (limit or DECISION_INTELLIGENCE_MAX_ITEMS)]
+
+
+def compact_portfolio_exposure_for_decision(portfolio: dict[str, Any]) -> dict[str, Any]:
+    total_equity = _compact_number(portfolio.get("total_equity"), 2) or 0.0
+    cash = _compact_number(portfolio.get("cash"), 2) or 0.0
+    market_value = _compact_number(portfolio.get("market_value"), 2) or 0.0
+    positions = [p for p in (portfolio.get("positions") or []) if isinstance(p, dict)]
+    cash_pct = round(cash / total_equity * 100, 2) if total_equity > 0 else None
+    position_pct = round(market_value / total_equity * 100, 2) if total_equity > 0 else None
+    top_positions = []
+    for pos in sorted(positions, key=lambda p: float(p.get("market_value") or 0), reverse=True)[:DECISION_INTELLIGENCE_MAX_ITEMS]:
+        mv = _compact_number(pos.get("market_value"), 2) or 0.0
+        top_positions.append({
+            "code": pos.get("code"),
+            "name": pos.get("name"),
+            "strategy_mark_id": pos.get("strategy_mark_id") or pos.get("buy_strategy") or "",
+            "strategy_mark_label": pos.get("strategy_mark_label") or buy_strategy_label(str(pos.get("buy_strategy") or "")),
+            "last_exit_rule": pos.get("last_exit_rule") or "",
+            "position_pct": round(mv / total_equity * 100, 2) if total_equity > 0 else None,
+            "pnl_pct": _compact_number(pos.get("pnl_pct"), 2),
+            "today_pnl_pct": _compact_number(pos.get("today_pnl_pct"), 2),
+            "available_qty": pos.get("available_qty"),
+        })
+    return {
+        "cash_pct": cash_pct,
+        "position_pct": position_pct,
+        "position_count": len(positions),
+        "total_equity": total_equity,
+        "cash": cash,
+        "market_value": market_value,
+        "top_positions": top_positions,
+    }
+
+
+def _topic_name(value: Any) -> str:
+    text = re.sub(r"\s+", "", str(value or ""))
+    return re.sub(r"(行业|板块|概念|指数)$", "", text)
+
+
+def build_candidate_market_alignment(
+    candidates: list[dict[str, Any]],
+    sectors: dict[str, Any],
+    money_flow: dict[str, Any],
+    hot_stocks: dict[str, Any],
+) -> list[dict[str, Any]]:
+    strong_topics = {_topic_name(row.get("name")) for row in (sectors.get("gain_top") or [])[:DECISION_INTELLIGENCE_MAX_ITEMS] if isinstance(row, dict)}
+    weak_topics = {_topic_name(row.get("name")) for row in (sectors.get("loss_top") or [])[:DECISION_INTELLIGENCE_MAX_ITEMS] if isinstance(row, dict)}
+    inflow_topics = {_topic_name(row.get("name")) for row in (money_flow.get("inflow") or [])[:DECISION_INTELLIGENCE_MAX_ITEMS] if isinstance(row, dict)}
+    outflow_topics = {_topic_name(row.get("name")) for row in (money_flow.get("outflow") or [])[:DECISION_INTELLIGENCE_MAX_ITEMS] if isinstance(row, dict)}
+    hot_codes: set[str] = set()
+    for key in ("amount_top", "turnover_top", "gain_top", "items"):
+        for row in (hot_stocks.get(key) or [])[:DECISION_INTELLIGENCE_MAX_ITEMS]:
+            if isinstance(row, dict):
+                code = normalize_code(row.get("code") or "")
+                if code:
+                    hot_codes.add(code)
+
+    out: list[dict[str, Any]] = []
+    for raw in candidates[:8]:
+        if not isinstance(raw, dict):
+            continue
+        code = normalize_code(raw.get("code") or "")
+        topic = _topic_name(raw.get("industry") or raw.get("sector") or "")
+        flags: list[str] = []
+        if topic:
+            if any(topic in item or item in topic for item in strong_topics if item):
+                flags.append("强势板块")
+            if any(topic in item or item in topic for item in weak_topics if item):
+                flags.append("弱势板块")
+            if any(topic in item or item in topic for item in inflow_topics if item):
+                flags.append("资金流入")
+            if any(topic in item or item in topic for item in outflow_topics if item):
+                flags.append("资金流出")
+        if code in hot_codes:
+            flags.append("热门榜")
+        if flags:
+            out.append({
+                "code": code,
+                "name": raw.get("name") or "",
+                "industry": topic,
+                "signals": flags[:4],
+            })
+    return out
+
+
+def derive_decision_intelligence_notes(ctx: dict[str, Any]) -> list[str]:
+    notes: list[str] = []
+    indices = ctx.get("indices") or []
+    a_indices = [row for row in indices if row.get("market_type") == "a_index" and row.get("change_pct") is not None]
+    if a_indices:
+        avg = sum(float(row["change_pct"]) for row in a_indices) / len(a_indices)
+        if avg <= -1.0:
+            notes.append(f"A股核心指数平均{avg:.2f}%，新仓应降级或缩量")
+        elif avg >= 1.0:
+            notes.append(f"A股核心指数平均+{avg:.2f}%，可优先选择与主线共振候选")
+    futures = {row.get("key"): row for row in indices if row.get("change_pct") is not None}
+    a50_pct = futures.get("a50_fut", {}).get("change_pct") if isinstance(futures.get("a50_fut"), dict) else None
+    if isinstance(a50_pct, (int, float)) and a50_pct <= -0.8:
+        notes.append(f"A50期货{a50_pct:.2f}%，上午追高需收紧")
+    money_flow = ctx.get("money_flow") or {}
+    inflow = sum(float(row.get("net_flow_yi") or 0) for row in (money_flow.get("inflow") or [])[:3] if isinstance(row, dict))
+    outflow = abs(sum(float(row.get("net_flow_yi") or 0) for row in (money_flow.get("outflow") or [])[:3] if isinstance(row, dict)))
+    if outflow > inflow * 1.3 and outflow > 0:
+        notes.append("行业资金流出强于流入，买入需压仓并要求更高确定性")
+    portfolio = ctx.get("portfolio") or {}
+    cash_pct = portfolio.get("cash_pct")
+    position_pct = portfolio.get("position_pct")
+    if isinstance(position_pct, (int, float)) and position_pct >= MAX_TOTAL_POSITION_PCT * 0.85:
+        notes.append("账户总仓接近上限，新增买入应优先HOLD或替换弱持仓")
+    if isinstance(cash_pct, (int, float)) and cash_pct <= MIN_CASH_RESERVE_PCT + 5:
+        notes.append("现金缓冲接近底线，禁止为了凑仓位放大shares")
+    alignment = ctx.get("candidate_alignment") or []
+    if alignment:
+        notes.append("候选需结合板块/资金/热门榜共振或背离逐只降权")
+    return notes[:8]
+
+
+def build_decision_intelligence_context(
+    portfolio: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    market_strategy_ctx: dict[str, Any],
+    news_context: str = "",
+) -> dict[str, Any]:
+    if not DECISION_INTELLIGENCE_ENABLED:
+        return {"enabled": False}
+    raw = fetch_global_decision_sources()
+    sources = raw.get("sources") if isinstance(raw, dict) else {}
+    sources = sources if isinstance(sources, dict) else {}
+    sectors = sources.get("sectors") if isinstance(sources.get("sectors"), dict) else {}
+    money_flow = sources.get("money_flow") if isinstance(sources.get("money_flow"), dict) else {}
+    hot_stocks = sources.get("hot_stocks") if isinstance(sources.get("hot_stocks"), dict) else {}
+    market_flow = sources.get("market_flow") if isinstance(sources.get("market_flow"), dict) else {}
+    ctx = {
+        "enabled": True,
+        "generated_at": raw.get("generated_at") if isinstance(raw, dict) else now_ts(),
+        "source_status": {key: _source_status(value if isinstance(value, dict) else {}) for key, value in sources.items()},
+        "portfolio": compact_portfolio_exposure_for_decision(portfolio),
+        "market_guidance": compact_market_strategy_context(market_strategy_ctx),
+        "indices": compact_indices_for_decision(sources.get("indices") if isinstance(sources.get("indices"), dict) else {}),
+        "sectors": {
+            "gain_top": _compact_rank_rows(sectors.get("gain_top") or sectors.get("items") or []),
+            "loss_top": _compact_rank_rows(sectors.get("loss_top") or []),
+        },
+        "money_flow": {
+            "inflow": _compact_rank_rows(money_flow.get("inflow") or [], value_key="net_flow_yi"),
+            "outflow": _compact_rank_rows(money_flow.get("outflow") or [], value_key="net_flow_yi"),
+        },
+        "market_flow": {
+            "net_flow_yi": _compact_number(market_flow.get("net_flow_yi"), 2),
+            "total_inflow_yi": _compact_number(market_flow.get("total_inflow_yi"), 2),
+            "total_outflow_yi": _compact_number(market_flow.get("total_outflow_yi"), 2),
+        },
+        "hot_stocks": {
+            "amount_top": _compact_rank_rows(hot_stocks.get("amount_top") or hot_stocks.get("items") or [], value_key="amount_yi"),
+            "turnover_top": _compact_rank_rows(hot_stocks.get("turnover_top") or [], value_key="turnover"),
+            "gain_top": _compact_rank_rows(hot_stocks.get("gain_top") or []),
+        },
+        "news_precheck": {
+            "available": bool(str(news_context or "").strip()),
+            "text": _compact_text(news_context, 1200) if news_context else "",
+        },
+    }
+    ctx["candidate_alignment"] = build_candidate_market_alignment(candidates, sectors, money_flow, hot_stocks)
+    ctx["decision_notes"] = derive_decision_intelligence_notes(ctx)
+    return ctx
+
+
+def safe_decision_intelligence_context(
+    portfolio: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    market_strategy_ctx: dict[str, Any],
+    news_context: str = "",
+) -> dict[str, Any]:
+    try:
+        return build_decision_intelligence_context(portfolio, candidates, market_strategy_ctx, news_context)
+    except Exception as exc:
+        return {
+            "enabled": DECISION_INTELLIGENCE_ENABLED,
+            "generated_at": now_ts(),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _format_pct(value: Any) -> str:
+    number = _compact_number(value, 2)
+    if number is None:
+        return "--"
+    return f"{number:+.2f}%"
+
+
+def _format_rank_line(rows: list[dict[str, Any]], value_key: str | None = None) -> str:
+    parts: list[str] = []
+    for row in rows[:DECISION_INTELLIGENCE_MAX_ITEMS]:
+        name = str(row.get("name") or row.get("code") or "").strip()
+        if not name:
+            continue
+        suffix = _format_pct(row.get("pct"))
+        if value_key and row.get(value_key) is not None:
+            suffix += f"/{row.get(value_key)}"
+            if value_key.endswith("_yi"):
+                suffix += "亿"
+        parts.append(f"{name}{suffix}")
+    return "；".join(parts) or "无数据"
+
+
+def format_decision_intelligence_context_for_prompt(ctx: dict[str, Any]) -> str:
+    if not ctx.get("enabled"):
+        return "【全局决策情报包】已关闭。"
+    portfolio = ctx.get("portfolio") or {}
+    lines = [
+        "【全局决策情报包】",
+        (
+            f"账户暴露：持仓{portfolio.get('position_count', 0)}只，"
+            f"总仓{portfolio.get('position_pct')}%，现金{portfolio.get('cash_pct')}%，"
+            f"权益{portfolio.get('total_equity')}。"
+        ),
+    ]
+    top_positions = portfolio.get("top_positions") or []
+    if top_positions:
+        lines.append(
+            "主要持仓：" + "；".join(
+                f"{item.get('code')} {item.get('name')} {item.get('strategy_mark_label') or item.get('strategy_mark_id') or '未标记'} "
+                f"仓位{item.get('position_pct')}% 盈亏{_format_pct(item.get('pnl_pct'))}"
+                for item in top_positions[:DECISION_INTELLIGENCE_MAX_ITEMS]
+            )
+        )
+
+    indices = ctx.get("indices") or []
+    if indices:
+        lines.append(
+            "指数/外盘：" + "；".join(
+                f"{item.get('name')}{_format_pct(item.get('change_pct'))}"
+                for item in indices[:DECISION_INTELLIGENCE_MAX_ITEMS * 3]
+            )
+        )
+    market_guidance = ctx.get("market_guidance") or {}
+    overnight = market_guidance.get("overnight_us") if isinstance(market_guidance.get("overnight_us"), dict) else {}
+    if overnight and overnight.get("available"):
+        summary = _compact_text(overnight.get("summary"), 120)
+        lines.append(f"隔夜美股：{overnight.get('tone_label', '中性')}；{summary}")
+
+    sectors = ctx.get("sectors") or {}
+    lines.append("板块涨跌：涨幅 " + _format_rank_line(sectors.get("gain_top") or []))
+    lines.append("板块涨跌：跌幅 " + _format_rank_line(sectors.get("loss_top") or []))
+    money_flow = ctx.get("money_flow") or {}
+    lines.append("行业资金：流入 " + _format_rank_line(money_flow.get("inflow") or [], "net_flow_yi"))
+    lines.append("行业资金：流出 " + _format_rank_line(money_flow.get("outflow") or [], "net_flow_yi"))
+    hot_stocks = ctx.get("hot_stocks") or {}
+    lines.append("热门股票：成交额 " + _format_rank_line(hot_stocks.get("amount_top") or [], "amount_yi"))
+    if hot_stocks.get("turnover_top"):
+        lines.append("热门股票：换手 " + _format_rank_line(hot_stocks.get("turnover_top") or [], "turnover"))
+
+    alignment = ctx.get("candidate_alignment") or []
+    if alignment:
+        lines.append(
+            "候选共振/背离：" + "；".join(
+                f"{item.get('code')} {item.get('name')}({','.join(item.get('signals') or [])})"
+                for item in alignment[:DECISION_INTELLIGENCE_MAX_ITEMS]
+            )
+        )
+    notes = ctx.get("decision_notes") or []
+    if notes:
+        lines.append("情报约束：" + "；".join(str(note) for note in notes))
+    source_status = ctx.get("source_status") or {}
+    if source_status:
+        lines.append("来源状态：" + "；".join(f"{key}={value}" for key, value in sorted(source_status.items())))
+    lines.append(
+        "决策要求：每个BUY/SELL/HOLD都必须同时考虑盘面指引、隔夜美股、指数/期货、板块与资金、候选消息面、账户仓位和现金约束；"
+        "若任一关键渠道与技术评分冲突，优先降仓、等待确认或HOLD，并在reason写明冲突来源。"
+    )
+    return "\n".join(lines)
+
+
 def get_volatility_adjustment(code: str) -> float:
     """根据个股20日波动率调整仓位。高波缩仓，低波加仓。"""
     try:
@@ -2162,6 +2638,134 @@ def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
     if "模型卖出" in text:
         return "model_sell"
     return "other_exit"
+
+
+EXIT_RULE_LABELS: dict[str, str] = {
+    "stop_loss": "止损",
+    "take_profit": "止盈",
+    "profit_protection": "盈利保护",
+    "top_escape": "逃顶/出货",
+    "technical_break": "技术破位",
+    "sell_score": "卖出评分",
+    "no_progress": "信号未兑现",
+    "position_adjust": "仓位调整",
+    "model_sell": "模型卖出",
+    "other_exit": "其他卖出",
+}
+
+
+def buy_strategy_label(strategy_id: str) -> str:
+    if strategy_id == "mixed":
+        return "混合买入"
+    if strategy_id == "unknown_buy":
+        return "未识别买入"
+    return str(STRATEGY_DEFINITIONS.get(strategy_id, {}).get("label") or strategy_id or "未标记")
+
+
+def build_entry_strategy_mark(
+    strategy_id: str,
+    reason: str = "",
+    *,
+    source: str = "BUY",
+    component_strategy: str = "",
+    marked_at: str | None = None,
+) -> dict[str, Any]:
+    strategy_id = str(strategy_id or "unknown_buy").strip() or "unknown_buy"
+    mark = {
+        "strategy_id": strategy_id,
+        "label": buy_strategy_label(strategy_id),
+        "source": source,
+        "marked_at": marked_at or now_ts(),
+        "reason": _compact_text(reason, 220),
+    }
+    if component_strategy:
+        mark["component_strategy_id"] = component_strategy
+        mark["component_label"] = buy_strategy_label(component_strategy)
+    return mark
+
+
+def build_exit_strategy_mark(
+    entry_strategy: str,
+    exit_rule: str,
+    reason: str = "",
+    *,
+    source: str = "SELL",
+    marked_at: str | None = None,
+) -> dict[str, Any]:
+    exit_rule = str(exit_rule or "other_exit").strip() or "other_exit"
+    entry_strategy = str(entry_strategy or "unknown_buy").strip() or "unknown_buy"
+    return {
+        "entry_strategy_id": entry_strategy,
+        "entry_label": buy_strategy_label(entry_strategy),
+        "exit_rule": exit_rule,
+        "exit_label": EXIT_RULE_LABELS.get(exit_rule, exit_rule),
+        "source": source,
+        "marked_at": marked_at or now_ts(),
+        "reason": _compact_text(reason, 220),
+    }
+
+
+def _append_strategy_mark_history(pos: dict[str, Any], mark: dict[str, Any]) -> None:
+    history = pos.setdefault("strategy_mark_history", [])
+    if not isinstance(history, list):
+        history = []
+        pos["strategy_mark_history"] = history
+    history.append(mark)
+    del history[:-8]
+
+
+def apply_entry_strategy_mark(
+    pos: dict[str, Any],
+    strategy_id: str,
+    reason: str,
+    *,
+    source: str = "BUY",
+    component_strategy: str = "",
+) -> dict[str, Any]:
+    mark = build_entry_strategy_mark(strategy_id, reason, source=source, component_strategy=component_strategy)
+    pos["strategy_mark"] = mark
+    pos["strategy_mark_id"] = mark["strategy_id"]
+    pos["strategy_mark_label"] = mark["label"]
+    pos["strategy_mark_reason"] = mark["reason"]
+    pos["strategy_marked_at"] = mark["marked_at"]
+    _append_strategy_mark_history(pos, {"action": "BUY", **mark})
+    return mark
+
+
+def apply_exit_strategy_mark(
+    pos: dict[str, Any],
+    entry_strategy: str,
+    exit_rule: str,
+    reason: str,
+    *,
+    source: str = "SELL",
+) -> dict[str, Any]:
+    mark = build_exit_strategy_mark(entry_strategy, exit_rule, reason, source=source)
+    pos["last_exit_rule"] = mark["exit_rule"]
+    pos["last_exit_label"] = mark["exit_label"]
+    pos["last_exit_reason"] = mark["reason"]
+    pos["last_exit_marked_at"] = mark["marked_at"]
+    pos["last_exit_strategy_mark"] = mark
+    _append_strategy_mark_history(pos, {"action": "SELL", **mark})
+    return mark
+
+
+def compact_position_strategy_mark(pos: dict[str, Any], fallback_strategy: str = "") -> dict[str, Any]:
+    mark = pos.get("strategy_mark") if isinstance(pos.get("strategy_mark"), dict) else {}
+    strategy_id = str(
+        mark.get("strategy_id")
+        or pos.get("strategy_mark_id")
+        or pos.get("buy_strategy")
+        or fallback_strategy
+        or "unknown_buy"
+    ).strip() or "unknown_buy"
+    return {
+        "strategy_id": strategy_id,
+        "label": mark.get("label") or pos.get("strategy_mark_label") or buy_strategy_label(strategy_id),
+        "reason": mark.get("reason") or pos.get("strategy_mark_reason") or _compact_text(pos.get("entry_reason"), 220),
+        "marked_at": mark.get("marked_at") or pos.get("strategy_marked_at") or "",
+        "source": mark.get("source") or "STATE",
+    }
 
 
 def _empty_perf_bucket() -> dict[str, Any]:
@@ -3069,8 +3673,19 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
         qty = qty // 100 * 100
         if qty <= 0:
             continue
-        
+        total_equity = portfolio_total_equity_for_limits(cash, positions)
+        current_position_value = position_market_value(pos, float(price))
+        current_market_value = portfolio_market_value(positions)
+        current_market_value = max(0.0, current_market_value - position_market_value(pos) + current_position_value)
         gross = qty * price
+        order_position_pct = position_pct_of_equity(gross, total_equity)
+        position_before_trade_pct = position_pct_of_equity(current_position_value, total_equity)
+        position_after_trade_value = max(0.0, current_position_value - gross)
+        position_after_trade_pct = position_pct_of_equity(position_after_trade_value, total_equity)
+        total_position_after_trade_pct = position_pct_of_equity(max(0.0, current_market_value - gross), total_equity)
+        entry_mark = compact_position_strategy_mark(pos, entry_strategy)
+        exit_mark = apply_exit_strategy_mark(pos, entry_strategy, exit_rule, exit_reason, source="AUTO_EXIT")
+        
         fees = calc_trade_fees(gross, "SELL")
         net_proceeds = gross - fees["total_fee"]
         cost_basis = qty * avg_cost
@@ -3111,9 +3726,15 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
             "net_proceeds": round(net_proceeds, 2),
             "pnl": round(realized_pnl, 2),
             "pnl_pct": round(realized_pnl_pct, 2),
+            "order_position_pct": order_position_pct,
+            "position_before_trade_pct": position_before_trade_pct,
+            "position_after_trade_pct": position_after_trade_pct,
+            "total_position_after_trade_pct": total_position_after_trade_pct,
             "exit_signal": exit_signal.get("signal") or "",
             "buy_strategy": entry_strategy,
             "exit_rule": exit_rule,
+            "strategy_mark": entry_mark,
+            "exit_strategy_mark": exit_mark,
             "reason": exit_reason,
         })
     
@@ -3405,8 +4026,18 @@ def compact_portfolio_for_decision(portfolio: dict[str, Any]) -> dict[str, Any]:
             "day_high_pct": pos.get("day_high_pct"),
             "day_low_pct": pos.get("day_low_pct"),
             "market_value": pos.get("market_value"),
+            "position_pct": pos.get("position_pct"),
             "pnl": pos.get("pnl"),
             "pnl_pct": pos.get("pnl_pct"),
+            "buy_strategy": pos.get("buy_strategy"),
+            "entry_reason": pos.get("entry_reason"),
+            "strategy_mark": pos.get("strategy_mark") or {},
+            "strategy_mark_id": pos.get("strategy_mark_id") or "",
+            "strategy_mark_label": pos.get("strategy_mark_label") or "",
+            "strategy_mark_history": (pos.get("strategy_mark_history") or [])[-4:],
+            "last_exit_rule": pos.get("last_exit_rule") or "",
+            "last_exit_label": pos.get("last_exit_label") or "",
+            "last_exit_reason": pos.get("last_exit_reason") or "",
             "buy_date_lots": pos.get("buy_date_lots") or {},
             "exit_state": {
                 key: exit_state.get(key)
@@ -3616,6 +4247,13 @@ Z哥卖出风控（属于Z哥体系）：
     else:
         persona_strategy_section = "\n".join(persona_strategy_lines) or "- 暂无启用的拟人化扩展策略"
     decision_portfolio = compact_portfolio_for_decision(portfolio)
+    decision_intelligence_ctx = safe_decision_intelligence_context(
+        portfolio,
+        compact_candidates,
+        market_strategy_ctx,
+        news_context,
+    )
+    decision_intelligence_prompt = format_decision_intelligence_context_for_prompt(decision_intelligence_ctx)
 
     prompt = f"""你是A股模拟账户交易决策器。账户初始资金100万，只做A股模拟交易，不是真实下单。
 必须遵守：
@@ -3625,8 +4263,10 @@ Z哥卖出风控（属于Z哥体系）：
 - 单次决策最多给2条新买入；当前持仓达到{MAX_OPEN_POSITIONS}只时只允许卖出/持有，不能继续开新仓，避免“开超市”。
 - 单票目标仓位不超过总资产{MAX_SINGLE_POSITION_PCT:g}%；总持仓不超过{MAX_TOTAL_POSITION_PCT:g}%；至少保留{MIN_CASH_RESERVE_PCT:g}%现金。
 - 今日盘面监控指引优先收紧买入节奏；若动态上限低于静态上限，必须按动态上限决策，不能上午把{MAX_OPEN_POSITIONS}只买满。
-- 每条 BUY/SELL 的仓位大小由你决定：必须给出100股整数倍 shares，并在 reason 里说明仓位依据；执行层不会替你补默认仓位，也不会把过大的买入/卖出自动缩小，超出现金、单票、总仓、动态盘面或可卖数量会直接拦截。
+- 每条 BUY/SELL 的仓位大小由你决定：必须给出100股整数倍 shares；仓位大小一律按“参考价或成交价 × shares ÷ 当前总权益 × 100%”定义，并在 reason 里写明这个百分比依据；执行层不会替你补默认仓位，也不会把过大的买入/卖出自动缩小，超出现金、单票、总仓、动态盘面或可卖数量会直接拦截。
 - 首次建仓、加仓、减仓比例由你结合评分、战法确定性、风险标记、盘面级别、现有仓位和盈亏状态决定；按注册策略仓位上限执行：{position_limit_desc}；尾盘(14:30后)原则上不新开仓。
+- 全局情报包是每次决策的必读输入：盘面监控、隔夜美股、指数/期货、板块涨跌、行业资金、热门股、消息面预检、当前仓位和现金约束都必须影响BUY/SELL/HOLD与shares。
+- 当前账户JSON里的 strategy_mark/buy_strategy/entry_reason/last_exit_rule 是既有持仓的策略标记；后续加仓、减仓、清仓必须读取这些标记，按原入场策略的时间纪律和卖出规则处理，不能把 B3、B2、趋势回踩、李大霄等不同策略混同。
 - 系统底线风控：买入K线/前低止损、-4%硬止损、持仓超25日退出；防卖飞、卤煮、S1/S2/S3、出货五式、白线/黄线等归属于下方 Z哥卖出风控
 - 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出
 - 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场
@@ -3670,6 +4310,8 @@ Z哥卖出风控（属于Z哥体系）：
 
 {market_strategy_prompt}
 
+{decision_intelligence_prompt}
+
 当前账户JSON：
 {json.dumps(decision_portfolio, ensure_ascii=False)}
 
@@ -3702,6 +4344,7 @@ Z哥卖出风控（属于Z哥体系）：
     result["model"] = MODEL
     result["provider"] = PROVIDER_DISPLAY_NAME
     result["market_guidance"] = compact_market_strategy_context(market_strategy_ctx)
+    result["decision_intelligence"] = decision_intelligence_ctx
     return result
 
 
@@ -3792,13 +4435,19 @@ def execute_actions(
                 )
                 continue
             requested_gross = shares * float(price)
+            order_position_pct = position_pct_of_equity(requested_gross, total_equity)
+            position_after_trade_value = current_position_value + requested_gross
+            position_after_trade_pct = position_pct_of_equity(position_after_trade_value, total_equity)
+            total_position_after_trade_pct = position_pct_of_equity(current_market_value + requested_gross, total_equity)
             if requested_gross > max_buy_budget + 0.01:
                 max_allowed_shares = int(max_buy_budget // float(price)) // 100 * 100
                 add_execution_block(
                     decision,
                     code,
                     (
-                        f"模型买入仓位{shares}股超出风控预算约{max_buy_budget:.0f}元"
+                        f"模型买入仓位{shares}股"
+                        f"（约{order_position_pct if order_position_pct is not None else '--'}%总权益）"
+                        f"超出风控预算约{max_buy_budget:.0f}元"
                         f"（约≤{max_allowed_shares}股），本轮不自动缩小"
                     ),
                 )
@@ -3823,9 +4472,30 @@ def execute_actions(
             if old_qty <= 0 or not pos.get("buy_strategy"):
                 pos["buy_strategy"] = buy_strategy
                 pos["entry_reason"] = reason
+                entry_mark_strategy = buy_strategy
+                entry_mark_component = ""
+                entry_mark_source = "BUY"
             elif pos.get("buy_strategy") != buy_strategy:
                 pos["buy_strategy"] = "mixed"
                 pos["entry_reason"] = "多批次买入：" + str(pos.get("entry_reason") or reason)
+                entry_mark_strategy = "mixed"
+                entry_mark_component = buy_strategy
+                entry_mark_source = "BUY_ADD"
+            else:
+                entry_mark_strategy = buy_strategy
+                entry_mark_component = ""
+                entry_mark_source = "BUY_ADD"
+            entry_mark = apply_entry_strategy_mark(
+                pos,
+                entry_mark_strategy,
+                reason,
+                source=entry_mark_source,
+                component_strategy=entry_mark_component,
+            )
+            action["strategy_mark"] = entry_mark
+            action["order_position_pct"] = order_position_pct
+            action["position_after_trade_pct"] = position_after_trade_pct
+            action["total_position_after_trade_pct"] = total_position_after_trade_pct
             pos["highest_price"] = round(max(float(pos.get("highest_price") or price), float(price)), 3)
             current_pnl_pct = ((float(price) / float(pos["avg_cost"]) - 1) * 100) if pos.get("avg_cost") else 0.0
             prior_max_pnl = float(pos.get("max_pnl_pct") or current_pnl_pct)
@@ -3843,8 +4513,11 @@ def execute_actions(
                              "commission": fees["commission"], "transfer_fee": fees["transfer_fee"],
                              "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
                              "total_cost": round(total_cost, 2), "price_source": price_source,
+                             "order_position_pct": order_position_pct,
+                             "position_after_trade_pct": position_after_trade_pct,
+                             "total_position_after_trade_pct": total_position_after_trade_pct,
                              "trade_reason": current_reason, "reason": reason,
-                             "buy_strategy": buy_strategy})
+                             "buy_strategy": buy_strategy, "strategy_mark": entry_mark})
         elif act == "SELL":
             pos = positions.get(code)
             if not pos:
@@ -3860,6 +4533,15 @@ def execute_actions(
                 continue
             qty = shares
             gross = qty * float(price)
+            total_equity = portfolio_total_equity_for_limits(cash, positions)
+            current_position_value = position_market_value(pos, float(price))
+            current_market_value = portfolio_market_value(positions)
+            current_market_value = max(0.0, current_market_value - position_market_value(pos) + current_position_value)
+            order_position_pct = position_pct_of_equity(gross, total_equity)
+            position_before_trade_pct = position_pct_of_equity(current_position_value, total_equity)
+            position_after_trade_value = max(0.0, current_position_value - gross)
+            position_after_trade_pct = position_pct_of_equity(position_after_trade_value, total_equity)
+            total_position_after_trade_pct = position_pct_of_equity(max(0.0, current_market_value - gross), total_equity)
             fees = calc_trade_fees(gross, "SELL")
             net_proceeds = gross - fees["total_fee"]
             cost_basis = qty * avg_cost
@@ -3871,6 +4553,14 @@ def execute_actions(
                 or classify_buy_strategy(str(pos.get("entry_reason") or ""))
             )
             exit_rule = classify_exit_rule(reason)
+            entry_mark = compact_position_strategy_mark(pos, entry_strategy)
+            exit_mark = apply_exit_strategy_mark(pos, entry_strategy, exit_rule, reason, source="SELL")
+            action["strategy_mark"] = entry_mark
+            action["exit_strategy_mark"] = exit_mark
+            action["order_position_pct"] = order_position_pct
+            action["position_before_trade_pct"] = position_before_trade_pct
+            action["position_after_trade_pct"] = position_after_trade_pct
+            action["total_position_after_trade_pct"] = total_position_after_trade_pct
             pos["qty"] = position_qty(pos) - qty
             pos.pop("shares", None)
             pos["last_price"] = price
@@ -3894,8 +4584,13 @@ def execute_actions(
                              "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
                              "net_proceeds": round(net_proceeds, 2), "pnl": round(realized_pnl, 2),
                              "pnl_pct": round(realized_pnl_pct, 2), "price_source": price_source,
+                             "order_position_pct": order_position_pct,
+                             "position_before_trade_pct": position_before_trade_pct,
+                             "position_after_trade_pct": position_after_trade_pct,
+                             "total_position_after_trade_pct": total_position_after_trade_pct,
                              "trade_reason": current_reason, "reason": reason,
-                             "buy_strategy": entry_strategy, "exit_rule": exit_rule})
+                             "buy_strategy": entry_strategy, "exit_rule": exit_rule,
+                             "strategy_mark": entry_mark, "exit_strategy_mark": exit_mark})
     state["cash"] = round(cash, 2)
     state.setdefault("trade_log", []).extend(executed)
     del state["trade_log"][:-TRADE_LOG_LIMIT]
@@ -4144,6 +4839,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
             "model": "SYSTEM_RISK_BUDGET",
             "provider": "local_rule",
             "market_guidance": compact_market_ctx,
+            "decision_intelligence": safe_decision_intelligence_context(enrich_portfolio(state), [], market_strategy_ctx, ""),
         }
         state["trading_paused"] = True
         state["pause_reason"] = f"日内亏损预算({today_pnl:.1f}%)"
@@ -4237,6 +4933,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
                 "model": MODEL,
                 "provider": PROVIDER_DISPLAY_NAME,
                 "market_guidance": compact_market_ctx,
+                "decision_intelligence": safe_decision_intelligence_context(portfolio, candidates, market_strategy_ctx, ""),
             }
             executed = []
         else:
@@ -4262,6 +4959,12 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
             "provider": PROVIDER_DISPLAY_NAME,
             "error": f"{type(exc).__name__}: {exc}",
             "market_guidance": compact_market_ctx,
+            "decision_intelligence": safe_decision_intelligence_context(
+                portfolio if "portfolio" in locals() else enrich_portfolio(state),
+                candidates if "candidates" in locals() else [],
+                market_strategy_ctx,
+                "",
+            ),
         }
         executed = []
         state["last_error"] = decision["error"]
