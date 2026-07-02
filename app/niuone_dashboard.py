@@ -2617,11 +2617,11 @@ INDEX_HTML = r"""<!doctype html>
     .header-row { display:flex; align-items:center; justify-content:space-between; gap:14px; }
     .header-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
     h1 { margin:0; font-size: clamp(26px, 4vw, 42px); letter-spacing:-.04em; }
-    .settings-link, .header-text, .refresh-pill, .visit-pill { display:inline-flex; align-items:baseline; gap:8px; flex:0 0 auto; border:1px solid rgba(148,163,184,.16); background:rgba(15,23,42,.58); border-radius:999px; padding:7px 11px; color:#cbd5e1; box-shadow:inset 0 1px 0 rgba(255,255,255,.035); }
-    .header-text { align-items:center; font-size:13px; font-weight:850; }
-    .settings-link { align-items:center; text-decoration:none; color:#e5edf8; font-size:13px; font-weight:850; border-color:rgba(124,92,255,.30); background:rgba(124,92,255,.14); transition:.16s ease; }
-    .settings-link:hover { border-color:rgba(157,178,255,.62); background:rgba(124,92,255,.22); transform:translateY(-1px); }
-    .settings-link:focus-visible { outline:2px solid rgba(157,178,255,.86); outline-offset:2px; }
+    .settings-link, .header-link, .refresh-pill, .visit-pill { display:inline-flex; align-items:baseline; gap:8px; flex:0 0 auto; border:1px solid rgba(148,163,184,.16); background:rgba(15,23,42,.58); border-radius:999px; padding:7px 11px; color:#cbd5e1; box-shadow:inset 0 1px 0 rgba(255,255,255,.035); }
+    .settings-link, .header-link { align-items:center; text-decoration:none; color:#e5edf8; font-size:13px; font-weight:850; border-color:rgba(124,92,255,.30); background:rgba(124,92,255,.14); transition:.16s ease; }
+    .settings-link:hover, .header-link:hover { border-color:rgba(157,178,255,.62); background:rgba(124,92,255,.22); transform:translateY(-1px); }
+    .settings-link:focus-visible, .header-link:focus-visible { outline:2px solid rgba(157,178,255,.86); outline-offset:2px; }
+    .header-link svg { width:15px; height:15px; flex:0 0 auto; fill:currentColor; }
     .refresh-pill span, .visit-pill span { color:#7b8aa0; font-size:12px; font-weight:750; }
     .refresh-pill b, .visit-pill b { font-size:13px; font-variant-numeric:tabular-nums; letter-spacing:0; }
     .visit-pill { border-color:rgba(124,92,255,.28); background:rgba(124,92,255,.10); }
@@ -2965,8 +2965,8 @@ INDEX_HTML = r"""<!doctype html>
       .header-row { gap:8px; }
       .header-actions { gap:5px; }
       h1 { font-size:18px; line-height:1.06; letter-spacing:-.02em; }
-      .settings-link, .header-text, .refresh-pill, .visit-pill { padding:5px 7px; gap:5px; }
-      .settings-link, .header-text { font-size:12px; }
+      .settings-link, .header-link, .refresh-pill, .visit-pill { padding:5px 7px; gap:5px; }
+      .settings-link, .header-link { font-size:12px; }
       .refresh-pill span, .visit-pill span { display:none; }
       .refresh-pill b, .visit-pill b { font-size:11px; }
       .subtitle { display:none; }
@@ -3215,7 +3215,12 @@ INDEX_HTML = r"""<!doctype html>
   <div class="header-row">
     <h1>牛牛大作手</h1>
     <div class="header-actions">
-      <span class="header-text" title="开源仓库">GitHub</span>
+      <a class="header-link" href="https://github.com/kunkundi/niuone" target="_blank" rel="noopener noreferrer" title="开源仓库" aria-label="打开 GitHub 开源仓库">
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path d="M8 0C3.58 0 0 3.67 0 8.2c0 3.62 2.29 6.69 5.47 7.78.4.08.55-.18.55-.4 0-.2-.01-.85-.01-1.55-2.01.38-2.53-.5-2.69-.96-.09-.24-.48-.96-.82-1.15-.28-.15-.68-.52-.01-.53.63-.01 1.08.59 1.23.84.72 1.24 1.87.89 2.33.68.07-.53.28-.89.51-1.1-1.78-.21-3.64-.91-3.64-4.03 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.42 7.42 0 0 1 8 3.99c.68 0 1.36.09 2 .28 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.29.82 2.19 0 3.13-1.87 3.82-3.65 4.03.29.26.54.75.54 1.51 0 1.1-.01 1.98-.01 2.25 0 .22.15.48.55.4A8.12 8.12 0 0 0 16 8.2C16 3.67 12.42 0 8 0Z"/>
+        </svg>
+        <span>GitHub</span>
+      </a>
       <a class="settings-link" href="/admin" title="进入设置页" aria-label="进入设置页">设置</a>
       <div class="visit-pill" title="累计首页访问人次"><span>访问人次</span><b id="visitCount">__VISIT_COUNT__</b></div>
       <div class="visit-pill" title="按浏览器匿名 Cookie 统计的唯一访客数"><span>访客数</span><b id="uniqueVisitCount">__UNIQUE_VISIT_COUNT__</b></div>

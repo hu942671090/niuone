@@ -280,6 +280,17 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(items[-1]['code'], '000019')
         self.assertEqual(compacted['exit_rule']['stop_loss']['items_truncated'], 15)
 
+    def test_index_template_github_button_links_to_repo_with_icon(self):
+        self.assertIn(
+            '<a class="header-link" href="https://github.com/kunkundi/niuone"',
+            dashboard.INDEX_HTML,
+        )
+        self.assertIn('.settings-link, .header-link { align-items:center;', dashboard.INDEX_HTML)
+        self.assertIn('.settings-link:hover, .header-link:hover', dashboard.INDEX_HTML)
+        self.assertIn('rel="noopener noreferrer"', dashboard.INDEX_HTML)
+        self.assertIn('<svg viewBox="0 0 16 16" aria-hidden="true"', dashboard.INDEX_HTML)
+        self.assertNotIn('<span class="header-text" title="开源仓库">GitHub</span>', dashboard.INDEX_HTML)
+
     def test_index_template_inlines_trade_reasons_on_stock_cards(self):
         self.assertNotIn('买入战法绩效', dashboard.INDEX_HTML)
         self.assertNotIn('BUY_COLORS', dashboard.INDEX_HTML)
