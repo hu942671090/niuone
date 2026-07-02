@@ -1736,6 +1736,7 @@ def _load_cached_overnight_us_market_report(now: datetime | None = None) -> dict
                 "decision_guidance": guidance[:8],
                 "summary": summary.get("summary") or "",
                 "target_us_date": summary.get("target_us_date") or "",
+                "sector_mappings": summary.get("sector_mappings") or [],
             },
         }
     except Exception:
@@ -1906,11 +1907,70 @@ def _extract_market_report_summary_line(report: dict[str, Any]) -> str:
     return ""
 
 
+def _format_overnight_sector_mapping(item: Any) -> str:
+    if isinstance(item, dict):
+        sector = str(item.get("us_sector") or item.get("label") or item.get("name") or "").strip()
+        proxy = str(item.get("proxy") or item.get("symbol") or "").strip()
+        pct = str(item.get("change_pct_text") or "").strip()
+        mapping_raw = item.get("a_share_mapping") or item.get("mapping") or []
+        if isinstance(mapping_raw, str):
+            mapping = mapping_raw
+        else:
+            mapping = "、".join(str(x).strip() for x in mapping_raw if str(x).strip())
+        strategy = str(item.get("strategy") or item.get("bias") or "").strip()
+        head = sector
+        if proxy:
+            head = f"{head}({proxy})" if head else proxy
+        if pct:
+            head = f"{head} {pct}".strip()
+        parts = [head]
+        if mapping:
+            parts.append(f"A股：{mapping}")
+        if strategy:
+            parts.append(strategy)
+        return "；".join(part for part in parts if part)
+    return str(item or "").strip().strip("`").lstrip("·- ").strip()
+
+
+def extract_overnight_us_sector_mappings(
+    content: str,
+    metadata: dict[str, Any] | None = None,
+    max_lines: int = 5,
+) -> list[str]:
+    raw = (metadata or {}).get("sector_mappings")
+    out: list[str] = []
+    if isinstance(raw, list):
+        out = [_format_overnight_sector_mapping(item) for item in raw]
+        out = [line for line in out if line]
+        if out:
+            return out[:max_lines]
+
+    lines = [line.strip() for line in str(content or "").splitlines()]
+    in_section = False
+    for line in lines:
+        clean = line.strip()
+        if not clean:
+            if in_section and out:
+                break
+            continue
+        if "美股板块映射" in clean:
+            in_section = True
+            continue
+        if in_section and clean.startswith(("📊", "🔥", "💰", "⚡", "📈", "👀", "📌", "🧭", "🎯", "⚠️", "🌡️", "💡")) and "**" in clean:
+            break
+        if in_section:
+            text = clean.lstrip("·- ").replace("`", "").strip()
+            if text and "暂不可用" not in text:
+                out.append(text)
+    return out[:max_lines]
+
+
 def _overnight_us_context_from_report(report: dict[str, Any] | None) -> dict[str, Any]:
     if not report:
         return {"available": False}
     metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else None
     guidance = extract_market_guidance_lines(str(report.get("content") or ""), metadata, max_lines=8)
+    sector_mappings = extract_overnight_us_sector_mappings(str(report.get("content") or ""), metadata, max_lines=5)
     tone_text = "\n".join(guidance) or str(report.get("content") or "")
     tone = classify_market_guidance_tone(tone_text)
     return {
@@ -1921,6 +1981,7 @@ def _overnight_us_context_from_report(report: dict[str, Any] | None) -> dict[str
         "source_time": report.get("time") or "",
         "summary": _extract_market_report_summary_line(report),
         "guidance_lines": guidance,
+        "sector_mappings": sector_mappings,
     }
 
 
@@ -2103,6 +2164,13 @@ def format_market_strategy_context_for_prompt(ctx: dict[str, Any]) -> str:
         )
         if overnight_us.get("summary"):
             lines.append(f"摘要：{overnight_us.get('summary')}")
+        sector_mappings = [
+            str(line).strip()
+            for line in (overnight_us.get("sector_mappings") or [])
+            if str(line).strip()
+        ]
+        if sector_mappings:
+            lines.append("板块映射：" + "；".join(sector_mappings[:5]))
         us_guidance = [
             str(line).strip()
             for line in (overnight_us.get("guidance_lines") or [])
@@ -2533,6 +2601,13 @@ def format_decision_intelligence_context_for_prompt(ctx: dict[str, Any]) -> str:
     if overnight and overnight.get("available"):
         summary = _compact_text(overnight.get("summary"), 120)
         lines.append(f"隔夜美股：{overnight.get('tone_label', '中性')}；{summary}")
+        sector_mappings = [
+            _compact_text(line, 90)
+            for line in (overnight.get("sector_mappings") or [])
+            if str(line).strip()
+        ]
+        if sector_mappings:
+            lines.append("隔夜美股映射：" + "；".join(sector_mappings[:DECISION_INTELLIGENCE_MAX_ITEMS]))
 
     sectors = ctx.get("sectors") or {}
     lines.append("板块涨跌：涨幅 " + _format_rank_line(sectors.get("gain_top") or []))
@@ -2560,7 +2635,7 @@ def format_decision_intelligence_context_for_prompt(ctx: dict[str, Any]) -> str:
     if source_status:
         lines.append("来源状态：" + "；".join(f"{key}={value}" for key, value in sorted(source_status.items())))
     lines.append(
-        "决策要求：每个BUY/SELL/HOLD都必须同时考虑盘面指引、隔夜美股、指数/期货、板块与资金、候选消息面、账户仓位和现金状态；"
+        "决策要求：每个BUY/SELL/HOLD都必须同时考虑盘面指引、隔夜美股/美股映射、指数/期货、板块与资金、候选消息面、账户仓位和现金状态；"
         "若任一关键渠道与技术评分冲突，优先降仓、等待确认或HOLD，并在reason写明冲突来源。"
     )
     return "\n".join(lines)

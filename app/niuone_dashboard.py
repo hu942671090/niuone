@@ -53,7 +53,7 @@ from strategy_registry import (
     normalize_strategy_list_update,
     strategy_settings_options,
 )
-from us_market_summary import fetch_us_market_summary, load_cached_summary_for_today
+from us_market_summary import fetch_us_market_summary, fetch_us_sector_snapshot, load_cached_summary_for_today
 
 try:
     import yaml  # type: ignore
@@ -1563,10 +1563,15 @@ def produce_us_market_summary_data() -> dict[str, Any]:
     if archived:
         return archived
     indices_payload = cached_json_data("indices", API_TTLS["indices"], produce_indices_data, {"items": []})
+    try:
+        sector_payload = fetch_us_sector_snapshot()
+    except Exception as exc:
+        sector_payload = {"items": [], "error": f"{type(exc).__name__}: {exc}"}
     return fetch_us_market_summary(
         prefer_archive=False,
         use_model=False,
         indices_payload=indices_payload,
+        sector_payload=sector_payload,
     )
 
 
@@ -2871,6 +2876,12 @@ INDEX_HTML = r"""<!doctype html>
     .us-market-pct.up { color:#d75442; }
     .us-market-pct.down { color:#59b881; }
     .us-market-pct.flat { color:#94a3b8; }
+    .us-market-map { display:grid; gap:7px; margin:0 0 12px; }
+    .us-market-map-line { min-width:0; border:1px solid rgba(148,163,184,.12); border-radius:9px; padding:8px 9px; background:rgba(15,23,42,.42); color:#cbd5e1; font-size:12.5px; line-height:1.45; overflow-wrap:anywhere; word-break:break-word; }
+    .us-market-map-line strong { color:#eef2ff; font-weight:850; }
+    .us-market-map-line .map-pct.up { color:#d75442; font-weight:850; }
+    .us-market-map-line .map-pct.down { color:#59b881; font-weight:850; }
+    .us-market-map-line .map-pct.flat { color:#94a3b8; font-weight:850; }
     .us-market-guidance { display:grid; gap:7px; }
     .us-market-guidance-line { display:grid; grid-template-columns:8px minmax(0,1fr); gap:8px; color:#cbd5e1; font-size:13.5px; line-height:1.5; }
     .us-market-guidance-line::before { content:""; width:5px; height:5px; border-radius:999px; margin-top:.62em; background:rgba(148,163,184,.62); }
@@ -3158,6 +3169,7 @@ INDEX_HTML = r"""<!doctype html>
       .us-market-brief { font-size:13.5px; line-height:1.5; }
       .us-market-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
       .us-market-metric { padding:7px 8px; }
+      .us-market-map-line { font-size:12px; line-height:1.42; padding:7px 8px; }
       .us-market-guidance-line { font-size:13px; line-height:1.48; }
       .market-day-pager { align-items:stretch; padding:10px 11px; gap:8px; }
       .market-day-title { font-size:13.5px; }
@@ -5833,6 +5845,14 @@ function renderUsMarketSummaryCard() {
       <div class="us-market-metric-value"><span>${esc(m.value || '--')}</span><span class="us-market-pct ${pctCls}">${esc(m.change_pct_text || '--')}</span></div>
     </div>`;
   }).join('')}</div>` : '';
+  const mappings = (d.sector_mappings || []).slice(0, 5);
+  const mappingHtml = mappings.length ? `<div class="us-market-map">${mappings.map(m => {
+    const pct = Number(m.change_pct);
+    const pctCls = Number.isFinite(pct) ? upCls(pct) : 'flat';
+    const mapText = Array.isArray(m.a_share_mapping) ? m.a_share_mapping.slice(0, 4).join(' / ') : (m.a_share_mapping || '');
+    const sector = m.proxy ? `${m.us_sector || ''}(${m.proxy})` : (m.us_sector || '');
+    return `<div class="us-market-map-line"><strong>${esc(sector)}</strong> <span class="map-pct ${pctCls}">${esc(m.change_pct_text || '--')}</span> · ${esc(mapText || '相关板块')} · ${esc(m.strategy || m.bias || '观察')}</div>`;
+  }).join('')}</div>` : '';
   const guidance = (d.guidance_lines || []).slice(0, 7);
   const guidanceHtml = guidance.length ? `<div class="us-market-guidance">${guidance.map(line => `<div class="us-market-guidance-line"><span>${esc(line)}</span></div>`).join('')}</div>` : '';
   return `<section class="us-market-summary-card ${tone}">
@@ -5845,6 +5865,7 @@ function renderUsMarketSummaryCard() {
     </div>
     <div class="us-market-brief">${esc(summary)}</div>
     ${metricHtml}
+    ${mappingHtml}
     ${guidanceHtml}
   </section>`;
 }

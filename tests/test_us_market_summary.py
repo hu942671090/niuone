@@ -79,11 +79,21 @@ class UsMarketSummaryTests(unittest.TestCase):
         summary = mod.build_us_market_summary_from_indices(
             payload,
             now=datetime(2026, 7, 1, 8, 0, tzinfo=mod.CN_TZ),
+            sector_payload={
+                "generated_at": "2026-07-01 08:00:00",
+                "items": [
+                    {"symbol": "SMH", "label": "半导体", "change_pct": 1.42, "a_share_mapping": ["半导体", "芯片设备", "先进封装"]},
+                    {"symbol": "XLE", "label": "能源", "change_pct": -0.88, "a_share_mapping": ["油气", "煤炭", "油服"]},
+                ],
+            },
         )
 
         self.assertEqual(summary["tone"], "offensive")
         self.assertIn("试仓", "\n".join(summary["guidance_lines"]))
         self.assertIn("A50期货 +0.38%", "\n".join(summary["guidance_lines"]))
+        self.assertIn("板块映射", "\n".join(summary["guidance_lines"]))
+        self.assertEqual(summary["sector_mappings"][0]["proxy"], "SMH")
+        self.assertIn("半导体", summary["sector_mappings"][0]["a_share_mapping"])
 
     def test_report_text_contains_market_monitor_guidance_block(self):
         mod = load_module()
@@ -97,6 +107,16 @@ class UsMarketSummaryTests(unittest.TestCase):
             "metrics": [
                 {"label": "纳斯达克指数", "value": "18,000.00", "change_pct_text": "-0.80%"},
             ],
+            "sector_mappings": [
+                {
+                    "us_sector": "半导体",
+                    "proxy": "SMH",
+                    "change_pct": 1.2,
+                    "change_pct_text": "+1.20%",
+                    "a_share_mapping": ["半导体", "芯片设备"],
+                    "strategy": "正映射，竞价确认后加分。",
+                },
+            ],
             "guidance_lines": ["买入节奏：降低预算，先观察开盘 15 分钟。"],
         }
 
@@ -106,6 +126,8 @@ class UsMarketSummaryTests(unittest.TestCase):
         self.assertIn("🎯 **今日买卖指引**", text)
         self.assertIn("风险级别：谨慎", text)
         self.assertIn("生成模型 `grok-test`", text)
+        self.assertIn("🧭 **美股板块映射**", text)
+        self.assertIn("半导体(SMH)", text)
         self.assertIn("买入节奏：降低预算", text)
 
     def test_apply_grok_summary_overrides_rule_guidance(self):
@@ -131,6 +153,7 @@ class UsMarketSummaryTests(unittest.TestCase):
                 "summary": "规则摘要",
                 "guidance_lines": ["规则指引"],
                 "metrics": [],
+                "sector_mappings": [{"us_sector": "半导体", "proxy": "SMH", "change_pct_text": "+1.00%"}],
             }
 
             summary = mod.apply_grok_summary(base)
@@ -142,6 +165,7 @@ class UsMarketSummaryTests(unittest.TestCase):
         self.assertEqual(summary["tone_label"], "谨慎")
         self.assertIn("降低追高", summary["summary"])
         self.assertIn("开盘 15 分钟", summary["guidance_lines"][0])
+        self.assertEqual(summary["sector_mappings"][0]["proxy"], "SMH")
 
     def test_parse_grok_summary_accepts_json_fence(self):
         mod = load_module()

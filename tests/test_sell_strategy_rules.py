@@ -836,6 +836,9 @@ class SellStrategyRuleTests(unittest.TestCase):
                 "📊 **美股概况** · 2026-07-02 08:00:00",
                 "💬 隔夜美股偏弱或分化，今日不急着追高。",
                 "",
+                "🧭 **美股板块映射**",
+                "`半导体(SMH)` +1.20% → A股：半导体、芯片设备；正映射，竞价确认后加分。",
+                "",
                 "🎯 **今日买卖指引**",
                 "· 风险级别：谨慎",
                 "· 买入节奏：降低预算，先观察开盘 15 分钟。",
@@ -880,9 +883,12 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(ctx["tone"], "offensive")
         self.assertEqual(ctx["source_title"], "A股竞价盘前总结")
         self.assertEqual(ctx["overnight_us"]["tone"], "cautious")
+        self.assertIn("半导体(SMH)", ctx["overnight_us"]["sector_mappings"][0])
         self.assertEqual(ctx["max_new_buys_per_decision"], 1)
         self.assertLessEqual(ctx["max_total_position_pct"], 60.0)
         self.assertIn("【隔夜美股盘面】", prompt)
+        self.assertIn("板块映射", prompt)
+        self.assertIn("芯片设备", prompt)
         self.assertIn("降低预算", prompt)
 
     def test_execute_actions_uses_market_guidance_position_cap(self):

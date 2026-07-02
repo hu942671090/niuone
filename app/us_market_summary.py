@@ -10,10 +10,12 @@ import re
 import ssl
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+from urllib.parse import quote
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -34,7 +36,96 @@ _SSL_CONTEXT.check_hostname = False
 _SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
+_SECTOR_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 CACHE_TTL_SECONDS = 300
+SECTOR_CACHE_TTL_SECONDS = 900
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d"
+US_SECTOR_PROXY_DEFS: list[dict[str, Any]] = [
+    {
+        "key": "semiconductors",
+        "symbol": "SMH",
+        "label": "半导体",
+        "kind": "theme",
+        "a_share_mapping": ["半导体", "芯片设备", "先进封装", "存储", "AI硬件"],
+    },
+    {
+        "key": "technology",
+        "symbol": "XLK",
+        "label": "科技",
+        "kind": "sector",
+        "a_share_mapping": ["AI算力", "软件服务", "消费电子", "光模块"],
+    },
+    {
+        "key": "communication",
+        "symbol": "XLC",
+        "label": "通信服务",
+        "kind": "sector",
+        "a_share_mapping": ["传媒互联网", "游戏", "运营商", "云服务"],
+    },
+    {
+        "key": "consumer_discretionary",
+        "symbol": "XLY",
+        "label": "可选消费",
+        "kind": "sector",
+        "a_share_mapping": ["汽车链", "家电", "跨境电商", "消费电子"],
+    },
+    {
+        "key": "industrials",
+        "symbol": "XLI",
+        "label": "工业",
+        "kind": "sector",
+        "a_share_mapping": ["工业母机", "自动化", "航空航天", "机器人"],
+    },
+    {
+        "key": "financials",
+        "symbol": "XLF",
+        "label": "金融",
+        "kind": "sector",
+        "a_share_mapping": ["券商", "银行", "保险", "金融科技"],
+    },
+    {
+        "key": "healthcare",
+        "symbol": "XLV",
+        "label": "医疗保健",
+        "kind": "sector",
+        "a_share_mapping": ["创新药", "医疗器械", "CXO", "医药商业"],
+    },
+    {
+        "key": "energy",
+        "symbol": "XLE",
+        "label": "能源",
+        "kind": "sector",
+        "a_share_mapping": ["油气", "煤炭", "油服", "能源设备"],
+    },
+    {
+        "key": "materials",
+        "symbol": "XLB",
+        "label": "原材料",
+        "kind": "sector",
+        "a_share_mapping": ["有色金属", "化工", "基础材料", "稀有金属"],
+    },
+    {
+        "key": "consumer_staples",
+        "symbol": "XLP",
+        "label": "必选消费",
+        "kind": "sector",
+        "a_share_mapping": ["食品饮料", "农业", "商超零售", "日化"],
+    },
+    {
+        "key": "utilities",
+        "symbol": "XLU",
+        "label": "公用事业",
+        "kind": "sector",
+        "a_share_mapping": ["电力", "公用事业", "水务燃气", "绿电"],
+    },
+    {
+        "key": "real_estate",
+        "symbol": "XLRE",
+        "label": "房地产",
+        "kind": "sector",
+        "a_share_mapping": ["地产链", "物业", "建材", "家居"],
+    },
+]
 
 
 def load_dashboard_env() -> None:
@@ -233,6 +324,99 @@ def _metric(item: dict[str, Any] | None, fallback_label: str) -> dict[str, Any] 
     }
 
 
+def _last_number(values: list[Any]) -> float | None:
+    for value in reversed(values or []):
+        number = _safe_float(value)
+        if number is not None and number > 0:
+            return number
+    return None
+
+
+def _fetch_yahoo_daily_quote(symbol: str) -> dict[str, Any] | None:
+    req = Request(
+        YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")),
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+    )
+    timeout_seconds = _int_env("US_SECTOR_SNAPSHOT_REQUEST_TIMEOUT_SECONDS", 8, min_value=3)
+    with urlopen(req, timeout=timeout_seconds, context=_SSL_CONTEXT) as resp:
+        payload = json.loads(resp.read().decode("utf-8", "ignore"))
+    result = (((payload.get("chart") or {}).get("result") or []) + [None])[0]
+    if not isinstance(result, dict):
+        return None
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    closes = (((result.get("indicators") or {}).get("quote") or [{}])[0] or {}).get("close") or []
+    price = _safe_float(meta.get("regularMarketPrice")) or _last_number(closes)
+    prev_close = (
+        _safe_float(meta.get("previousClose"))
+        or _safe_float(meta.get("chartPreviousClose"))
+        or (closes[-2] if len(closes) >= 2 else None)
+    )
+    prev_close = _safe_float(prev_close)
+    if price is None or prev_close is None or prev_close <= 0:
+        return None
+    ts = _safe_float(meta.get("regularMarketTime"))
+    time_text = ""
+    if ts:
+        time_text = datetime.fromtimestamp(float(ts), NY_TZ).astimezone(CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "symbol": symbol,
+        "price": round(price, 4),
+        "prev_close": round(prev_close, 4),
+        "change": round(price - prev_close, 4),
+        "change_pct": round((price / prev_close - 1) * 100, 4),
+        "time": time_text,
+    }
+
+
+def fetch_us_sector_snapshot(now: datetime | None = None) -> dict[str, Any]:
+    """Fetch a lightweight US sector/theme ETF snapshot for A-share mapping."""
+    current_ts = time.time()
+    if _SECTOR_CACHE.get("data") is not None and current_ts - float(_SECTOR_CACHE.get("ts") or 0) < SECTOR_CACHE_TTL_SECONDS:
+        return _SECTOR_CACHE["data"]
+
+    def build_item(defn: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            quote_data = _fetch_yahoo_daily_quote(str(defn.get("symbol") or ""))
+        except Exception:
+            return None
+        if not quote_data:
+            return None
+        pct = _safe_float(quote_data.get("change_pct"))
+        return {
+            "key": defn.get("key"),
+            "symbol": defn.get("symbol"),
+            "label": defn.get("label"),
+            "kind": defn.get("kind") or "sector",
+            "price": quote_data.get("price"),
+            "prev_close": quote_data.get("prev_close"),
+            "change": quote_data.get("change"),
+            "change_pct": pct,
+            "change_pct_text": _fmt_pct(pct),
+            "time": quote_data.get("time") or "",
+            "a_share_mapping": list(defn.get("a_share_mapping") or []),
+        }
+
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+    try:
+        with ThreadPoolExecutor(max_workers=min(6, len(US_SECTOR_PROXY_DEFS))) as pool:
+            for item in pool.map(build_item, US_SECTOR_PROXY_DEFS):
+                if item:
+                    items.append(item)
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+    now_cn = _now_cn(now)
+    data = {
+        "items": items,
+        "generated_at": now_cn.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if errors:
+        data["error"] = "；".join(errors[:3])
+    _SECTOR_CACHE.update({"ts": current_ts, "data": data})
+    return data
+
+
 def _tone_from_indices(metrics: list[dict[str, Any]]) -> tuple[str, str, str]:
     pct_by_label = {str(m.get("label")): _safe_float(m.get("change_pct")) for m in metrics}
     pcts = [v for v in pct_by_label.values() if v is not None]
@@ -292,8 +476,109 @@ def _cross_asset_lines(metrics_by_key: dict[str, dict[str, Any]]) -> list[str]:
     return lines[:3]
 
 
-def _strategy_lines(tone: str, tone_reason: str, index_metrics: list[dict[str, Any]], metrics_by_key: dict[str, dict[str, Any]]) -> list[str]:
+def _sector_bias(pct: float | None) -> tuple[str, str]:
+    if pct is None:
+        return "neutral", "观察"
+    if pct >= 1.0:
+        return "positive", "强正映射"
+    if pct >= 0.35:
+        return "positive", "正映射"
+    if pct <= -1.0:
+        return "negative", "明显压制"
+    if pct <= -0.35:
+        return "negative", "负映射"
+    return "neutral", "观察"
+
+
+def _sector_action(label: str, pct: float | None, a_share_mapping: list[str]) -> str:
+    mapping = "、".join(a_share_mapping[:4]) or "相关板块"
+    direction, bias = _sector_bias(pct)
+    if direction == "positive":
+        return f"{bias}，A股映射看{mapping}，只在竞价强于大盘且资金流入时加分。"
+    if direction == "negative":
+        return f"{bias}，A股映射的{mapping}先降权，持仓若弱于板块优先控风险。"
+    return f"{bias}，{label}映射到{mapping}，仅作观察不单独作为加仓理由。"
+
+
+def _build_sector_mappings(sector_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    items = [item for item in ((sector_payload or {}).get("items") or []) if isinstance(item, dict)]
+    normalized: list[dict[str, Any]] = []
+    defs_by_symbol = {str(row.get("symbol") or ""): row for row in US_SECTOR_PROXY_DEFS}
+    for raw in items:
+        symbol = str(raw.get("symbol") or raw.get("proxy") or "").upper()
+        defn = defs_by_symbol.get(symbol, {})
+        label = str(raw.get("label") or raw.get("name") or defn.get("label") or symbol).strip()
+        pct = _safe_float(raw.get("change_pct"))
+        mapping = raw.get("a_share_mapping") or defn.get("a_share_mapping") or []
+        if isinstance(mapping, str):
+            mapping = [x.strip() for x in re.split(r"[、,，/]+", mapping) if x.strip()]
+        mapping = [str(x).strip() for x in mapping if str(x).strip()]
+        direction, bias = _sector_bias(pct)
+        normalized.append({
+            "key": raw.get("key") or defn.get("key") or symbol.lower(),
+            "us_sector": label,
+            "proxy": symbol,
+            "kind": raw.get("kind") or defn.get("kind") or "sector",
+            "change_pct": pct,
+            "change_pct_text": raw.get("change_pct_text") or _fmt_pct(pct),
+            "tone": direction,
+            "bias": bias,
+            "a_share_mapping": mapping[:5],
+            "strategy": _sector_action(label, pct, mapping),
+        })
+    positives = [row for row in normalized if row.get("tone") == "positive"]
+    negatives = [row for row in normalized if row.get("tone") == "negative"]
+    neutrals = [row for row in normalized if row.get("tone") == "neutral"]
+    positives.sort(key=lambda row: float(row.get("change_pct") or 0), reverse=True)
+    negatives.sort(key=lambda row: float(row.get("change_pct") or 0))
+    neutrals.sort(key=lambda row: abs(float(row.get("change_pct") or 0)), reverse=True)
+    selected = positives[:3] + negatives[:2]
+    if not selected:
+        selected = neutrals[:3]
+    return selected[:5]
+
+
+def _sector_summary_phrase(sector_mappings: list[dict[str, Any]]) -> str:
+    positives = [row for row in sector_mappings if row.get("tone") == "positive"]
+    negatives = [row for row in sector_mappings if row.get("tone") == "negative"]
+    parts: list[str] = []
+    if positives:
+        parts.append("正映射看" + "、".join(str(row.get("us_sector") or "") for row in positives[:2] if row.get("us_sector")))
+    if negatives:
+        parts.append("负映射避开" + "、".join(str(row.get("us_sector") or "") for row in negatives[:2] if row.get("us_sector")))
+    return "板块映射：" + "；".join(parts) + "。" if parts else ""
+
+
+def _sector_guidance_line(sector_mappings: list[dict[str, Any]]) -> str:
+    positives = [row for row in sector_mappings if row.get("tone") == "positive"]
+    negatives = [row for row in sector_mappings if row.get("tone") == "negative"]
+    parts: list[str] = []
+    if positives:
+        row = positives[0]
+        mapping = "、".join((row.get("a_share_mapping") or [])[:3])
+        if mapping:
+            parts.append(f"{row.get('us_sector')}正映射到{mapping}")
+    if negatives:
+        row = negatives[0]
+        mapping = "、".join((row.get("a_share_mapping") or [])[:3])
+        if mapping:
+            parts.append(f"{row.get('us_sector')}负映射的{mapping}降权")
+    if not parts:
+        return ""
+    return "板块映射：" + "；".join(parts) + "，必须等 A 股竞价、资金流和板块联动确认。"
+
+
+def _strategy_lines(
+    tone: str,
+    tone_reason: str,
+    index_metrics: list[dict[str, Any]],
+    metrics_by_key: dict[str, dict[str, Any]],
+    sector_mappings: list[dict[str, Any]] | None = None,
+) -> list[str]:
     lines = [tone_reason, _relative_style_line(index_metrics)]
+    sector_line = _sector_guidance_line(sector_mappings or [])
+    if sector_line:
+        lines.append(sector_line)
     if tone == "offensive":
         lines.append("买入节奏：可允许试仓，但只做竞价有溢价、开盘有承接、板块联动的候选。")
         lines.append("选股方向：优先右侧趋势、科技成长映射和放量突破，弱分支不追。")
@@ -325,6 +610,20 @@ def _metrics_prompt_lines(summary: dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "- 数据暂不可用"
 
 
+def _sector_prompt_lines(summary: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for item in summary.get("sector_mappings") or []:
+        if not isinstance(item, dict):
+            continue
+        mapping = "、".join(str(x) for x in (item.get("a_share_mapping") or [])[:5] if str(x).strip())
+        lines.append(
+            f"- {item.get('us_sector') or ''}({item.get('proxy') or ''}): "
+            f"{item.get('change_pct_text') or '--'}，A股映射：{mapping or '相关板块'}，"
+            f"策略含义：{item.get('strategy') or item.get('bias') or '观察'}"
+        )
+    return "\n".join(lines) if lines else "- 板块/主题 ETF 数据暂不可用"
+
+
 def build_grok_messages(base_summary: dict[str, Any]) -> list[dict[str, str]]:
     target_cn_date = base_summary.get("target_cn_date") or ""
     target_us_date = base_summary.get("target_us_date") or ""
@@ -343,6 +642,9 @@ def build_grok_messages(base_summary: dict[str, Any]) -> list[dict[str, str]]:
 
 已采集行情：
 {_metrics_prompt_lines(base_summary)}
+
+已采集美股板块/主题 ETF 映射：
+{_sector_prompt_lines(base_summary)}
 
 本地量化初判（只作参考，可修正）：
 风险级别：{base_summary.get('tone_label') or '中性'}
@@ -366,6 +668,7 @@ def build_grok_messages(base_summary: dict[str, Any]) -> list[dict[str, str]]:
 要求：
 - guidance_lines 返回 4 到 7 条，短句但要具体可执行。
 - 明确指导当天一整天的买卖选股策略，不只讲早盘。
+- 如果上方美股板块/主题 ETF 映射可用，至少输出一条“板块映射：...”指引，必须基于给定映射方向；若暂不可用，写明板块映射暂缺，按 A 股自身确认。
 - 如果纳指显著强于道指，可提科技成长/AI/半导体/算力映射；如果道指显著强于纳指，可提价值/顺周期。
 - 如果黄金明显上涨，要提示避险；如果油价大幅波动，要提示能源/化工方向只做确认。
 - 不输出任何投资保证、收益承诺、URL 或来源列表。
@@ -427,7 +730,11 @@ def apply_grok_summary(base_summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_us_market_summary_from_indices(indices_payload: dict[str, Any] | None, now: datetime | None = None) -> dict[str, Any]:
+def build_us_market_summary_from_indices(
+    indices_payload: dict[str, Any] | None,
+    now: datetime | None = None,
+    sector_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     now_cn = now.astimezone(CN_TZ) if now and now.tzinfo else (now.replace(tzinfo=CN_TZ) if now else datetime.now(CN_TZ))
     target = previous_us_session_date(now_cn.date())
     items = [item for item in ((indices_payload or {}).get("items") or []) if isinstance(item, dict)]
@@ -452,10 +759,14 @@ def build_us_market_summary_from_indices(indices_payload: dict[str, Any] | None,
     tone, tone_label, tone_reason = _tone_from_indices(index_metrics)
     available = len(index_metrics) >= 2
     index_line = _index_sentence(index_metrics)
+    sector_mappings = _build_sector_mappings(sector_payload)
+    sector_phrase = _sector_summary_phrase(sector_mappings)
     summary = f"{target:%Y-%m-%d} 美股收盘：{index_line}。{tone_reason}"
+    if sector_phrase:
+        summary = f"{summary}{sector_phrase}"
     if not available:
         summary = f"{target:%Y-%m-%d} 美股盘面数据暂不完整，今日先按中性外盘背景处理。"
-    guidance_lines = _strategy_lines(tone, tone_reason, index_metrics, metrics_by_key) if available else [
+    guidance_lines = _strategy_lines(tone, tone_reason, index_metrics, metrics_by_key, sector_mappings) if available else [
         "美股数据暂缺，今日不基于外盘单独提高仓位。",
         "开盘后优先看 A 股竞价强弱、资金流和板块联动。",
     ]
@@ -470,6 +781,8 @@ def build_us_market_summary_from_indices(indices_payload: dict[str, Any] | None,
         "tone_label": tone_label,
         "summary": summary,
         "metrics": [metrics_by_key[key] for key, _ in metric_keys if key in metrics_by_key],
+        "sector_mappings": sector_mappings,
+        "sector_source_generated_at": (sector_payload or {}).get("generated_at") or "",
         "guidance_lines": guidance_lines,
     }
 
@@ -508,13 +821,15 @@ def fetch_us_market_summary(
     use_model: bool = True,
     strict_model: bool = False,
     indices_payload: dict[str, Any] | None = None,
+    sector_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if prefer_archive:
         cached = load_cached_summary_for_today(now)
         if cached:
             return cached
     source_key = str((indices_payload or {}).get("generated_at") or "") if indices_payload is not None else ""
-    cache_key = f"{previous_us_session_date((now or datetime.now(CN_TZ))).strftime('%Y-%m-%d')}:{'model' if use_model else 'rules'}:{source_key}"
+    sector_source_key = str((sector_payload or {}).get("generated_at") or "") if sector_payload is not None else ""
+    cache_key = f"{previous_us_session_date((now or datetime.now(CN_TZ))).strftime('%Y-%m-%d')}:{'model' if use_model else 'rules'}:{source_key}:{sector_source_key}"
     current_ts = time.time()
     cached = _CACHE.get("data")
     if cached and _CACHE.get("key") == cache_key and current_ts - float(_CACHE.get("ts") or 0) < CACHE_TTL_SECONDS:
@@ -526,7 +841,13 @@ def fetch_us_market_summary(
             payload = fetch_indices_data()
         else:
             payload = indices_payload
-        data = build_us_market_summary_from_indices(payload, now=now)
+        sectors = sector_payload
+        if sectors is None and indices_payload is None:
+            try:
+                sectors = fetch_us_sector_snapshot(now)
+            except Exception:
+                sectors = {"items": []}
+        data = build_us_market_summary_from_indices(payload, now=now, sector_payload=sectors)
         if use_model:
             try:
                 data = apply_grok_summary(data)
@@ -558,6 +879,7 @@ def fetch_us_market_summary(
             "tone_label": "中性",
             "summary": "隔夜美股盘面暂不可用，今日先按 A 股自身信号执行。",
             "metrics": [],
+            "sector_mappings": [],
             "guidance_lines": ["美股摘要生成失败，暂不基于外盘调整仓位。"],
             "error": f"{type(exc).__name__}: {exc}",
             "model_generated": False,
@@ -574,6 +896,7 @@ def build_us_market_report_text(summary: dict[str, Any]) -> str:
     tone_label = summary.get("tone_label") or "中性"
     model_label = summary.get("model") if summary.get("model_generated") else "本地规则兜底"
     metrics = [m for m in (summary.get("metrics") or []) if isinstance(m, dict)]
+    sector_mappings = [m for m in (summary.get("sector_mappings") or []) if isinstance(m, dict)]
     guidance = [str(line).strip() for line in (summary.get("guidance_lines") or []) if str(line).strip()]
 
     lines = [
@@ -594,6 +917,21 @@ def build_us_market_report_text(summary: dict[str, Any]) -> str:
             lines.append(f"`{label}` {pct} | {value}")
     else:
         lines.append("数据暂不可用")
+
+    lines.extend([
+        "",
+        "🧭 **美股板块映射**",
+    ])
+    if sector_mappings:
+        for item in sector_mappings[:5]:
+            sector = item.get("us_sector") or ""
+            proxy = item.get("proxy") or ""
+            pct = item.get("change_pct_text") or "--"
+            mapping = "、".join(str(x) for x in (item.get("a_share_mapping") or [])[:5] if str(x).strip())
+            strategy = item.get("strategy") or item.get("bias") or "仅作观察"
+            lines.append(f"`{sector}({proxy})` {pct} → A股：{mapping or '相关板块'}；{strategy}")
+    else:
+        lines.append("板块/主题 ETF 数据暂不可用，今日先按指数和 A 股自身板块确认。")
 
     lines.extend([
         "",

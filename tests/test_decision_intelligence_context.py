@@ -73,7 +73,12 @@ class DecisionIntelligenceContextTests(unittest.TestCase):
             "min_cash_reserve_pct": 40,
             "buy_budget_multiplier": 0.6,
             "allow_new_buys": True,
-            "overnight_us": {"available": True, "tone_label": "中性", "summary": "美股三大指数分化"},
+            "overnight_us": {
+                "available": True,
+                "tone_label": "中性",
+                "summary": "美股三大指数分化",
+                "sector_mappings": ["半导体(SMH) +1.20%；A股：半导体、芯片设备；正映射"],
+            },
         }
 
         ctx = trader.build_decision_intelligence_context(
@@ -88,6 +93,8 @@ class DecisionIntelligenceContextTests(unittest.TestCase):
         self.assertIn("上证指数-1.20%", prompt)
         self.assertIn("富时中国A50期货-1.10%", prompt)
         self.assertIn("隔夜美股：中性", prompt)
+        self.assertIn("隔夜美股映射", prompt)
+        self.assertIn("芯片设备", prompt)
         self.assertIn("行业资金：流入 半导体+2.30%/18.5亿", prompt)
         self.assertIn("候选共振/背离", prompt)
         self.assertIn("强势板块", prompt)
