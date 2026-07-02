@@ -280,6 +280,66 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(items[-1]['code'], '000019')
         self.assertEqual(compacted['exit_rule']['stop_loss']['items_truncated'], 15)
 
+    def test_filter_today_log_entries_keeps_today_items(self):
+        today = datetime.now().strftime('%Y-%m-%d')
+        rows = [
+            {'time': f'{today} 09:31:00', 'action': 'BUY', 'code': '600000'},
+            {'time': '2026-01-01 09:31:00', 'action': 'SELL', 'code': '000001'},
+            {'time': f'{today} 10:00:00', 'trade_reason': '测试决策'},
+        ]
+
+        filtered = dashboard.filter_today_log_entries(rows)
+
+        self.assertEqual([row['time'] for row in filtered], [rows[0]['time'], rows[2]['time']])
+
+    def test_fast_practice_payload_uses_trader_trade_rule_note(self):
+        class FakeTrader:
+            def load_state(self):
+                return {'equity_history': [], 'daily_equity_history': []}
+
+            def enrich_portfolio(self, state):
+                return {
+                    'positions': [],
+                    'trade_log': [],
+                    'decision_log': [],
+                    'cash': 1000000,
+                    'total_equity': 1000000,
+                }
+
+            def track_strategy_performance(self, state):
+                return {}
+
+            def build_trade_rule_note(self):
+                return '统一风控说明'
+
+        original_get_trader_module = dashboard.get_trader_module
+        original_trading_day_status = dashboard.trading_day_status
+        try:
+            dashboard.get_trader_module = lambda: FakeTrader()
+            dashboard.trading_day_status = lambda: {'is_trading_day': True}
+
+            payload = dashboard.get_practice_payload_fast()
+        finally:
+            dashboard.get_trader_module = original_get_trader_module
+            dashboard.trading_day_status = original_trading_day_status
+
+        self.assertEqual(payload['trade_rule_note'], '统一风控说明')
+        self.assertEqual(payload['snapshot_mode'], 'fast')
+
+    def test_index_template_has_scrollable_practice_operation_log(self):
+        self.assertIn('function renderPracticeOperationLog(payload)', dashboard.INDEX_HTML)
+        self.assertIn('class="practice-log-scroll"', dashboard.INDEX_HTML)
+        self.assertIn('overflow-y:auto', dashboard.INDEX_HTML)
+        self.assertIn('aria-label="当日所有操作日志"', dashboard.INDEX_HTML)
+
+    def test_index_template_hides_trade_rule_note_in_modal(self):
+        self.assertIn('let practiceRuleNoteOpen = false', dashboard.INDEX_HTML)
+        self.assertIn('function renderPracticeRuleNoteModal(note)', dashboard.INDEX_HTML)
+        self.assertIn('data-practice-rule-action="open"', dashboard.INDEX_HTML)
+        self.assertIn('class="practice-rule-backdrop"', dashboard.INDEX_HTML)
+        self.assertIn('${ruleModal}', dashboard.INDEX_HTML)
+        self.assertNotIn('${esc(p.trade_rule_note||', dashboard.INDEX_HTML)
+
     def test_index_template_github_button_links_to_repo_with_icon(self):
         self.assertIn(
             '<a class="header-link" href="https://github.com/kunkundi/niuone"',
@@ -441,7 +501,12 @@ class DashboardAuthTests(unittest.TestCase):
             locked_page = FakeHandler(path='/admin', headers={'Cookie': auth_cookie})
             locked_page.do_GET()
             self.assertEqual(locked_page.status, 200)
-            self.assertIn('name="admin_password"', locked_page.wfile.getvalue().decode('utf-8'))
+            locked_body = locked_page.wfile.getvalue().decode('utf-8')
+            self.assertIn('name="admin_password"', locked_body)
+            self.assertIn('enterkeyhint="done"', locked_body)
+            self.assertIn("data-admin-password-form", locked_body)
+            self.assertIn("form.requestSubmit", locked_body)
+            self.assertIn("event.key !== 'Enter'", locked_body)
 
             locked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': auth_cookie})
             locked_api.do_GET()
@@ -596,6 +661,9 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn("data-strategy-source-gated='preset_text'", body)
         self.assertIn("name='env__DASHBOARD_PRESET_STRATEGY_TEXT'", body)
         self.assertIn('preset-strategy-textarea', body)
+        self.assertIn('交易纪律 Prompt', body)
+        self.assertIn("name='env__DASHBOARD_TRADE_DISCIPLINE_TEXT'", body)
+        self.assertIn('trade-discipline-textarea', body)
         self.assertIn("document.addEventListener('input', handleStrategySourceToggle);", body)
         self.assertIn("name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
         self.assertIn("type='radio' name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
@@ -730,18 +798,22 @@ class DashboardAuthTests(unittest.TestCase):
     def test_admin_config_decodes_preset_strategy_text(self):
         dashboard.DASHBOARD_ENV_FILE.write_text(
             "DASHBOARD_STRATEGY_SOURCE=preset_text\n"
-            "DASHBOARD_PRESET_STRATEGY_TEXT='强趋势回踩\\n跌破5日线离场'\n",
+            "DASHBOARD_PRESET_STRATEGY_TEXT='强趋势回踩\\n跌破5日线离场'\n"
+            "DASHBOARD_TRADE_DISCIPLINE_TEXT='纪律一\\n纪律二'\n",
             encoding='utf-8',
         )
 
         payload = dashboard.build_admin_config_payload()
         source_item = next(item for item in payload['items'] if item['name'] == dashboard.STRATEGY_SOURCE_ENV)
         text_item = next(item for item in payload['items'] if item['name'] == dashboard.PRESET_STRATEGY_TEXT_ENV)
+        discipline_item = next(item for item in payload['items'] if item['name'] == dashboard.TRADE_DISCIPLINE_TEXT_ENV)
 
         self.assertEqual(source_item['effective'], '预设文字')
         self.assertEqual(source_item['file_value'], 'preset_text')
         self.assertEqual(text_item['file_value'], '强趋势回踩\n跌破5日线离场')
         self.assertEqual(text_item['effective'], '强趋势回踩\n跌破5日线离场')
+        self.assertEqual(discipline_item['file_value'], '纪律一\n纪律二')
+        self.assertEqual(discipline_item['effective'], '纪律一\n纪律二')
 
     def test_business_settings_are_local_to_dashboard_env(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE
@@ -953,6 +1025,7 @@ class DashboardAuthTests(unittest.TestCase):
                 'env__DASHBOARD_STRATEGY_SOURCE': 'preset_text',
                 'env__DASHBOARD_ENABLED_PERSONA_STRATEGIES': ['', 'li_daxiao_bottom'],
                 'env__DASHBOARD_PRESET_STRATEGY_TEXT': '只做主线强趋势回踩\n跌破5日线离场',
+                'env__DASHBOARD_TRADE_DISCIPLINE_TEXT': '纪律一\n纪律二',
                 'env__DASHBOARD_HOME': '/tmp/should-not-be-written',
             }, doseq=True).encode('utf-8')
             handler = FakeHandler(
@@ -1010,6 +1083,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(parsed['DASHBOARD_STRATEGY_SOURCE'], 'preset_text')
         self.assertEqual(parsed['DASHBOARD_ENABLED_PERSONA_STRATEGIES'], 'li_daxiao_bottom')
         self.assertEqual(parsed['DASHBOARD_PRESET_STRATEGY_TEXT'], '只做主线强趋势回踩\\n跌破5日线离场')
+        self.assertEqual(parsed['DASHBOARD_TRADE_DISCIPLINE_TEXT'], '纪律一\\n纪律二')
         self.assertEqual(runtime_b1_times, ('09:25', '10:00', '14:50'))
         self.assertEqual(runtime_indices_ttl, 20)
         self.assertNotIn('DASHBOARD_HOME', parsed)

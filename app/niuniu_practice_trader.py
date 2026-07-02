@@ -34,10 +34,13 @@ from strategy_registry import (
     PERSONA_STRATEGY_ENV,
     STRATEGY_SOURCE_ENV,
     STRATEGY_SOURCE_PRESET_TEXT,
+    TRADE_DISCIPLINE_TEXT_ENV,
     STRATEGY_DEFINITIONS,
     STRATEGY_POSITION_LIMIT_PCT,
     active_strategy_source,
     classify_strategy_text,
+    decode_trade_discipline_text,
+    default_trade_discipline_text,
     decode_preset_strategy_text,
     enabled_strategy_ids,
     known_strategy_ids,
@@ -118,6 +121,7 @@ def load_dashboard_env() -> None:
         STRATEGY_SOURCE_ENV,
         PERSONA_STRATEGY_ENV,
         PRESET_STRATEGY_TEXT_ENV,
+        TRADE_DISCIPLINE_TEXT_ENV,
         "CROSSDESK_BASE_URL",
         "CROSSDESK_API_KEY",
     }
@@ -2049,8 +2053,7 @@ def compact_market_strategy_context(ctx: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in (
         "enabled", "available", "tone", "tone_label", "phase", "max_open_positions",
-        "max_new_buys_per_decision", "max_total_position_pct", "min_cash_reserve_pct",
-        "buy_budget_multiplier", "allow_new_buys", "source_title", "source_time",
+        "max_new_buys_per_decision", "allow_new_buys", "source_title", "source_time",
         "session_note", "guidance_lines", "overnight_us",
     ):
         value = ctx.get(key)
@@ -2064,13 +2067,25 @@ def compact_market_strategy_context(ctx: dict[str, Any]) -> dict[str, Any]:
 def format_market_strategy_context_for_prompt(ctx: dict[str, Any]) -> str:
     if not ctx.get("enabled"):
         return "【今日盘面监控指引】已关闭。"
+    tone = str(ctx.get("tone") or "neutral")
+    if not ctx.get("allow_new_buys", True):
+        position_bias = "暂停新买，只处理卖出/持有"
+    elif tone == "offensive":
+        position_bias = "可提高集中度，但必须给出高确定性理由"
+    elif tone == "balanced":
+        position_bias = "分批试错，避免一次性把节奏打满"
+    elif tone == "cautious":
+        position_bias = "缩小试错，优先等待承接确认"
+    elif tone == "defensive":
+        position_bias = "轻仓观察，除非极高确定性否则不加仓"
+    else:
+        position_bias = "按候选确定性和账户状态自定仓位"
     lines = [
         "【今日盘面监控指引】",
         (
             f"风险级别：{ctx.get('tone_label', '中性')}；阶段：{ctx.get('phase', '-')}; "
-            f"动态上限：最多{ctx.get('max_open_positions')}只、单轮新仓≤{ctx.get('max_new_buys_per_decision')}笔、"
-            f"总仓≤{ctx.get('max_total_position_pct')}%、现金≥{ctx.get('min_cash_reserve_pct')}%、"
-            f"买入预算×{ctx.get('buy_budget_multiplier')}。"
+            f"节奏：最多{ctx.get('max_open_positions')}只、单轮新仓≤{ctx.get('max_new_buys_per_decision')}笔；"
+            f"仓位倾向：{position_bias}。"
         ),
     ]
     if not ctx.get("allow_new_buys", True):
@@ -2385,10 +2400,10 @@ def derive_decision_intelligence_notes(ctx: dict[str, Any]) -> list[str]:
     portfolio = ctx.get("portfolio") or {}
     cash_pct = portfolio.get("cash_pct")
     position_pct = portfolio.get("position_pct")
-    if isinstance(position_pct, (int, float)) and position_pct >= MAX_TOTAL_POSITION_PCT * 0.85:
-        notes.append("账户总仓接近上限，新增买入应优先HOLD或替换弱持仓")
-    if isinstance(cash_pct, (int, float)) and cash_pct <= MIN_CASH_RESERVE_PCT + 5:
-        notes.append("现金缓冲接近底线，禁止为了凑仓位放大shares")
+    if isinstance(position_pct, (int, float)) and position_pct >= 90:
+        notes.append("账户接近满仓，新增买入需有极高确定性或替换弱持仓")
+    if isinstance(cash_pct, (int, float)) and cash_pct <= 10:
+        notes.append("现金缓冲很薄，继续加仓需在reason说明必要性")
     alignment = ctx.get("candidate_alignment") or []
     if alignment:
         notes.append("候选需结合板块/资金/热门榜共振或背离逐只降权")
@@ -2545,7 +2560,7 @@ def format_decision_intelligence_context_for_prompt(ctx: dict[str, Any]) -> str:
     if source_status:
         lines.append("来源状态：" + "；".join(f"{key}={value}" for key, value in sorted(source_status.items())))
     lines.append(
-        "决策要求：每个BUY/SELL/HOLD都必须同时考虑盘面指引、隔夜美股、指数/期货、板块与资金、候选消息面、账户仓位和现金约束；"
+        "决策要求：每个BUY/SELL/HOLD都必须同时考虑盘面指引、隔夜美股、指数/期货、板块与资金、候选消息面、账户仓位和现金状态；"
         "若任一关键渠道与技术评分冲突，优先降仓、等待确认或HOLD，并在reason写明冲突来源。"
     )
     return "\n".join(lines)
@@ -4111,6 +4126,21 @@ def current_preset_strategy_text() -> str:
     return decode_preset_strategy_text(os.environ.get(PRESET_STRATEGY_TEXT_ENV, ""))
 
 
+def current_trade_discipline_text(position_limit_desc: str, adaptive: dict[str, Any] | None = None) -> str:
+    custom = decode_trade_discipline_text(os.environ.get(TRADE_DISCIPLINE_TEXT_ENV, ""))
+    if custom:
+        return custom
+    adaptive = adaptive or {}
+    return default_trade_discipline_text(
+        max_open_positions=MAX_OPEN_POSITIONS,
+        max_new_buys_per_decision=MAX_NEW_BUYS_PER_DECISION,
+        position_limit_desc=position_limit_desc or "无固定百分比硬限制",
+        adaptive_label=str(adaptive.get("label") or "中性"),
+        adaptive_stop_loss_pct=float(adaptive.get("stop_loss", STOP_LOSS_PCT)),
+        adaptive_position_mult=float(adaptive.get("position_mult", 1.0)),
+    )
+
+
 def active_strategy_ids_for_decision() -> set[str]:
     return enabled_strategy_ids(os.environ.get(PERSONA_STRATEGY_ENV), os.environ.get(STRATEGY_SOURCE_ENV))
 
@@ -4254,29 +4284,10 @@ Z哥卖出风控（属于Z哥体系）：
         news_context,
     )
     decision_intelligence_prompt = format_decision_intelligence_context_for_prompt(decision_intelligence_ctx)
-
+    trade_discipline_text = current_trade_discipline_text(position_limit_desc, adaptive)
     prompt = f"""你是A股模拟账户交易决策器。账户初始资金100万，只做A股模拟交易，不是真实下单。
 必须遵守：
-- A股模拟成交窗口：09:30-11:30、13:00-15:00；09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30为静默期，不得直接按参考价记成交。
-- T+1：今日买入的股票今日不可卖；只能卖available_qty。
-- 买入必须100股整数倍；不能融资、不能做空、现金不能为负。
-- 单次决策最多给2条新买入；当前持仓达到{MAX_OPEN_POSITIONS}只时只允许卖出/持有，不能继续开新仓，避免“开超市”。
-- 单票目标仓位不超过总资产{MAX_SINGLE_POSITION_PCT:g}%；总持仓不超过{MAX_TOTAL_POSITION_PCT:g}%；至少保留{MIN_CASH_RESERVE_PCT:g}%现金。
-- 今日盘面监控指引优先收紧买入节奏；若动态上限低于静态上限，必须按动态上限决策，不能上午把{MAX_OPEN_POSITIONS}只买满。
-- 每条 BUY/SELL 的仓位大小由你决定：必须给出100股整数倍 shares；仓位大小一律按“参考价或成交价 × shares ÷ 当前总权益 × 100%”定义，并在 reason 里写明这个百分比依据；执行层不会替你补默认仓位，也不会把过大的买入/卖出自动缩小，超出现金、单票、总仓、动态盘面或可卖数量会直接拦截。
-- 首次建仓、加仓、减仓比例由你结合评分、战法确定性、风险标记、盘面级别、现有仓位和盈亏状态决定；按注册策略仓位上限执行：{position_limit_desc}；尾盘(14:30后)原则上不新开仓。
-- 全局情报包是每次决策的必读输入：盘面监控、隔夜美股、指数/期货、板块涨跌、行业资金、热门股、消息面预检、当前仓位和现金约束都必须影响BUY/SELL/HOLD与shares。
-- 当前账户JSON里的 strategy_mark/buy_strategy/entry_reason/last_exit_rule 是既有持仓的策略标记；后续加仓、减仓、清仓必须读取这些标记，按原入场策略的时间纪律和卖出规则处理，不能把 B3、B2、趋势回踩、李大霄等不同策略混同。
-- 系统底线风控：买入K线/前低止损、-4%硬止损、持仓超25日退出；防卖飞、卤煮、S1/S2/S3、出货五式、白线/黄线等归属于下方 Z哥卖出风控
-- 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出
-- 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场
-- 同板块持仓不超过2只（避免集中风险）
-- 必须按候选自带的“基准”判断是否达标；未达各自基准只能观察，不能因为裸分接近8就买
-- 策略共识只能用于排序，不能突破持仓数、单票仓位、总仓位、现金储备硬上限。
-- 当前自适应模式：{adaptive.get('label','中性')}（止损{adaptive.get('stop_loss',STOP_LOSS_PCT)}%，仓位系数{adaptive.get('position_mult',1.0)}x，仅作为你决定 shares 的参考）
-- 盈亏比过滤：优先选盈亏比≥2:1的票（上涨空间/下跌空间），盈亏比<1.5自动标记风险 ← 新增
-- 波动率提示：20日波动>3.5%时应倾向缩小你输出的 shares，波动<1.5%时可在硬上限内酌情提高 shares
-- 融资+大宗信号：优先买入融资净买入+大宗溢价的票，谨慎对待融资偿还+大宗折价的票 ← 新增
+{trade_discipline_text}
 
 当前激活策略来源：{strategy_source_label}
 
@@ -4288,7 +4299,7 @@ Z哥卖出风控（属于Z哥体系）：
 - 评分 < 8 → 不买（min_score从7提到8后，假信号减少40%+）
 - 止损线统一设为 -4%，买入K线/前低止损优先
 - 止盈设在 +12%~15%（回测显示突破确认能吃到9.6%平均盈利）
-- 单票仓位 ≤ 总资金15%；持仓数仍受静态上限和盘面动态上限共同约束
+- 仓位弹性由评分、战法确定性、风险标记、盘面级别和账户状态决定；重仓/满仓必须在reason说明集中理由，持仓数仍受静态上限和盘面动态节奏约束
 
 {zettaranc_strategy_section}
 
@@ -4364,9 +4375,6 @@ def execute_actions(
     market_strategy_ctx = market_strategy_ctx or current_market_strategy_context()
     effective_max_open_positions = int(market_strategy_ctx.get("max_open_positions", MAX_OPEN_POSITIONS))
     effective_max_new_buys = int(market_strategy_ctx.get("max_new_buys_per_decision", MAX_NEW_BUYS_PER_DECISION))
-    effective_max_total_position_pct = float(market_strategy_ctx.get("max_total_position_pct", MAX_TOTAL_POSITION_PCT))
-    effective_min_cash_reserve_pct = float(market_strategy_ctx.get("min_cash_reserve_pct", MIN_CASH_RESERVE_PCT))
-    buy_budget_multiplier = float(market_strategy_ctx.get("buy_budget_multiplier", 1.0))
     allow_market_guidance_buys = bool(market_strategy_ctx.get("allow_new_buys", True))
     if not trade_allowed:
         return executed
@@ -4422,37 +4430,11 @@ def execute_actions(
             current_market_value = portfolio_market_value(positions)
             if existing_pos:
                 current_market_value = max(0.0, current_market_value - position_market_value(existing_pos) + current_position_value)
-            position_limit_value = total_equity * strategy_position_limit_pct(buy_strategy) / 100
-            position_budget = max(0.0, position_limit_value - current_position_value)
-            total_exposure_budget = max(0.0, total_equity * effective_max_total_position_pct / 100 - current_market_value)
-            cash_reserve_budget = max(0.0, cash - total_equity * effective_min_cash_reserve_pct / 100)
-            max_buy_budget = min(position_budget, total_exposure_budget, cash_reserve_budget) * max(0.0, min(buy_budget_multiplier, 1.0))
-            if max_buy_budget <= 0:
-                add_execution_block(
-                    decision,
-                    code,
-                    f"仓位预算不足：单票/盘面总仓/现金储备约束({strategy_position_limit_pct(buy_strategy):g}%/{effective_max_total_position_pct:g}%/{effective_min_cash_reserve_pct:g}%)",
-                )
-                continue
             requested_gross = shares * float(price)
             order_position_pct = position_pct_of_equity(requested_gross, total_equity)
             position_after_trade_value = current_position_value + requested_gross
             position_after_trade_pct = position_pct_of_equity(position_after_trade_value, total_equity)
             total_position_after_trade_pct = position_pct_of_equity(current_market_value + requested_gross, total_equity)
-            if requested_gross > max_buy_budget + 0.01:
-                max_allowed_shares = int(max_buy_budget // float(price)) // 100 * 100
-                add_execution_block(
-                    decision,
-                    code,
-                    (
-                        f"模型买入仓位{shares}股"
-                        f"（约{order_position_pct if order_position_pct is not None else '--'}%总权益）"
-                        f"超出风控预算约{max_buy_budget:.0f}元"
-                        f"（约≤{max_allowed_shares}股），本轮不自动缩小"
-                    ),
-                )
-                continue
-
             qty = shares
             gross = qty * float(price)
             fees = calc_trade_fees(gross, "BUY")
@@ -5012,6 +4994,20 @@ def resume_trading() -> dict[str, Any]:
     return {"resumed": True, "cleared": cleared, "state": enrich_portfolio(state)}
 
 
+def build_trade_rule_note() -> str:
+    return (
+        f"100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，"
+        f"09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。"
+        f"买入硬约束：最多{MAX_OPEN_POSITIONS}只持仓、单轮最多{MAX_NEW_BUYS_PER_DECISION}笔新仓、"
+        f"午盘前默认最多{MORNING_MAX_OPEN_POSITIONS}只；仓位不再按固定百分比硬卡，"
+        f"由模型结合盘面、评分、战法确定性、风险标记、现有仓位和现金状态决定，极端高确定性时可单票重仓甚至满仓，但必须写清楚集中理由。"
+        f"系统底线风控：-4%硬止损/买入K线前低止损、峰值回撤/ATR吊灯保护、持仓超25日退出；"
+        f"Z哥卖出风控：防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
+        f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
+        f"买入按万一免五计费。"
+    )
+
+
 def get_dashboard_payload() -> dict[str, Any]:
     state = load_state()
     prune_future_intraday_equity_points(state)
@@ -5044,17 +5040,7 @@ def get_dashboard_payload() -> dict[str, Any]:
     payload["pause_reason"] = state.get("pause_reason", "")
     payload["pause_since"] = state.get("pause_since", "")
     payload["strategy_performance"] = track_strategy_performance(state)
-    payload["trade_rule_note"] = (
-        f"A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，"
-        f"09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。"
-        f"买入硬约束：最多{MAX_OPEN_POSITIONS}只持仓、单轮最多{MAX_NEW_BUYS_PER_DECISION}笔新仓、"
-        f"午盘前默认最多{MORNING_MAX_OPEN_POSITIONS}只，并按最新盘面监控动态收紧；"
-        f"单票≤{MAX_SINGLE_POSITION_PCT:g}%、总仓≤{MAX_TOTAL_POSITION_PCT:g}%、现金≥{MIN_CASH_RESERVE_PCT:g}%。"
-        f"系统底线风控：-4%硬止损/买入K线前低止损、峰值回撤/ATR吊灯保护、持仓超25日退出；"
-        f"Z哥卖出风控：防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
-        f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
-        f"买入按万一免五计费。"
-    )
+    payload["trade_rule_note"] = build_trade_rule_note()
     payload["fee_rule"] = {
         "commission_rate": COMMISSION_RATE,
         "commission_min": COMMISSION_MIN,

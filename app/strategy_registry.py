@@ -9,10 +9,12 @@ from typing import Any
 PERSONA_STRATEGY_ENV = "DASHBOARD_ENABLED_PERSONA_STRATEGIES"
 STRATEGY_SOURCE_ENV = "DASHBOARD_STRATEGY_SOURCE"
 PRESET_STRATEGY_TEXT_ENV = "DASHBOARD_PRESET_STRATEGY_TEXT"
+TRADE_DISCIPLINE_TEXT_ENV = "DASHBOARD_TRADE_DISCIPLINE_TEXT"
 STRATEGY_SOURCE_BUILTIN = "builtin"
 STRATEGY_SOURCE_PERSONA = STRATEGY_SOURCE_BUILTIN
 STRATEGY_SOURCE_PRESET_TEXT = "preset_text"
 PRESET_STRATEGY_TEXT_MAX_CHARS = 8000
+TRADE_DISCIPLINE_TEXT_MAX_CHARS = 12000
 BASIC_STRATEGY_GROUP_ID = "base"
 DEFAULT_BUILTIN_STRATEGY_GROUP_ID = "zettaranc"
 DEPRECATED_STRATEGY_OPTION_IDS = {"buffett_value"}
@@ -304,17 +306,75 @@ def preset_text_strategy_active(raw: str | None = None) -> bool:
     return active_strategy_source(raw) == STRATEGY_SOURCE_PRESET_TEXT
 
 
-def normalize_preset_strategy_text_update(value: str | None) -> str:
+def normalize_multiline_setting_text_update(value: str | None, *, max_chars: int, label: str) -> str:
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if len(text) > PRESET_STRATEGY_TEXT_MAX_CHARS:
-        raise ValueError(f"预设文字策略最多 {PRESET_STRATEGY_TEXT_MAX_CHARS} 字")
+    if len(text) > max_chars:
+        raise ValueError(f"{label}最多 {max_chars} 字")
     return text.replace("\n", "\\n")
 
 
-def decode_preset_strategy_text(value: str | None) -> str:
+def decode_multiline_setting_text(value: str | None) -> str:
     text = str(value or "")
     text = text.replace("\\r\\n", "\n").replace("\\n", "\n")
     return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def normalize_preset_strategy_text_update(value: str | None) -> str:
+    return normalize_multiline_setting_text_update(
+        value,
+        max_chars=PRESET_STRATEGY_TEXT_MAX_CHARS,
+        label="预设文字策略",
+    )
+
+
+def decode_preset_strategy_text(value: str | None) -> str:
+    return decode_multiline_setting_text(value)
+
+
+def normalize_trade_discipline_text_update(value: str | None) -> str:
+    return normalize_multiline_setting_text_update(
+        value,
+        max_chars=TRADE_DISCIPLINE_TEXT_MAX_CHARS,
+        label="交易纪律",
+    )
+
+
+def decode_trade_discipline_text(value: str | None) -> str:
+    return decode_multiline_setting_text(value)
+
+
+def default_trade_discipline_text(
+    *,
+    max_open_positions: int = 6,
+    max_new_buys_per_decision: int = 2,
+    position_limit_desc: str = "无固定百分比硬限制",
+    adaptive_label: str = "中性",
+    adaptive_stop_loss_pct: float = -4.0,
+    adaptive_position_mult: float = 1.0,
+) -> str:
+    position_limit_desc = str(position_limit_desc or "无固定百分比硬限制")
+    return "\n".join([
+        "- A股模拟成交窗口：09:30-11:30、13:00-15:00；09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30为静默期，不得直接按参考价记成交。",
+        "- T+1：今日买入的股票今日不可卖；只能卖available_qty。",
+        "- 买入必须100股整数倍；不能融资、不能做空、现金不能为负。",
+        f"- 单次决策最多给{max_new_buys_per_decision}条新买入；当前持仓达到{max_open_positions}只时只允许卖出/持有，不能继续开新仓，避免“开超市”。",
+        "- 仓位不按固定百分比硬卡：首次建仓、加仓、减仓比例由你结合评分、战法确定性、风险标记、盘面级别、现有仓位和盈亏状态决定；极端高确定性且风险可解释时，单票重仓甚至满仓也允许，但必须在reason写清楚为什么值得集中。",
+        f"- 今日盘面监控指引优先调整买入节奏；谨慎/防守盘面必须主动缩手或等待确认，不能上午把{max_open_positions}只买满。",
+        "- 每条 BUY/SELL 的仓位大小由你决定：必须给出100股整数倍 shares；仓位大小一律按“参考价或成交价 × shares ÷ 当前总权益 × 100%”定义，并在 reason 里写明这个百分比依据；执行层不会替你补默认仓位，也不会把过大的买入/卖出自动缩小，超出现金、动态盘面暂停买入或可卖数量会直接拦截。",
+        f"- 注册策略仓位纪律只作为参考：{position_limit_desc}；尾盘(14:30后)原则上不新开仓。",
+        "- 全局情报包是每次决策的必读输入：盘面监控、隔夜美股、指数/期货、板块涨跌、行业资金、热门股、消息面预检、当前仓位和现金状态都必须影响BUY/SELL/HOLD与shares。",
+        "- 当前账户JSON里的 strategy_mark/buy_strategy/entry_reason/last_exit_rule 是既有持仓的策略标记；后续加仓、减仓、清仓必须读取这些标记，按原入场策略的时间纪律和卖出规则处理，不能把 B3、B2、趋势回踩、李大霄等不同策略混同。",
+        "- 系统底线风控：买入K线/前低止损、-4%硬止损、持仓超25日退出；防卖飞、卤煮、S1/S2/S3、出货五式、白线/黄线等归属于下方 Z哥卖出风控",
+        "- 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出",
+        "- 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场",
+        "- 同板块持仓不超过2只（避免集中风险）",
+        "- 必须按候选自带的“基准”判断是否达标；未达各自基准只能观察，不能因为裸分接近8就买",
+        "- 策略共识只能用于排序，不能突破持仓数、T+1、现金不能为负、交易窗口等执行规则。",
+        f"- 当前自适应模式：{adaptive_label}（止损{adaptive_stop_loss_pct:g}%，仓位系数{adaptive_position_mult:g}x，仅作为你决定 shares 的参考）",
+        "- 盈亏比过滤：优先选盈亏比≥2:1的票（上涨空间/下跌空间），盈亏比<1.5自动标记风险",
+        "- 波动率提示：20日波动>3.5%时应倾向缩小你输出的 shares，波动<1.5%时可酌情提高 shares",
+        "- 融资+大宗信号：优先买入融资净买入+大宗溢价的票，谨慎对待融资偿还+大宗折价的票",
+    ])
 
 
 def normalize_strategy_list_update(value: str, *, family: str = "persona") -> str:

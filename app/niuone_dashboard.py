@@ -38,12 +38,17 @@ from strategy_registry import (
     PERSONA_STRATEGY_ENV,
     PRESET_STRATEGY_TEXT_ENV,
     PRESET_STRATEGY_TEXT_MAX_CHARS,
+    TRADE_DISCIPLINE_TEXT_ENV,
+    TRADE_DISCIPLINE_TEXT_MAX_CHARS,
     STRATEGY_SOURCE_BUILTIN,
     STRATEGY_SOURCE_ENV,
     STRATEGY_SOURCE_OPTIONS,
     decode_preset_strategy_text,
+    decode_trade_discipline_text,
+    default_trade_discipline_text,
     default_enabled_persona_strategies_value,
     normalize_preset_strategy_text_update,
+    normalize_trade_discipline_text_update,
     normalize_strategy_source_update,
     normalize_strategy_list_update,
     strategy_settings_options,
@@ -222,11 +227,12 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", "label": "情报包缓存秒数", "group": "买卖决策模型", "kind": "int", "default": "75", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS", "label": "情报榜单条数", "group": "买卖决策模型", "kind": "int", "default": "5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_GUIDANCE_ENABLED", "label": "启用盘面指引控仓", "group": "买卖决策模型", "kind": "bool", "default": "1", "effect": "next_run"},
+    {"name": TRADE_DISCIPLINE_TEXT_ENV, "label": "交易纪律 Prompt", "group": "买卖决策模型", "kind": "trade_discipline_text", "default": default_trade_discipline_text(), "effect": "runtime"},
     {"name": "DASHBOARD_MAX_OPEN_POSITIONS", "label": "最大持仓只数", "group": "买卖决策模型", "kind": "int", "default": "6", "effect": "next_run"},
     {"name": "DASHBOARD_MAX_NEW_BUYS_PER_DECISION", "label": "单轮最大新买入", "group": "买卖决策模型", "kind": "int", "default": "2", "effect": "next_run"},
-    {"name": "DASHBOARD_MAX_SINGLE_POSITION_PCT", "label": "单票仓位上限%", "group": "买卖决策模型", "kind": "text", "default": "10", "effect": "next_run"},
-    {"name": "DASHBOARD_MAX_TOTAL_POSITION_PCT", "label": "总仓位上限%", "group": "买卖决策模型", "kind": "text", "default": "80", "effect": "next_run"},
-    {"name": "DASHBOARD_MIN_CASH_RESERVE_PCT", "label": "最低现金比例%", "group": "买卖决策模型", "kind": "text", "default": "20", "effect": "next_run"},
+    {"name": "DASHBOARD_MAX_SINGLE_POSITION_PCT", "label": "单票仓位参考%", "group": "买卖决策模型", "kind": "text", "default": "10", "effect": "next_run"},
+    {"name": "DASHBOARD_MAX_TOTAL_POSITION_PCT", "label": "总仓位参考%", "group": "买卖决策模型", "kind": "text", "default": "80", "effect": "next_run"},
+    {"name": "DASHBOARD_MIN_CASH_RESERVE_PCT", "label": "现金缓冲参考%", "group": "买卖决策模型", "kind": "text", "default": "20", "effect": "next_run"},
     {"name": "DASHBOARD_MORNING_MAX_OPEN_POSITIONS", "label": "午盘前持仓上限", "group": "买卖决策模型", "kind": "int", "default": "3", "effect": "next_run"},
 
     {"name": "DASHBOARD_US_FEATURES_ENABLED", "label": "开启牛牛美股", "group": "牛牛美股", "kind": "bool", "default": "0", "effect": "next_run"},
@@ -301,6 +307,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
     "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
     "DASHBOARD_MARKET_GUIDANCE_ENABLED",
+    TRADE_DISCIPLINE_TEXT_ENV,
     "DASHBOARD_MAX_OPEN_POSITIONS",
     "DASHBOARD_MAX_NEW_BUYS_PER_DECISION",
     "DASHBOARD_MAX_SINGLE_POSITION_PCT",
@@ -340,6 +347,7 @@ TRADER_RUNTIME_ENV_NAMES = {
     "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
     "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
     "DASHBOARD_MARKET_GUIDANCE_ENABLED",
+    TRADE_DISCIPLINE_TEXT_ENV,
     "DASHBOARD_MAX_OPEN_POSITIONS",
     "DASHBOARD_MAX_NEW_BUYS_PER_DECISION",
     "DASHBOARD_MAX_SINGLE_POSITION_PCT",
@@ -814,6 +822,15 @@ def compact_strategy_performance(perf: dict[str, Any], *, max_exit_items: int = 
     return result
 
 
+def filter_today_log_entries(entries: list[Any], *, max_items: int | None = None) -> list[dict[str, Any]]:
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = [
+        item for item in (entries or [])
+        if isinstance(item, dict) and str(item.get("time") or "").startswith(today)
+    ]
+    return rows[:max_items] if max_items is not None else rows
+
+
 def get_practice_payload_fast() -> dict[str, Any]:
     """Return a local portfolio snapshot without network quote refresh or auto trading checks."""
     try:
@@ -827,15 +844,16 @@ def get_practice_payload_fast() -> dict[str, Any]:
         # the full response arrives a few seconds later.
         payload["equity_history"] = compact_intraday_equity_history(equity_history, max_points=0)
         payload["daily_equity_history"] = compact_daily_equity_history([*equity_history, *daily_equity_history])
-        payload["trade_log"] = (payload.get("trade_log") or [])[:20]
-        payload["decision_log"] = (payload.get("decision_log") or [])[:3]
+        payload["trade_log"] = filter_today_log_entries(payload.get("trade_log") or [])
+        payload["decision_log"] = filter_today_log_entries(payload.get("decision_log") or [])
         payload["trading_calendar"] = trading_day_status()
         payload["trading_paused"] = state.get("trading_paused", False)
         payload["pause_reason"] = state.get("pause_reason", "")
         payload["pause_since"] = state.get("pause_since", "")
         strategy_performance = trader.track_strategy_performance(state) if hasattr(trader, "track_strategy_performance") else {}
         payload["strategy_performance"] = compact_strategy_performance(strategy_performance)
-        payload["trade_rule_note"] = "A股模拟：100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。系统底线风控：买入K线/前低止损、峰值回撤/ATR吊灯保护、持仓超25日退出；Z哥卖出风控：防卖飞5分评分、B3开盘离场检查09:30、B2/超级B1尾盘离场检查14:45、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
+        if hasattr(trader, "build_trade_rule_note"):
+            payload["trade_rule_note"] = trader.build_trade_rule_note()
         payload["snapshot_mode"] = "fast"
         return payload
     except Exception as exc:
@@ -1703,6 +1721,8 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         return normalize_strategy_source_update(value)
     if kind == "preset_strategy_text":
         return normalize_preset_strategy_text_update(value)
+    if kind == "trade_discipline_text":
+        return normalize_trade_discipline_text_update(value)
     return value
 
 
@@ -2064,6 +2084,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_strategy_source_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "preset_strategy_text":
             normalized[name] = normalize_preset_strategy_text_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "trade_discipline_text":
+            normalized[name] = normalize_trade_discipline_text_update(normalized[name])
     return normalized
 
 
@@ -2103,6 +2125,8 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             normalize_strategy_list_update(value)
         elif name == PRESET_STRATEGY_TEXT_ENV:
             normalize_preset_strategy_text_update(value)
+        elif name == TRADE_DISCIPLINE_TEXT_ENV:
+            normalize_trade_discipline_text_update(value)
         elif name in {
             "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
             "DASHBOARD_INDICES_TTL_SECONDS",
@@ -2287,6 +2311,15 @@ def build_admin_config_payload() -> dict[str, Any]:
                 "default": decode_preset_strategy_text(default_value),
                 "preset_strategy_max_chars": PRESET_STRATEGY_TEXT_MAX_CHARS,
             })
+        if schema.get("kind") == "trade_discipline_text" and not secret:
+            state_value = env_values.get(name) if name in env_values else (fallback_value or default_value)
+            item.update({
+                "effective": decode_trade_discipline_text(effective),
+                "file_value": decode_trade_discipline_text(str(file_value or "")),
+                "file_state": decode_trade_discipline_text(state_value),
+                "default": decode_trade_discipline_text(default_value),
+                "trade_discipline_max_chars": TRADE_DISCIPLINE_TEXT_MAX_CHARS,
+            })
         if schema.get("kind") in {"strategy_multi", "strategy_single"} and not secret:
             edit_source = str(file_value or "")
             if name not in env_values and name not in os.environ and fallback_value:
@@ -2331,13 +2364,28 @@ ADMIN_PASSWORD_HTML = r"""<!doctype html>
 <style>
 :root{color-scheme:dark;--bg:#06070a;--panel:#10131a;--line:#252b38;--text:#f2f4f8;--muted:#99a3b3;--accent:#7c5cff;--cyan:#24c6dc;--red:#fb7185}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 20% 0%,rgba(124,92,255,.28),transparent 34rem),var(--bg);color:var(--text);padding:20px}.box{width:min(420px,100%);border:1px solid var(--line);border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(16,19,26,.94),rgba(21,26,36,.88));box-shadow:0 28px 90px rgba(0,0,0,.36)}h1{margin:0 0 8px;font-size:28px;letter-spacing:0}.sub{color:var(--muted);line-height:1.6;margin-bottom:22px}label{display:block;color:#cbd5e1;font-weight:800;font-size:13px;margin:14px 0 7px}input{width:100%;border:1px solid var(--line);background:#0b0e14;color:var(--text);border-radius:14px;padding:13px 14px;font:inherit;outline:none}input:focus{border-color:rgba(124,92,255,.75);box-shadow:0 0 0 4px rgba(124,92,255,.13)}button{width:100%;margin-top:18px;border:0;border-radius:14px;padding:13px 14px;font:inherit;font-weight:900;color:white;background:linear-gradient(135deg,var(--accent),var(--cyan));cursor:pointer}.error{border:1px solid rgba(251,113,133,.35);background:rgba(127,29,29,.25);color:#fecdd3;border-radius:14px;padding:10px 12px;margin-bottom:14px}.hint{font-size:12px;color:#64748b;margin-top:14px;line-height:1.5}.toplink{display:inline-block;color:#9db2ff;text-decoration:none;margin-top:14px;font-weight:800}
 </style>
-</head><body><form class="box" method="post" action="/admin/password">
+</head><body><form class="box" method="post" action="/admin/password" data-admin-password-form>
 <h1>设置页验证</h1><div class="sub">请输入管理员密码后进入业务配置。</div>
 __ERROR__
-<label>管理员密码</label><input name="admin_password" type="password" autocomplete="current-password" placeholder="管理员密码" required autofocus>
+<label>管理员密码</label><input name="admin_password" type="password" autocomplete="current-password" placeholder="管理员密码" required autofocus enterkeyhint="done">
 <button type="submit">进入设置</button>
 <div class="hint">该密码来自启动配置 <code>DASHBOARD_ADMIN_PASSWORD</code>，修改后重启服务生效。</div>
 <a class="toplink" href="/">返回首页</a>
+<script>
+(function(){
+  var form = document.querySelector('[data-admin-password-form]');
+  var input = form ? form.querySelector('input[name="admin_password"]') : null;
+  var button = form ? form.querySelector('button[type="submit"]') : null;
+  if (!form || !input) return;
+  input.addEventListener('keydown', function(event) {
+    if (event.key !== 'Enter' || event.isComposing) return;
+    event.preventDefault();
+    if (typeof form.requestSubmit === 'function') form.requestSubmit(button || undefined);
+    else if (button) button.click();
+    else form.submit();
+  });
+})();
+</script>
 </form></body></html>"""
 
 ADMIN_HTML = r"""<!doctype html>
@@ -2903,6 +2951,38 @@ INDEX_HTML = r"""<!doctype html>
     .position-reason-text { min-width:0; overflow-wrap:anywhere; color:#aebbd0; }
     .position-reason-badges { display:flex; gap:5px; flex-wrap:wrap; min-width:0; }
     .position-reason-badge { display:inline-flex; align-items:center; max-width:100%; border:1px solid rgba(148,163,184,.16); border-radius:7px; background:rgba(15,23,42,.54); color:#dbeafe; padding:1px 6px; font-weight:850; font-size:11px; line-height:1.5; }
+    .practice-log-panel { margin-top:12px; border:1px solid rgba(148,163,184,.13); border-radius:14px; background:rgba(2,6,23,.36); overflow:hidden; box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }
+    .practice-log-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid rgba(148,163,184,.10); background:rgba(15,23,42,.46); }
+    .practice-log-title { color:#e2e8f0; font-size:13px; font-weight:850; }
+    .practice-log-count { color:#7b8aa0; font-size:11px; font-weight:800; white-space:nowrap; }
+    .practice-log-scroll { max-height:230px; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding:7px; display:grid; gap:6px; scrollbar-color:rgba(148,163,184,.36) rgba(15,23,42,.36); }
+    .practice-log-scroll::-webkit-scrollbar { width:9px; }
+    .practice-log-scroll::-webkit-scrollbar-track { background:rgba(15,23,42,.36); border-radius:999px; }
+    .practice-log-scroll::-webkit-scrollbar-thumb { background:rgba(148,163,184,.36); border-radius:999px; border:2px solid rgba(15,23,42,.36); }
+    .practice-log-row { min-width:0; display:grid; grid-template-columns:62px 48px minmax(0,1fr); gap:8px; align-items:start; padding:8px 9px; border:1px solid rgba(148,163,184,.10); border-radius:10px; background:rgba(15,23,42,.42); }
+    .practice-log-time { color:#94a3b8; font-size:12px; line-height:1.45; font-weight:850; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .practice-log-badge { justify-self:start; border:1px solid rgba(148,163,184,.16); border-radius:7px; padding:1px 6px; color:#cbd5e1; background:rgba(30,41,59,.62); font-size:11px; line-height:1.55; font-weight:850; white-space:nowrap; }
+    .practice-log-badge.buy { border-color:rgba(248,113,113,.24); color:#fecaca; background:rgba(127,29,29,.18); }
+    .practice-log-badge.sell { border-color:rgba(52,211,153,.24); color:#bbf7d0; background:rgba(6,78,59,.18); }
+    .practice-log-badge.decision { border-color:rgba(124,92,255,.28); color:#ddd6fe; background:rgba(76,29,149,.16); }
+    .practice-log-main { min-width:0; display:grid; gap:3px; }
+    .practice-log-summary { min-width:0; color:#dbeafe; font-size:12.5px; line-height:1.45; font-weight:800; overflow-wrap:anywhere; }
+    .practice-log-detail { min-width:0; color:#8da0b8; font-size:11.5px; line-height:1.45; overflow-wrap:anywhere; }
+    .practice-rule-row { margin-top:10px; display:flex; align-items:center; gap:9px; flex-wrap:wrap; color:#94a3b8; font-size:12px; line-height:1.5; }
+    .practice-rule-btn { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; min-width:0; border:1px solid rgba(124,92,255,.30); border-radius:999px; background:rgba(124,92,255,.14); color:#e5edf8; padding:5px 10px; font-size:12px; line-height:1.3; font-weight:850; cursor:pointer; transition:.16s ease; }
+    .practice-rule-btn:hover { border-color:rgba(157,178,255,.62); background:rgba(124,92,255,.22); transform:translateY(-1px); }
+    .practice-rule-btn:focus-visible { outline:2px solid rgba(157,178,255,.86); outline-offset:2px; }
+    .practice-rule-meta { min-width:0; color:#94a3b8; overflow-wrap:anywhere; }
+    .practice-rule-backdrop { position:fixed; inset:0; z-index:85; display:grid; place-items:center; padding:18px; background:rgba(2,6,23,.66); backdrop-filter:blur(10px); }
+    .practice-rule-card { width:min(640px, calc(100vw - 32px)); max-height:min(72vh, 620px); overflow:hidden; border:1px solid rgba(148,163,184,.18); border-radius:16px; background:linear-gradient(180deg, rgba(15,23,42,.98), rgba(8,13,24,.98)); box-shadow:0 28px 90px rgba(0,0,0,.50), inset 0 1px 0 rgba(255,255,255,.06); }
+    .practice-rule-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; border-bottom:1px solid rgba(148,163,184,.12); background:rgba(30,41,59,.46); }
+    .practice-rule-title { color:#e5edf8; font-size:14px; font-weight:900; }
+    .practice-rule-close { width:30px; height:30px; min-width:30px; display:grid; place-items:center; border-radius:9px; border:1px solid rgba(148,163,184,.18); background:rgba(15,23,42,.72); color:#cbd5e1; padding:0; line-height:1; font-size:16px; font-weight:850; cursor:pointer; }
+    .practice-rule-close:hover { border-color:rgba(203,213,225,.42); background:rgba(30,41,59,.84); }
+    .practice-rule-body { max-height:calc(min(72vh, 620px) - 55px); overflow-y:auto; padding:15px 16px 17px; color:#cbd5e1; font-size:13px; line-height:1.75; overflow-wrap:anywhere; scrollbar-color:rgba(148,163,184,.36) rgba(15,23,42,.36); }
+    .practice-rule-body::-webkit-scrollbar { width:9px; }
+    .practice-rule-body::-webkit-scrollbar-track { background:rgba(15,23,42,.36); border-radius:999px; }
+    .practice-rule-body::-webkit-scrollbar-thumb { background:rgba(148,163,184,.36); border-radius:999px; border:2px solid rgba(15,23,42,.36); }
     .practice-calendar-popover { position:fixed; top:50%; left:50%; z-index:70; width:min(390px, calc(100vw - 36px)); max-height:min(62vh, 500px); overflow:visible; transform:translate(-50%,-50%); }
     .practice-calendar-day-curve { position:absolute; left:0; right:0; bottom:calc(100% + 8px); z-index:1; min-width:0; overflow:hidden; border:1px solid transparent; border-radius:12px; padding:8px 9px 7px; background:linear-gradient(180deg, rgba(23,32,51,.98), rgba(15,23,42,.98)) padding-box, linear-gradient(135deg, rgba(96,165,250,.60), rgba(124,92,255,.46) 48%, rgba(52,211,153,.28)) border-box; box-shadow:0 18px 58px rgba(0,0,0,.48), inset 0 1px 0 rgba(255,255,255,.07); }
     .practice-calendar-day-curve-head { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:start; gap:8px; margin-bottom:4px; }
@@ -2969,6 +3049,19 @@ INDEX_HTML = r"""<!doctype html>
       .settings-link, .header-link { font-size:12px; }
       .refresh-pill span, .visit-pill span { display:none; }
       .refresh-pill b, .visit-pill b { font-size:11px; }
+      .practice-log-head { padding:8px 9px; }
+      .practice-log-scroll { max-height:190px; padding:6px; }
+      .practice-log-row { grid-template-columns:50px 42px minmax(0,1fr); gap:6px; padding:7px 8px; }
+      .practice-log-time { font-size:11px; }
+      .practice-log-badge { font-size:10.5px; padding:1px 5px; }
+      .practice-log-summary { font-size:12px; }
+      .practice-log-detail { font-size:11px; }
+      .practice-rule-row { gap:6px; align-items:flex-start; }
+      .practice-rule-btn { padding:4px 8px; font-size:11.5px; }
+      .practice-rule-meta { font-size:11px; line-height:1.45; }
+      .practice-rule-card { width:calc(100vw - 24px); max-height:76vh; border-radius:14px; }
+      .practice-rule-head { padding:10px 11px; }
+      .practice-rule-body { max-height:calc(76vh - 51px); padding:12px 12px 14px; font-size:12.5px; line-height:1.7; }
       .subtitle { display:none; }
       .category-tabs { margin:8px -9px 0; padding:0 9px 4px; overflow-x:auto; flex-wrap:nowrap; scrollbar-width:none; -webkit-overflow-scrolling:touch; scroll-snap-type:x proximity; }
       .category-tabs::-webkit-scrollbar { display:none; }
@@ -3265,6 +3358,7 @@ let practicePositionMode = initialParams.get('holdings') === 'sold' ? 'sold' : '
 window.practicePositionMode = practicePositionMode;
 let practicePositionBriefMode = initialParams.get('brief') === '1';
 window.practicePositionBriefMode = practicePositionBriefMode;
+let practiceRuleNoteOpen = false;
 let practiceCalendarOpen = false;
 let practiceCalendarMonth = '';
 let practiceCalendarSelectedDate = '';
@@ -3289,6 +3383,114 @@ const fmtDurationSeconds = s => {
   if (!Number.isFinite(n)) return '--';
   return n >= 3600 ? (n/3600).toFixed(1)+'h' : n >= 60 ? (n/60).toFixed(0)+'m' : n.toFixed(0)+'s';
 };
+function compactText(value, limit=120) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…` : text;
+}
+function practiceOperationLogDate(payload) {
+  const generatedDate = String((payload || {}).generated_at || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(generatedDate) ? generatedDate : localDateKey();
+}
+function practiceTradeLogEntry(trade, idx) {
+  const action = String(trade.action || '').toUpperCase();
+  const isBuy = action === 'BUY';
+  const isSell = action === 'SELL';
+  const actionLabel = isBuy ? '买入' : (isSell ? '卖出' : '成交');
+  const codeName = [trade.code, trade.name].map(x => String(x || '').trim()).filter(Boolean).join(' ');
+  const shares = trade.shares == null ? '' : `${trade.shares}股`;
+  const price = Number(trade.price);
+  const amount = Number(trade.amount);
+  const pnl = Number(trade.pnl);
+  const details = [
+    Number.isFinite(price) ? `价 ${fmtNumber(price, 3)}` : '',
+    shares,
+    Number.isFinite(amount) ? `额 ${fmtAmount(amount)}` : '',
+    isSell && Number.isFinite(pnl) ? `盈亏 ${pnl >= 0 ? '+' : ''}${fmtAmount(pnl)}` : '',
+    compactText(trade.reason || trade.trade_reason || '', 100),
+  ].filter(Boolean);
+  return {
+    time: String(trade.time || ''),
+    kind: 'trade',
+    badgeClass: isBuy ? 'buy' : (isSell ? 'sell' : 'trade'),
+    badge: actionLabel,
+    summary: `${actionLabel} ${codeName || '--'}${shares ? ` · ${shares}` : ''}`,
+    detail: details.join('｜'),
+    order: idx,
+  };
+}
+function practiceDecisionLogEntry(entry, idx) {
+  const decision = entry.decision || {};
+  const actions = Array.isArray(decision.actions) ? decision.actions : [];
+  const executed = Array.isArray(entry.executed) ? entry.executed : [];
+  const actionText = executed.length ? `执行${executed.length}笔` : (actions.length ? `建议${actions.length}笔` : '无成交');
+  const summary = compactText(decision.summary || entry.trade_reason || '模型决策', 120);
+  const details = [
+    compactText(entry.trade_reason || '', 90),
+    actionText,
+    decision.error ? compactText(decision.error, 90) : '',
+  ].filter(Boolean);
+  return {
+    time: String(entry.time || ''),
+    kind: 'decision',
+    badgeClass: 'decision',
+    badge: '决策',
+    summary,
+    detail: details.join('｜'),
+    order: idx,
+  };
+}
+function normalizePracticeOperationLogs(payload) {
+  const p = payload || {};
+  const date = practiceOperationLogDate(p);
+  const entries = [];
+  (p.trade_log || []).forEach((trade, idx) => {
+    if (trade && String(trade.time || '').slice(0, 10) === date) {
+      entries.push(practiceTradeLogEntry(trade, idx));
+    }
+  });
+  (p.decision_log || []).forEach((entry, idx) => {
+    if (entry && String(entry.time || '').slice(0, 10) === date) {
+      entries.push(practiceDecisionLogEntry(entry, idx + 10000));
+    }
+  });
+  return entries.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')) || a.order - b.order);
+}
+function renderPracticeOperationLog(payload) {
+  const date = practiceOperationLogDate(payload);
+  const entries = normalizePracticeOperationLogs(payload);
+  const rows = entries.length ? entries.map(item => `
+    <div class="practice-log-row">
+      <div class="practice-log-time">${esc(String(item.time || '').slice(11, 19) || '--')}</div>
+      <div class="practice-log-badge ${esc(item.badgeClass)}">${esc(item.badge)}</div>
+      <div class="practice-log-main">
+        <div class="practice-log-summary">${esc(item.summary)}</div>
+        ${item.detail ? `<div class="practice-log-detail">${esc(item.detail)}</div>` : ''}
+      </div>
+    </div>`).join('') : '<div class="empty" style="padding:18px;font-size:13px">当日暂无操作日志</div>';
+  return `<div class="practice-log-panel">
+    <div class="practice-log-head">
+      <div class="practice-log-title">操作日志</div>
+      <div class="practice-log-count">${esc(date)} · ${entries.length}条</div>
+    </div>
+    <div class="practice-log-scroll" tabindex="0" role="region" aria-label="当日所有操作日志">${rows}</div>
+  </div>`;
+}
+function practiceRuleFallbackNote() {
+  return '100股整数倍、T+1；09:15-09:25只作开盘集合竞价观察，09:25-09:30不模拟成交。';
+}
+function renderPracticeRuleNoteModal(note) {
+  if (!practiceRuleNoteOpen) return '';
+  const text = String(note || practiceRuleFallbackNote()).trim();
+  return `<div class="practice-rule-backdrop" role="presentation">
+    <div class="practice-rule-card" role="dialog" aria-modal="true" aria-label="交易规则">
+      <div class="practice-rule-head">
+        <div class="practice-rule-title">交易规则</div>
+        <button type="button" class="practice-rule-close" data-practice-rule-action="close" title="关闭" aria-label="关闭">x</button>
+      </div>
+      <div class="practice-rule-body">${esc(text)}</div>
+    </div>
+  </div>`;
+}
 const upCls = v => v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
 const CATEGORY_ORDER = ['b1_screen', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];
 const CATEGORY_LABELS = {all:'全部', indices:'指数行情', b1_screen:'牛牛实战', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
@@ -4576,11 +4778,14 @@ function renderPracticePanel() {
   }).join('') : '<div class="empty" style="padding:18px;font-size:13px">今日暂无卖出股票</div>';
   const stockCards = showSoldStocks ? soldCards : posCards;
   const stockCardsClass = !showSoldStocks && positions.length && practicePositionBriefMode ? 'position-brief-grid' : 'position-card-list';
-  const decisions = (p.decision_log || []).slice(0,3).map(d => `<div style="font-size:12px;color:#94a3b8;margin-top:6px">${esc(d.time||'')}｜${esc(d.trade_reason||'')}｜${esc((d.decision||{}).summary||'')}</div>`).join('') || '<div class="muted" style="font-size:12px">暂无决策记录</div>';
+  const operationLog = renderPracticeOperationLog(p);
   const quote = p.last_quote_refresh || {};
   const channels = quote.channel_counts || {};
-  const channelText = quote.quote_time ? ` 腾讯${channels.tencent ?? 0}/东财${channels.eastmoney ?? 0}/Sina${channels.sina ?? 0}/单票${channels.single ?? 0}` : '';
-  const quoteNote = quote.quote_time ? `｜行情：${esc(quote.quote_time)} 更新${quote.updated ?? 0}只${channelText}${quote.fallback ? `，回退${quote.fallback}只` : ''}` : '';
+  const ruleNote = p.trade_rule_note || practiceRuleFallbackNote();
+  const ruleModal = renderPracticeRuleNoteModal(ruleNote);
+  const channelText = quote.quote_time ? `腾讯${channels.tencent ?? 0}/东财${channels.eastmoney ?? 0}/Sina${channels.sina ?? 0}/单票${channels.single ?? 0}` : '';
+  const quoteNote = quote.quote_time ? `行情：${esc(quote.quote_time)} 更新${quote.updated ?? 0}只 ${channelText}${quote.fallback ? `，回退${quote.fallback}只` : ''}` : '';
+  const ruleMeta = [`模型：${esc(p.decision_model || 'deepseek-v4-pro')}`, quoteNote].filter(Boolean).join('｜');
   return `<section class="sector-cloud" style="margin-bottom:18px">
     <h3>牛牛实战 · 模拟账户</h3>
     ${p.trading_paused ? `<div style=\"background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);border-radius:12px;padding:10px 14px;margin:10px 0;display:flex;justify-content:space-between;align-items:center\">
@@ -4599,8 +4804,12 @@ function renderPracticePanel() {
       ${!showSoldStocks ? positionDisplayButtons : ''}
     </div>
     <div class="${stockCardsClass}">${stockCards}</div>
-    <div style="margin-top:10px;color:#94a3b8;font-size:12px">${esc(p.trade_rule_note||'A股模拟：100股整数倍、T+1；09:15-09:25只作开盘集合竞价观察，09:25-09:30不模拟成交。')}｜模型：${esc(p.decision_model || 'deepseek-v4-pro')}${quoteNote}</div>
-    <div style="margin-top:8px">${decisions}</div>
+    ${operationLog}
+    <div class="practice-rule-row">
+      <button type="button" class="practice-rule-btn" data-practice-rule-action="open">交易规则</button>
+      <span class="practice-rule-meta">${ruleMeta}</span>
+    </div>
+    ${ruleModal}
     ${p.last_error ? `<div class="empty" style="color:#f87171;margin-top:10px">模型/交易错误：${esc(p.last_error)}</div>` : ''}
   </section>`;
 }
@@ -5970,6 +6179,19 @@ function renderCard(r) {
     </article>`;
 }
 document.addEventListener('click', event => {
+  const ruleAction = event.target.closest('[data-practice-rule-action]');
+  if (ruleAction) {
+    event.preventDefault();
+    event.stopPropagation();
+    practiceRuleNoteOpen = ruleAction.dataset.practiceRuleAction === 'open';
+    if (activeCategory === 'b1_screen') render();
+    return;
+  }
+  if (practiceRuleNoteOpen && event.target.classList && event.target.classList.contains('practice-rule-backdrop')) {
+    practiceRuleNoteOpen = false;
+    if (activeCategory === 'b1_screen') render();
+    return;
+  }
   const calendarAction = event.target.closest('[data-practice-calendar-action]');
   if (calendarAction) {
     event.preventDefault();
@@ -6035,6 +6257,12 @@ document.addEventListener('click', event => {
   }
 });
 document.addEventListener('keydown', event => {
+  if (practiceRuleNoteOpen && event.key === 'Escape') {
+    event.preventDefault();
+    practiceRuleNoteOpen = false;
+    if (activeCategory === 'b1_screen') render();
+    return;
+  }
   if (practiceCalendarOpen && event.key === 'Escape') {
     event.preventDefault();
     closePracticeCalendar();
@@ -6229,6 +6457,14 @@ def render_env_input(item: dict[str, Any]) -> str:
             f"maxlength='{max_chars}' spellcheck='false' placeholder='例如：只做主线强趋势回踩，买入后跌破5日线离场；盈利超过8%后分批止盈。'>"
             f"{html.escape(value)}</textarea>"
             "<div class='config-meta'>激活后由买卖决策模型优化为选股、买入、卖出和仓位规则</div>"
+        )
+    if kind == "trade_discipline_text":
+        max_chars = int(item.get("trade_discipline_max_chars") or TRADE_DISCIPLINE_TEXT_MAX_CHARS)
+        return (
+            f"<textarea class='trade-discipline-textarea' name='env__{escaped_name}' "
+            f"maxlength='{max_chars}' spellcheck='false' placeholder='留空时使用内置交易纪律'>"
+            f"{html.escape(value)}</textarea>"
+            "<div class='config-meta'>直接写入买卖决策模型 prompt 的“必须遵守”段；留空时使用内置默认纪律</div>"
         )
     if kind in {"strategy_multi", "strategy_single"}:
         selected = set(item.get("strategy_values") or split_strategy_values(value))
