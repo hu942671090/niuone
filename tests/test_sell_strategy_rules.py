@@ -362,6 +362,46 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(ctx["max_new_buys_per_decision"], 1)
         self.assertIn("午盘前", ctx["session_note"])
 
+    def test_defensive_market_guidance_allows_reduced_buy_budget(self):
+        reports = [{
+            "title": "A股竞价盘前总结",
+            "time": "2026-07-02 09:25:04",
+            "content": "\n".join([
+                "🎯 **今日买卖指引**",
+                "· 风险级别：防守",
+                "· 开仓节奏：上午只观察或卖出，原则上不新开仓；先等风险端收缩",
+                "· 买入指引：竞价强股只列观察，至少等开盘15分钟承接确认",
+            ]),
+        }]
+
+        ctx = trader.derive_market_strategy_context(reports, datetime(2026, 7, 2, 10, 0, 0))
+
+        self.assertEqual(ctx["tone"], "defensive")
+        self.assertTrue(ctx["allow_new_buys"])
+        self.assertEqual(ctx["max_open_positions"], 2)
+        self.assertEqual(ctx["max_new_buys_per_decision"], 1)
+        self.assertEqual(ctx["max_total_position_pct"], 35.0)
+        self.assertEqual(ctx["min_cash_reserve_pct"], 60.0)
+        self.assertEqual(ctx["buy_budget_multiplier"], 0.35)
+
+    def test_explicit_market_guidance_pause_still_blocks_new_buys(self):
+        reports = [{
+            "title": "A股竞价盘前总结",
+            "time": "2026-07-02 09:25:04",
+            "content": "\n".join([
+                "🎯 **今日买卖指引**",
+                "· 风险级别：防守",
+                "· 开仓节奏：暂停新开仓，只卖不买；先等跌停风险收缩",
+            ]),
+        }]
+
+        ctx = trader.derive_market_strategy_context(reports, datetime(2026, 7, 2, 10, 0, 0))
+
+        self.assertEqual(ctx["tone"], "defensive")
+        self.assertFalse(ctx["allow_new_buys"])
+        self.assertEqual(ctx["max_new_buys_per_decision"], 0)
+        self.assertEqual(ctx["buy_budget_multiplier"], 0.0)
+
     def test_market_guidance_extracts_next_day_premarket_heading(self):
         lines = trader.extract_market_guidance_lines("\n".join([
             "🎯 **次日盘前指引**",
@@ -567,6 +607,75 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(executed, [])
         self.assertNotIn("601999", state["positions"])
         self.assertIn("盘面动态持仓已达3只上限", decision["execution_blocked_reason"])
+
+    def test_run_decision_after_b1_records_market_context_each_round(self):
+        state = {
+            "cash": 100000.0,
+            "positions": {},
+            "trade_log": [],
+            "decision_log": [],
+            "equity_history": [],
+            "daily_equity_history": [],
+        }
+        market_ctx = {
+            "enabled": True,
+            "available": True,
+            "tone": "defensive",
+            "tone_label": "防守",
+            "phase": "morning",
+            "max_open_positions": 2,
+            "max_new_buys_per_decision": 1,
+            "max_total_position_pct": 35.0,
+            "min_cash_reserve_pct": 60.0,
+            "buy_budget_multiplier": 0.35,
+            "allow_new_buys": True,
+            "source_title": "A股竞价盘前总结",
+            "source_time": "2026-07-02 09:25:04",
+            "guidance_lines": ["风险级别：防守"],
+        }
+        calls = {"market_context": 0, "saved": 0}
+        originals = {
+            "load_state": trader.load_state,
+            "save_state": trader.save_state,
+            "current_market_strategy_context": trader.current_market_strategy_context,
+            "check_daily_loss_budget": trader.check_daily_loss_budget,
+            "get_adaptive_params": trader.get_adaptive_params,
+            "is_a_share_execution_time": trader.is_a_share_execution_time,
+            "deferred_execution_due_at": trader.deferred_execution_due_at,
+            "check_market_environment": trader.check_market_environment,
+            "check_market_sentiment": trader.check_market_sentiment,
+            "record_equity": trader.record_equity,
+            "_sync_decision_to_db": trader._sync_decision_to_db,
+        }
+        try:
+            trader.load_state = lambda: state
+            trader.save_state = lambda _state: calls.__setitem__("saved", calls["saved"] + 1)
+
+            def fake_market_context(now=None):
+                calls["market_context"] += 1
+                return dict(market_ctx)
+
+            trader.current_market_strategy_context = fake_market_context
+            trader.check_daily_loss_budget = lambda _state: (False, 0.0)
+            trader.get_adaptive_params = lambda: {}
+            trader.is_a_share_execution_time = lambda dt=None: (False, "非A股可成交时段")
+            trader.deferred_execution_due_at = lambda schedule_slot: ""
+            trader.check_market_environment = lambda: {"bullish": True, "detail": "test"}
+            trader.check_market_sentiment = lambda: {"sentiment": "neutral", "detail": "test", "hot_sectors": []}
+            trader.record_equity = lambda _state: None
+            trader._sync_decision_to_db = lambda _log: None
+
+            result = trader.run_decision_after_b1({"generated_at": "2026-07-02 10:00:00", "items": []})
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+
+        self.assertEqual(calls["market_context"], 1)
+        self.assertEqual(calls["saved"], 1)
+        self.assertEqual(state["market_decision_context"]["tone"], "defensive")
+        self.assertEqual(state["decision_log"][-1]["market_decision_context"]["tone_label"], "防守")
+        self.assertEqual(state["decision_log"][-1]["decision"]["market_guidance"]["max_new_buys_per_decision"], 1)
+        self.assertEqual(result["portfolio"]["market_decision_context"]["tone"], "defensive")
 
     def test_morning_schedule_completed_during_lunch_defers_to_13(self):
         due_at = trader.deferred_execution_due_at(

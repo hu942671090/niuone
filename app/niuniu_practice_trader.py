@@ -1150,6 +1150,7 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
         "last_quote_refresh": state.get("last_quote_refresh") or {},
         "last_intraday_refresh": state.get("last_intraday_refresh") or {},
         "last_error": state.get("last_error") or "",
+        "market_decision_context": state.get("market_decision_context") or {},
     }
 
 
@@ -1810,6 +1811,31 @@ def classify_market_guidance_tone(text: str) -> str:
     return "neutral"
 
 
+def market_guidance_blocks_new_buys(text: str) -> bool:
+    raw = str(text or "")
+    compact = re.sub(r"\s+", "", raw)
+    m = re.search(r"风险级别[：:]\s*([^\n。；;，,]+)", raw)
+    level = (m.group(1) if m else "").strip()
+    if any(word in level for word in ("极弱", "只卖", "暂停")):
+        return True
+    hard_pause_hits = (
+        "只卖不买",
+        "只卖/不买",
+        "只卖不买入",
+        "暂停新开仓",
+        "暂停买入",
+        "禁止买入",
+        "停止买入",
+        "只允许卖出",
+        "只允许卖出/持有",
+        "只允许持有/卖出",
+        "仅允许卖出",
+        "仅允许卖出/持有",
+        "仅允许持有/卖出",
+    )
+    return any(hit in compact for hit in hard_pause_hits)
+
+
 def _market_tone_label(tone: str) -> str:
     return {
         "offensive": "进攻",
@@ -1904,6 +1930,7 @@ def derive_market_strategy_context(reports: list[dict[str, Any]] | None, now: da
     ) if latest else []
     tone_text = "\n".join(guidance_lines) or str(latest.get("content") or "")
     tone = classify_market_guidance_tone(tone_text)
+    block_new_buys = market_guidance_blocks_new_buys(tone_text)
     ctx.update({
         "available": bool(reports),
         "tone": tone,
@@ -1940,11 +1967,15 @@ def derive_market_strategy_context(reports: list[dict[str, Any]] | None, now: da
         ctx["min_cash_reserve_pct"] = max(MIN_CASH_RESERVE_PCT, 40.0)
         ctx["buy_budget_multiplier"] = 0.6
     elif tone == "defensive":
-        ctx["allow_new_buys"] = False
         ctx["max_open_positions"] = min(MAX_OPEN_POSITIONS, 2)
-        ctx["max_new_buys_per_decision"] = 0
+        ctx["max_new_buys_per_decision"] = min(MAX_NEW_BUYS_PER_DECISION, 1)
         ctx["max_total_position_pct"] = min(MAX_TOTAL_POSITION_PCT, 35.0)
         ctx["min_cash_reserve_pct"] = max(MIN_CASH_RESERVE_PCT, 60.0)
+        ctx["buy_budget_multiplier"] = 0.35
+
+    if block_new_buys:
+        ctx["allow_new_buys"] = False
+        ctx["max_new_buys_per_decision"] = 0
         ctx["buy_budget_multiplier"] = 0.0
 
     _apply_overnight_us_adjustment(ctx)
@@ -3458,8 +3489,13 @@ def format_preset_strategy_section(source: str, preset_text: str) -> str:
 4. 返回JSON的summary和reason里简短体现预设文字策略的核心规则。"""
 
 
-def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, Any],
-                        trade_allowed: bool, trade_reason: str) -> dict[str, Any]:
+def call_model_decision(
+    candidates: list[dict[str, Any]],
+    portfolio: dict[str, Any],
+    trade_allowed: bool,
+    trade_reason: str,
+    market_strategy_ctx: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     # Provider selection: most models use the configured OpenAI-compatible endpoint;
     # this legacy alias keeps the OpenCode Zen free-model path working.
     if MODEL == "deepseek-v4-flash-free":
@@ -3475,7 +3511,7 @@ def call_model_decision(candidates: list[dict[str, Any]], portfolio: dict[str, A
         base_url, api_key = load_crossdesk_config("DASHBOARD_DECISION_BASE_URL", "DASHBOARD_DECISION_API_KEY")
     market_env = check_market_environment()
     market_sent = check_market_sentiment()
-    market_strategy_ctx = current_market_strategy_context()
+    market_strategy_ctx = market_strategy_ctx or current_market_strategy_context()
     market_strategy_prompt = format_market_strategy_context_for_prompt(market_strategy_ctx)
     sentiment_note = ""
     if market_sent.get("sentiment") == "cold":
@@ -3654,14 +3690,20 @@ Z哥卖出风控（属于Z哥体系）：
     return result
 
 
-def execute_actions(state: dict[str, Any], decision: dict[str, Any], candidates: list[dict[str, Any]],
-                    trade_allowed: bool, trade_reason: str) -> list[dict[str, Any]]:
+def execute_actions(
+    state: dict[str, Any],
+    decision: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    trade_allowed: bool,
+    trade_reason: str,
+    market_strategy_ctx: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     executed = []
     cand_by_code = {normalize_code(c.get("code", "")): c for c in candidates}
     positions = state.setdefault("positions", {})
     cash = float(state.get("cash") or 0)
     new_buys = 0
-    market_strategy_ctx = current_market_strategy_context()
+    market_strategy_ctx = market_strategy_ctx or current_market_strategy_context()
     effective_max_open_positions = int(market_strategy_ctx.get("max_open_positions", MAX_OPEN_POSITIONS))
     effective_max_new_buys = int(market_strategy_ctx.get("max_new_buys_per_decision", MAX_NEW_BUYS_PER_DECISION))
     effective_max_total_position_pct = float(market_strategy_ctx.get("max_total_position_pct", MAX_TOTAL_POSITION_PCT))
@@ -4060,11 +4102,20 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     schedule_triggered_at = b1_payload.get("schedule_triggered_at") or ""
     if not force and state.get("last_b1_generated_at") == generated_at:
         return {"skipped": True, "reason": "already_decided_for_this_b1", "state": enrich_portfolio(state)}
+    market_strategy_ctx = current_market_strategy_context()
+    compact_market_ctx = compact_market_strategy_context(market_strategy_ctx)
+    state["market_decision_context"] = compact_market_ctx
     
     # 日内亏损预算检查
     budget_exceeded, today_pnl = check_daily_loss_budget(state)
     if budget_exceeded and not force:
-        decision = {"summary": f"🛑 日内亏损预算触发（今日累计{today_pnl:.1f}% ≤ {DAILY_LOSS_BUDGET_PCT}%），暂停当日开仓", "actions": [], "model": "SYSTEM_RISK_BUDGET", "provider": "local_rule"}
+        decision = {
+            "summary": f"🛑 日内亏损预算触发（今日累计{today_pnl:.1f}% ≤ {DAILY_LOSS_BUDGET_PCT}%），暂停当日开仓",
+            "actions": [],
+            "model": "SYSTEM_RISK_BUDGET",
+            "provider": "local_rule",
+            "market_guidance": compact_market_ctx,
+        }
         state["trading_paused"] = True
         state["pause_reason"] = f"日内亏损预算({today_pnl:.1f}%)"
         state["pause_since"] = now_ts()
@@ -4077,6 +4128,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
             "time": now_ts(), "b1_generated_at": generated_at,
             "trade_allowed": False, "trade_reason": f"日内亏损预算({today_pnl:.1f}%)",
             "decision": decision, "executed": [],
+            "market_decision_context": compact_market_ctx,
         }
         if schedule_slot:
             log_entry["schedule_slot"] = schedule_slot
@@ -4116,12 +4168,12 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
                 f"计划{schedule_slot[-5:]}选股属于上午连续竞价时段；当前{trade_reason}。"
                 f"请正常生成买卖策略，系统会在{deferred_due_at[-8:-3]}开盘后复核并成交。"
             )
-            decision = call_model_decision(candidates, portfolio, True, model_trade_reason)
+            decision = call_model_decision(candidates, portfolio, True, model_trade_reason, market_strategy_ctx)
             execution_allowed, execution_reason = is_a_share_execution_time()
             if execution_allowed:
                 trade_allowed = True
                 trade_reason = execution_reason
-                executed = execute_actions(state, decision, candidates, execution_allowed, execution_reason)
+                executed = execute_actions(state, decision, candidates, execution_allowed, execution_reason, market_strategy_ctx)
             else:
                 trade_allowed = False
                 trade_reason = f"{trade_reason}；已生成买卖策略，等待{deferred_due_at[-8:-3]}成交"
@@ -4150,10 +4202,16 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
                         "due_at": deferred_due_at,
                     }
         elif not trade_allowed:
-            decision = {"summary": f"{trade_reason}，本轮只记录候选，不执行买卖", "actions": [], "model": MODEL, "provider": PROVIDER_DISPLAY_NAME}
+            decision = {
+                "summary": f"{trade_reason}，本轮只记录候选，不执行买卖",
+                "actions": [],
+                "model": MODEL,
+                "provider": PROVIDER_DISPLAY_NAME,
+                "market_guidance": compact_market_ctx,
+            }
             executed = []
         else:
-            decision = call_model_decision(candidates, portfolio, trade_allowed, trade_reason)
+            decision = call_model_decision(candidates, portfolio, trade_allowed, trade_reason, market_strategy_ctx)
             execution_allowed, execution_reason = is_a_share_execution_time()
             if not execution_allowed:
                 decision["decision_trade_reason"] = trade_reason
@@ -4165,10 +4223,17 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
                 if execution_reason != trade_reason:
                     decision["decision_trade_reason"] = trade_reason
                     trade_reason = execution_reason
-                executed = execute_actions(state, decision, candidates, execution_allowed, execution_reason)
+                executed = execute_actions(state, decision, candidates, execution_allowed, execution_reason, market_strategy_ctx)
         state["last_error"] = ""
     except Exception as exc:
-        decision = {"summary": "模型决策失败，本轮不交易", "actions": [], "model": MODEL, "provider": PROVIDER_DISPLAY_NAME, "error": f"{type(exc).__name__}: {exc}"}
+        decision = {
+            "summary": "模型决策失败，本轮不交易",
+            "actions": [],
+            "model": MODEL,
+            "provider": PROVIDER_DISPLAY_NAME,
+            "error": f"{type(exc).__name__}: {exc}",
+            "market_guidance": compact_market_ctx,
+        }
         executed = []
         state["last_error"] = decision["error"]
     state["last_b1_generated_at"] = generated_at
@@ -4180,6 +4245,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
         "trade_reason": trade_reason,
         "decision": decision,
         "executed": executed,
+        "market_decision_context": compact_market_ctx,
     }
     if schedule_slot:
         log_entry["schedule_slot"] = schedule_slot
