@@ -218,6 +218,10 @@ NiuOne 的 A 股策略筛选和模拟交易规则中，参考并实现了 [zetta
 - [docs/OPERATIONS.md](docs/OPERATIONS.md)：部署、验证和回滚手册
 - [config/runtime-policy.md](config/runtime-policy.md)：运行数据和敏感信息处理策略
 
+## 致谢
+
+- 感谢 [LinuxDo](https://linux.do) 社区的关注、交流与支持，为 NiuOne 项目的完善提供了帮助。
+
 ## License
 
 NiuOne 使用 [Apache License 2.0](LICENSE) 发布。
