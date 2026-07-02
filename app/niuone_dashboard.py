@@ -80,7 +80,7 @@ NIUONE_LAUNCHD_LABELS = (
 )
 NIUONE_RESTART_DELAY_SECONDS = float(os.environ.get("NIUONE_RESTART_DELAY_SECONDS", "1.2") or "1.2")
 ADMIN_PASSWORD = os.environ.get("DASHBOARD_ADMIN_PASSWORD", "").strip()
-AUTH_ENABLED = os.environ.get("DASHBOARD_AUTH_ENABLED", "1").lower() not in {"0", "false", "no"}
+AUTH_ENABLED = os.environ.get("DASHBOARD_AUTH_ENABLED", "0").lower() not in {"0", "false", "no"}
 TRUSTED_PROXY_CIDRS = tuple(
     value.strip()
     for value in os.environ.get("DASHBOARD_TRUSTED_PROXIES", "127.0.0.1/32,::1/128").split(",")
@@ -183,7 +183,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_WATCHLIST_STATE", "label": "X 监控状态文件", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "state" / "x_watchlist_latest.json"), "effect": "next_run"},
     {"name": "DASHBOARD_X_WATCHLIST_ARCHIVE_DIR", "label": "X 监控归档目录", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "output" / "x_watchlist_direct"), "effect": "next_run"},
 
-    {"name": "DASHBOARD_AUTH_ENABLED", "label": "启用访问认证", "group": "访问控制", "kind": "bool", "default": "1", "effect": "restart"},
+    {"name": "DASHBOARD_AUTH_ENABLED", "label": "启用访问认证", "group": "访问控制", "kind": "bool", "default": "0", "effect": "restart"},
     {"name": "DASHBOARD_ADMIN_PASSWORD", "label": "设置页管理员密码", "group": "访问控制", "kind": "secret", "default": "", "effect": "restart"},
     {"name": "DASHBOARD_MAX_ONLINE", "label": "最大在线 viewer", "group": "访问控制", "kind": "int", "default": "0", "effect": "restart"},
     {"name": "DASHBOARD_ONLINE_WINDOW_SECONDS", "label": "在线判断窗口秒数", "group": "访问控制", "kind": "int", "default": "300", "effect": "restart"},
@@ -3167,6 +3167,7 @@ INDEX_HTML = r"""<!doctype html>
   <div class="header-row">
     <h1>牛牛大作手</h1>
     <div class="header-actions">
+      <a class="settings-link" href="https://github.com/kunkundi/niuone" target="_blank" rel="noopener" title="开源仓库" aria-label="开源仓库">GitHub</a>
       <a class="settings-link" href="/admin" title="进入设置页" aria-label="进入设置页">设置</a>
       <div class="visit-pill" title="累计首页访问人次"><span>访问人次</span><b id="visitCount">__VISIT_COUNT__</b></div>
       <div class="visit-pill" title="按浏览器匿名 Cookie 统计的唯一访客数"><span>访客数</span><b id="uniqueVisitCount">__UNIQUE_VISIT_COUNT__</b></div>
