@@ -4211,6 +4211,32 @@ function normalizePracticeEquityPoints(source) {
     .map(p => ({time: p.time || '', equity: Number(p.equity), pnlPct: Number(p.pnl_pct)}))
     .filter(p => Number.isFinite(p.equity) && p.time);
 }
+function practicePctAxisBounds(values) {
+  const finite = (values || []).map(Number).filter(Number.isFinite);
+  if (!finite.length) return {min: -0.01, max: 0.01, digits: 3};
+  const dataMin = Math.min(...finite);
+  const dataMax = Math.max(...finite);
+  const dataRange = Math.max(0, dataMax - dataMin);
+  const minSpan = Math.min(0.2, Math.max(0.02, dataRange * 1.4));
+  const pad = Math.max(dataRange * 0.18, minSpan * 0.10);
+  let min = dataMin - pad;
+  let max = dataMax + pad;
+  let span = max - min;
+  if (span < minSpan) {
+    const expand = (minSpan - span) / 2;
+    min -= expand;
+    max += expand;
+    span = max - min;
+  }
+  const zeroNear = dataMin <= 0 && dataMax >= 0
+    || Math.min(Math.abs(dataMin), Math.abs(dataMax)) <= Math.max(dataRange * 2, 0.04);
+  if (zeroNear) {
+    min = Math.min(min, -0.01);
+    max = Math.max(max, 0.01);
+    span = max - min;
+  }
+  return {min, max, digits: span < 0.05 ? 3 : 2};
+}
 function compactPracticeDailyPoints(points) {
   const byDate = new Map();
   for (const p of points || []) {
@@ -4425,21 +4451,9 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   const activeBenchmarks = [];
   const benchmarkSeries = activeBenchmarks.map((b, idx) => ({...b, color: b.symbol === 'sh000001' ? '#f59e0b' : b.symbol === 'sh000300' ? '#60a5fa' : b.symbol === 'sz399006' ? '#ec4899' : '#8b5cf6'}));
   
-  // Y轴自适应：基于账户当前日波动区间，上下各留出约 15% 的呼吸空间
-  const accountMinPct = Math.min(...chartPcts);
-  const accountMaxPct = Math.max(...chartPcts);
-  const accountRange = accountMaxPct - accountMinPct;
-  const minVisibleRange = 1.0;  // 最小显示范围1%
-  const yMidPct = (accountMaxPct + accountMinPct) / 2;
-  const halfRange = Math.max(minVisibleRange / 2, accountRange * 0.6);
-  
-  let yMinPct = yMidPct - halfRange;
-  let yMaxPct = yMidPct + halfRange;
-  
-  // 始终把 0% 盈亏平衡线纳入视野，避免只看到亏损/盈利区间时丢失基准。
-  const zeroPaddingPct = 0.05;
-  yMinPct = Math.min(yMinPct, -zeroPaddingPct);
-  yMaxPct = Math.max(yMaxPct, zeroPaddingPct);
+  const yAxis = practicePctAxisBounds(chartPcts);
+  const yMinPct = yAxis.min;
+  const yMaxPct = yAxis.max;
   
   const span = (yMaxPct - yMinPct) || 1;
   const y = pct => top + (yMaxPct - pct) / span * innerH;
@@ -4461,6 +4475,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     return {...b, d, lastPct};
   }).filter(b => b.d);
   const line = straightSvgPath(pts);
+  const zeroAxisInView = yMinPct <= 0 && yMaxPct >= 0;
   const areaBaseY = y(clampPct(0));
   const area = `${line} L${pts[pts.length-1][0].toFixed(1)} ${areaBaseY.toFixed(1)} L${pts[0][0].toFixed(1)} ${areaBaseY.toFixed(1)} Z`;
   const baseY = areaBaseY;
@@ -4528,10 +4543,10 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
       </div>
     </div>
     <div class="practice-chart-wrap">
-      <span class="practice-axis-label top">${fmtNumber(yMaxPct)}%</span>
-      ${showMidAxisLabel ? `<span class="practice-axis-label mid">${fmtNumber(midPct)}%</span>` : ''}
-      <span class="practice-axis-label bot">${fmtNumber(yMinPct)}%</span>
-      <span class="practice-zero-axis-label" style="top:${zeroAxisTopPct.toFixed(2)}%">0%</span>
+      <span class="practice-axis-label top">${fmtNumber(yMaxPct, yAxis.digits)}%</span>
+      ${showMidAxisLabel ? `<span class="practice-axis-label mid">${fmtNumber(midPct, yAxis.digits)}%</span>` : ''}
+      <span class="practice-axis-label bot">${fmtNumber(yMinPct, yAxis.digits)}%</span>
+      ${zeroAxisInView ? `<span class="practice-zero-axis-label" style="top:${zeroAxisTopPct.toFixed(2)}%">0%</span>` : ''}
       <svg class="practice-chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
         <defs>
           <linearGradient id="practiceFill" x1="0" x2="0" y1="0" y2="1">
@@ -4542,7 +4557,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
         </defs>
         ${gridYs.map(gy => `<line x1="${left}" x2="${w-right}" y1="${gy.toFixed(1)}" y2="${gy.toFixed(1)}" stroke="rgba(255,255,255,.07)" stroke-dasharray="4 6"/>`).join('')}
         ${timeTicks.map(t => `<line x1="${t.x.toFixed(1)}" x2="${t.x.toFixed(1)}" y1="${top}" y2="${h-bottom}" stroke="rgba(255,255,255,.045)"/>`).join('')}
-        <line x1="${left}" x2="${w-right}" y1="${baseY.toFixed(1)}" y2="${baseY.toFixed(1)}" stroke="rgba(226,232,240,.46)" stroke-width="1.2" stroke-dasharray="7 5"/>
+        ${zeroAxisInView ? `<line x1="${left}" x2="${w-right}" y1="${baseY.toFixed(1)}" y2="${baseY.toFixed(1)}" stroke="rgba(226,232,240,.46)" stroke-width="1.2" stroke-dasharray="7 5"/>` : ''}
         <path d="${area}" fill="url(#practiceFill)"/>
         ${benchmarkPaths.map(b => `<path d="${b.d}" fill="none" stroke="${b.color}" stroke-width="1.5" opacity=".58" vector-effect="non-scaling-stroke"><title>${b.name} ${Number.isFinite(b.lastPct) ? fmtNumber(b.lastPct) + '%' : ''}</title></path>`).join('')}
         <path d="${line}" fill="none" stroke="${markerColor}" stroke-width="2.2" vector-effect="non-scaling-stroke" filter="url(#practiceGlow)"/>
