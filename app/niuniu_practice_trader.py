@@ -4289,6 +4289,12 @@ def call_model_decision(
     strategy_source_label = "预设文字策略" if strategy_source == STRATEGY_SOURCE_PRESET_TEXT else "内置策略"
     active_strategy_ids = active_strategy_ids_for_decision()
     strategy_labels = strategy_prompt_labels(active_strategy_ids)
+    portfolio_positions = [p for p in (portfolio.get("positions") or []) if isinstance(p, dict)]
+    position_by_code = {
+        normalize_code(pos.get("code") or ""): pos
+        for pos in portfolio_positions
+        if normalize_code(pos.get("code") or "")
+    }
     # Build compact candidate list with strategy context
     cand_lines = []
     for c in compact_candidates:
@@ -4309,6 +4315,22 @@ def call_model_decision(
             f"风险:{','.join(c.get('risk_flags',[]) or ['无'])}"
         )
     candidates_section = "\n".join(cand_lines) if cand_lines else "（无候选股）"
+    held_candidate_lines = []
+    for c in candidates[:20]:
+        code = normalize_code(c.get("code") or "")
+        pos = position_by_code.get(code)
+        if not pos:
+            continue
+        strat = c.get("best_strategy", "")
+        strat_label = strategy_labels.get(strat, strat)
+        held_candidate_lines.append(
+            f"  {code} {c.get('name') or pos.get('name')} 当前仓位{pos.get('position_pct')}% "
+            f"盈亏{pos.get('pnl_pct')}% 今日{pos.get('today_pnl_pct')}% "
+            f"候选战法:{strat_label} 评分:{c.get('best_score')}/{c.get('score_total',10)} "
+            f"基准:{c.get('entry_threshold','-')} 距BBI:{c.get('distance_pct')}% "
+            f"风险:{','.join(c.get('risk_flags',[]) or ['无'])}"
+        )
+    held_candidates_section = "\n".join(held_candidate_lines) if held_candidate_lines else "（无当前持仓进入本轮候选池）"
     position_limit_desc = "、".join(
         f"{strategy_labels.get(strategy_id, strategy_id).split('（', 1)[0]}≤{limit:g}%"
         for strategy_id, limit in sorted(
@@ -4408,6 +4430,14 @@ Z哥卖出风控（属于Z哥体系）：
 
 本次多战法候选股（每只标注最优战法+评分）：
 {candidates_section}
+
+当前持仓与候选池重合（加仓/减仓/继续观察的重点）：
+{held_candidates_section}
+
+加仓语义与纪律：
+- 对当前账户JSON里已有持仓输出 BUY，表示加仓/补仓；shares 是本次新增股数，不是目标总股数。
+- 加仓只用于顺势确认或强势回踩重新达标；亏损扩大、跌破原止损、今日新买T+1锁仓、盘面谨慎/防守时，不得为了摊低成本而加仓。
+- 加仓理由必须写明：原入场战法、当前盈亏/仓位、加仓后仓位占比、失效/止损条件，以及为何优于新开仓或继续HOLD。
 
 严格返回JSON，不要markdown，不要解释，格式：
 {{

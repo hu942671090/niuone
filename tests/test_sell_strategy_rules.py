@@ -536,6 +536,61 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(executed[0]["order_position_pct"], 20.0)
         self.assertIn("600000", state["positions"])
 
+    def test_execute_actions_allows_add_to_existing_position_at_open_limit(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "测试股", "source": "test"}
+            state = {
+                "cash": 100000.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "avg_cost": 9.0,
+                        "last_price": 10.0,
+                        "buy_strategy": "b3_accelerate",
+                    },
+                    "600001": {"code": "600001", "name": "持仓1", "qty": 100, "avg_cost": 10.0, "last_price": 10.0},
+                    "600002": {"code": "600002", "name": "持仓2", "qty": 100, "avg_cost": 10.0, "last_price": 10.0},
+                },
+                "trade_log": [],
+            }
+            decision = {
+                "actions": [{"action": "BUY", "code": "600000", "name": "测试股", "shares": 500, "reason": "B3中继顺势确认加仓"}]
+            }
+            candidates = [{
+                "code": "600000",
+                "name": "测试股",
+                "best_strategy": "b3_accelerate",
+                "best_score": 10.0,
+                "entry_threshold": 8.5,
+                "distance_pct": 1.0,
+                "actionable": True,
+                "hard_blockers": [],
+            }]
+            market_ctx = {**permissive_market_context(), "max_open_positions": 3, "max_new_buys_per_decision": 0}
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                candidates,
+                True,
+                "连续竞价交易时段",
+                market_ctx,
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]["shares"], 500)
+        self.assertEqual(state["positions"]["600000"]["qty"], 1500)
+        self.assertEqual(state["positions"]["600000"]["strategy_mark_history"][-1]["source"], "BUY_ADD")
+        self.assertNotIn("盘面动态持仓已达", decision.get("execution_blocked_reason", ""))
+
     def test_execute_actions_allows_near_full_single_position_when_cash_sufficient(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
@@ -1395,6 +1450,87 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("总仓≤", prompt)
         self.assertNotIn("现金≥", prompt)
         self.assertIn('"target_position_pct"', prompt)
+
+    def test_held_candidate_add_rule_is_in_decision_prompt(self):
+        saved_env = {
+            trader.STRATEGY_SOURCE_ENV: os.environ.get(trader.STRATEGY_SOURCE_ENV),
+            trader.PERSONA_STRATEGY_ENV: os.environ.get(trader.PERSONA_STRATEGY_ENV),
+            trader.TRADE_DISCIPLINE_TEXT_ENV: os.environ.get(trader.TRADE_DISCIPLINE_TEXT_ENV),
+        }
+        originals = {
+            "load_crossdesk_config": trader.load_crossdesk_config,
+            "check_market_environment": trader.check_market_environment,
+            "check_market_sentiment": trader.check_market_sentiment,
+            "current_market_strategy_context": trader.current_market_strategy_context,
+            "check_candidate_news_precheck": trader.check_candidate_news_precheck,
+            "request_chat_content": trader.request_chat_content,
+        }
+        captured: dict[str, dict] = {}
+        try:
+            os.environ[trader.STRATEGY_SOURCE_ENV] = "builtin"
+            os.environ[trader.PERSONA_STRATEGY_ENV] = "zettaranc"
+            os.environ.pop(trader.TRADE_DISCIPLINE_TEXT_ENV, None)
+            trader.load_crossdesk_config = lambda *args, **kwargs: ("https://decision.example/v1", "key")
+            trader.check_market_environment = lambda: {"bullish": True, "detail": "test"}
+            trader.check_market_sentiment = lambda: {"sentiment": "neutral", "detail": "test", "hot_sectors": []}
+            trader.current_market_strategy_context = lambda now=None: {**permissive_market_context(), "enabled": True}
+            trader.check_candidate_news_precheck = lambda candidates: ""
+
+            def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+                captured["payload"] = payload
+                return '{"summary":"ok","actions":[]}'
+
+            trader.request_chat_content = fake_request
+            trader.call_model_decision(
+                [{
+                    "code": "600000",
+                    "name": "测试股",
+                    "price": 10.5,
+                    "change_pct": 2.0,
+                    "best_strategy": "b3_accelerate",
+                    "best_score": 10.0,
+                    "score_total": 10,
+                    "entry_threshold": 8.5,
+                    "score_basis": "确定性最高",
+                    "position_hint": "快进快出",
+                    "time_stop": "次日不涨走",
+                    "consensus_count": 1,
+                    "distance_pct": 1.2,
+                    "hard_blockers": [],
+                    "risk_flags": [],
+                }],
+                {
+                    "positions": [{
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "position_pct": 10.5,
+                        "pnl_pct": 4.2,
+                        "today_pnl_pct": 2.0,
+                        "buy_strategy": "b3_accelerate",
+                    }],
+                    "trade_log": [],
+                    "cash": 895000,
+                    "total_equity": 1000000,
+                },
+                True,
+                "测试交易时段",
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        prompt = captured["payload"]["messages"][0]["content"]
+        self.assertIn("当前持仓与候选池重合", prompt)
+        self.assertIn("600000 测试股 当前仓位10.5%", prompt)
+        self.assertIn("对当前账户JSON里已有持仓输出 BUY，表示加仓/补仓", prompt)
+        self.assertIn("shares 是本次新增股数，不是目标总股数", prompt)
+        self.assertIn("不得为了摊低成本而加仓", prompt)
 
     def test_custom_trade_discipline_text_is_in_decision_prompt(self):
         saved_env = {
