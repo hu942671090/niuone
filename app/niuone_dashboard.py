@@ -3466,15 +3466,68 @@ function practiceTradeLogEntry(trade, idx) {
     order: idx,
   };
 }
+function practiceExecutableActionCount(actions) {
+  return actions.filter(action => {
+    const act = String((action || {}).action || (action || {}).type || '').toUpperCase();
+    return act === 'BUY' || act === 'SELL';
+  }).length;
+}
+function practiceDecisionActionByCode(actions) {
+  const byCode = new Map();
+  actions.forEach(action => {
+    const code = String((action || {}).code || '').trim();
+    if (code) byCode.set(code, action || {});
+  });
+  return byCode;
+}
+function practiceBlockedReasons(decision, actions) {
+  const raw = Array.isArray(decision.execution_blocked_reasons)
+    ? decision.execution_blocked_reasons
+    : (decision.execution_blocked_reason ? [decision.execution_blocked_reason] : []);
+  const byCode = practiceDecisionActionByCode(actions);
+  const seen = new Set();
+  return raw.map(item => {
+    const text = String(item || '').trim();
+    if (!text || seen.has(text)) return '';
+    seen.add(text);
+    const match = text.match(/^(\d{6})[:：]\s*(.*)$/);
+    if (!match) return text;
+    const action = byCode.get(match[1]) || {};
+    const name = String(action.name || '').trim();
+    const subject = [match[1], name].filter(Boolean).join(' ');
+    return `${subject}：${match[2] || '执行拦截'}`;
+  }).filter(Boolean);
+}
+function practiceDecisionExecutionNote(entry, decisionTime) {
+  const executed = Array.isArray(entry.executed) ? entry.executed : [];
+  const times = executed.map(item => String((item || {}).time || '').slice(11, 19)).filter(Boolean);
+  const uniqueTimes = [...new Set(times)];
+  if (!uniqueTimes.length) return '';
+  const first = uniqueTimes[0];
+  const last = uniqueTimes[uniqueTimes.length - 1];
+  const range = first === last ? first : `${first}-${last}`;
+  return range && range !== String(decisionTime || '').slice(11, 19) ? `成交时间${range}` : '';
+}
 function practiceDecisionLogEntry(entry, idx) {
   const decision = entry.decision || {};
   const actions = Array.isArray(decision.actions) ? decision.actions : [];
   const executed = Array.isArray(entry.executed) ? entry.executed : [];
-  const actionText = executed.length ? `执行${executed.length}笔` : (actions.length ? `建议${actions.length}笔` : '无成交');
+  const suggestedCount = practiceExecutableActionCount(actions);
+  const blockedReasons = practiceBlockedReasons(decision, actions);
+  const statusParts = [
+    suggestedCount ? `建议${suggestedCount}笔` : '',
+    executed.length ? `执行${executed.length}笔` : '',
+    blockedReasons.length ? `拦截${blockedReasons.length}笔` : '',
+  ].filter(Boolean);
+  const actionText = statusParts.length ? statusParts.join(' / ') : '无成交';
+  const blockedText = blockedReasons.length ? `拦截：${compactText(blockedReasons.join('；'), 140)}` : '';
   const summary = compactText(decision.summary || entry.trade_reason || '模型决策', 120);
+  const executionNote = practiceDecisionExecutionNote(entry, entry.time);
   const details = [
     compactText(entry.trade_reason || '', 90),
     actionText,
+    blockedText,
+    executionNote,
     decision.error ? compactText(decision.error, 90) : '',
   ].filter(Boolean);
   return {
