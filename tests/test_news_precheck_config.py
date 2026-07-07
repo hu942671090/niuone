@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
 NEWS_ENV_KEYS = {
     "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_BASE_URL",
     "DASHBOARD_NEWS_API_KEY",
     "DASHBOARD_NEWS_TIMEOUT",
@@ -115,6 +116,31 @@ class NewsPrecheckConfigTests(unittest.TestCase):
 
         self.assertEqual(captured["max_retries"], 2)
         self.assertEqual(captured["timeout"], 30)
+
+    def test_news_precheck_honors_context_length_as_max_tokens(self):
+        module = import_trader_with_env({
+            "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
+            "DASHBOARD_NEWS_API_KEY": "news-secret",
+            "DASHBOARD_NEWS_MODEL": "search-model",
+            "DASHBOARD_NEWS_CONTEXT_LENGTH": "128000",
+        })
+        captured = {}
+
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+            captured["payload"] = payload
+            return "- 000001 平安银行：无重大消息（中性）"
+
+        module.request_chat_content = fake_request
+        module.check_candidate_news_precheck([{"code": "000001", "name": "平安银行"}])
+
+        self.assertEqual(captured["payload"]["max_tokens"], 128000)
+
+    def test_news_precheck_context_length_accepts_suffixes(self):
+        module = import_trader_with_env({
+            "DASHBOARD_NEWS_CONTEXT_LENGTH": "1M",
+        })
+
+        self.assertEqual(module.NEWS_PRECHECK_MAX_TOKENS, 1000000)
 
     def test_parse_chat_completion_content_accepts_sse_stream(self):
         module = import_trader_with_env({})

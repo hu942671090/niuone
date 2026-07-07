@@ -26,6 +26,7 @@ def load_dashboard_env() -> None:
     allowed = {
         "A_SHARE_MODEL_SUMMARY_ENABLED",
         "A_SHARE_MODEL_SUMMARY_MODEL",
+        "A_SHARE_MODEL_SUMMARY_CONTEXT_LENGTH",
         "A_SHARE_MODEL_SUMMARY_BASE_URL",
         "A_SHARE_MODEL_SUMMARY_API_KEY",
         "A_SHARE_MODEL_SUMMARY_DEADLINE_SECONDS",
@@ -37,6 +38,7 @@ def load_dashboard_env() -> None:
         "A_SHARE_GROK_SUMMARY_DEADLINE_SECONDS",
         "A_SHARE_GROK_SUMMARY_REQUEST_TIMEOUT_SECONDS",
         "DASHBOARD_GROK_MODEL",
+        "DASHBOARD_GROK_CONTEXT_LENGTH",
         "DASHBOARD_GROK_BASE_URL",
         "DASHBOARD_GROK_API_KEY",
         "CROSSDESK_BASE_URL",
@@ -67,6 +69,24 @@ def _int_env(name: str, default: int, *, min_value: int) -> int:
     return max(min_value, value)
 
 
+def _token_count_env(*names: str, default: int) -> int:
+    for name in names:
+        raw = str(os.environ.get(name) or "").strip()
+        if not raw:
+            continue
+        compact = raw.replace(",", "").replace("_", "").strip()
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmM]?)", compact)
+        if not match:
+            continue
+        number = float(match.group(1))
+        unit = match.group(2).lower()
+        multiplier = 1_000_000 if unit == "m" else 1_000 if unit == "k" else 1
+        value = int(number * multiplier)
+        if value > 0:
+            return value
+    return default
+
+
 A_SHARE_MODEL_SUMMARY_MODEL = (
     os.environ.get("A_SHARE_MODEL_SUMMARY_MODEL")
     or os.environ.get("A_SHARE_GROK_SUMMARY_MODEL")
@@ -82,6 +102,11 @@ A_SHARE_MODEL_SUMMARY_REQUEST_TIMEOUT_SECONDS = _int_env(
     "A_SHARE_MODEL_SUMMARY_REQUEST_TIMEOUT_SECONDS",
     _int_env("A_SHARE_GROK_SUMMARY_REQUEST_TIMEOUT_SECONDS", 45, min_value=10),
     min_value=10,
+)
+A_SHARE_MODEL_SUMMARY_MAX_TOKENS = _token_count_env(
+    "A_SHARE_MODEL_SUMMARY_CONTEXT_LENGTH",
+    "DASHBOARD_GROK_CONTEXT_LENGTH",
+    default=1800,
 )
 
 
@@ -140,7 +165,7 @@ def _is_transient_error(err: Exception) -> bool:
     return any(hit in text for hit in ("timed out", "timeout", "temporarily", "connection reset", "empty stream", "ssl"))
 
 
-def call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = 1800) -> str:
+def call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = A_SHARE_MODEL_SUMMARY_MAX_TOKENS) -> str:
     base_url, api_key = _get_grok_credentials()
     if not base_url or not api_key:
         raise RuntimeError("model summary credentials not found: set A_SHARE_MODEL_SUMMARY_BASE_URL/API_KEY or DASHBOARD_GROK_BASE_URL/API_KEY")

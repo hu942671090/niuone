@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -18,7 +19,26 @@ def load_module():
     return mod
 
 
+def load_module_with_env(updates: dict[str, str]):
+    original = {key: os.environ.get(key) for key in updates}
+    try:
+        os.environ.update(updates)
+        return load_module()
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 class AShareGrokSummaryTests(unittest.TestCase):
+    def test_context_length_sets_model_summary_max_tokens_default(self):
+        mod = load_module_with_env({"A_SHARE_MODEL_SUMMARY_CONTEXT_LENGTH": "256K"})
+
+        self.assertEqual(mod.A_SHARE_MODEL_SUMMARY_MAX_TOKENS, 256000)
+        self.assertEqual(mod.call_grok_api.__kwdefaults__["max_tokens"], 256000)
+
     def test_parse_accepts_json_fence(self):
         mod = load_module()
 

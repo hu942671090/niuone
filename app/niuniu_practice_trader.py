@@ -61,6 +61,21 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_token_count(name: str, default: int) -> int:
+    raw = str(os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    compact = raw.replace(",", "").replace("_", "").strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmM]?)", compact)
+    if not match:
+        return default
+    number = float(match.group(1))
+    unit = match.group(2).lower()
+    multiplier = 1_000_000 if unit == "m" else 1_000 if unit == "k" else 1
+    value = int(number * multiplier)
+    return value if value > 0 else default
+
+
 def env_float(name: str, default: float) -> float:
     try:
         value = os.environ.get(name)
@@ -98,11 +113,13 @@ DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
 def load_dashboard_env() -> None:
     allowed = {
         "DASHBOARD_NEWS_MODEL",
+        "DASHBOARD_NEWS_CONTEXT_LENGTH",
         "DASHBOARD_NEWS_BASE_URL",
         "DASHBOARD_NEWS_API_KEY",
         "DASHBOARD_NEWS_TIMEOUT",
         "DASHBOARD_NEWS_MAX_RETRIES",
         "DASHBOARD_DECISION_MODEL",
+        "DASHBOARD_DECISION_CONTEXT_LENGTH",
         "DASHBOARD_DECISION_BASE_URL",
         "DASHBOARD_DECISION_API_KEY",
         "DASHBOARD_DECISION_MAX_TOKENS",
@@ -273,6 +290,7 @@ DECISION_MAX_TOKENS = env_int("DASHBOARD_DECISION_MAX_TOKENS", 6000)
 DECISION_REQUEST_TIMEOUT = env_int("DASHBOARD_DECISION_TIMEOUT", 180)
 NEWS_PRECHECK_REQUEST_TIMEOUT = max(5, env_int("DASHBOARD_NEWS_TIMEOUT", 45))
 NEWS_PRECHECK_MAX_RETRIES = max(1, env_int("DASHBOARD_NEWS_MAX_RETRIES", 1))
+NEWS_PRECHECK_MAX_TOKENS = env_token_count("DASHBOARD_NEWS_CONTEXT_LENGTH", 600)
 PROVIDER_DISPLAY_NAME = "Crossdesk.ccwu.cc"
 CROSSDESK_PROVIDER_NAME = "Crossdesk.ccwu.cc"
 TRADE_LOG_LIMIT = 200
@@ -4188,7 +4206,7 @@ def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
-        "max_tokens": 600,
+        "max_tokens": NEWS_PRECHECK_MAX_TOKENS,
     }
     content = request_chat_content(
         base_url,

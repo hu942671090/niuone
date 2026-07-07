@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import sys
 import time
@@ -31,9 +32,11 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 def load_dashboard_env() -> None:
     allowed = {
         "DASHBOARD_GROK_MODEL",
+        "DASHBOARD_GROK_CONTEXT_LENGTH",
         "DASHBOARD_GROK_BASE_URL",
         "DASHBOARD_GROK_API_KEY",
         "US_RATING_MODEL",
+        "US_RATING_CONTEXT_LENGTH",
         "US_RATING_BASE_URL",
         "US_RATING_API_KEY",
         "US_RATING_DEADLINE_SECONDS",
@@ -84,8 +87,27 @@ def _int_env(name: str, default: int, *, min_value: int) -> int:
     return max(min_value, value)
 
 
+def _token_count_env(*names: str, default: int) -> int:
+    for name in names:
+        raw = str(os.environ.get(name) or "").strip()
+        if not raw:
+            continue
+        compact = raw.replace(",", "").replace("_", "").strip()
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmM]?)", compact)
+        if not match:
+            continue
+        number = float(match.group(1))
+        unit = match.group(2).lower()
+        multiplier = 1_000_000 if unit == "m" else 1_000 if unit == "k" else 1
+        value = int(number * multiplier)
+        if value > 0:
+            return value
+    return default
+
+
 US_RATING_DEADLINE_SECONDS = _int_env("US_RATING_DEADLINE_SECONDS", 240, min_value=30)
 US_RATING_REQUEST_TIMEOUT_SECONDS = _int_env("US_RATING_REQUEST_TIMEOUT_SECONDS", 120, min_value=10)
+US_RATING_MAX_TOKENS = _token_count_env("US_RATING_CONTEXT_LENGTH", "DASHBOARD_GROK_CONTEXT_LENGTH", default=8192)
 
 
 def _load_config():
@@ -265,7 +287,7 @@ def generate_report(test_mode: bool = False) -> str:
             {"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": build_user_prompt()},
         ]
-        max_tokens = 8192
+        max_tokens = US_RATING_MAX_TOKENS
 
     return clean_report_content(_call_api(base_url, api_key, messages, max_tokens))
 

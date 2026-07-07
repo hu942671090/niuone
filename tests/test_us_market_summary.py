@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,26 @@ def load_module():
     return mod
 
 
+def load_module_with_env(updates: dict[str, str]):
+    original = {key: os.environ.get(key) for key in updates}
+    try:
+        os.environ.update(updates)
+        return load_module()
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 class UsMarketSummaryTests(unittest.TestCase):
+    def test_context_length_sets_grok_max_tokens_default(self):
+        mod = load_module_with_env({"US_MARKET_SUMMARY_CONTEXT_LENGTH": "128K"})
+
+        self.assertEqual(mod.US_MARKET_SUMMARY_MAX_TOKENS, 128000)
+        self.assertEqual(mod._call_grok_api.__kwdefaults__["max_tokens"], 128000)
+
     def test_previous_us_session_date_uses_friday_on_monday(self):
         mod = load_module()
 

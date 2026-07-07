@@ -131,9 +131,11 @@ US_SECTOR_PROXY_DEFS: list[dict[str, Any]] = [
 def load_dashboard_env() -> None:
     allowed = {
         "DASHBOARD_GROK_MODEL",
+        "DASHBOARD_GROK_CONTEXT_LENGTH",
         "DASHBOARD_GROK_BASE_URL",
         "DASHBOARD_GROK_API_KEY",
         "US_MARKET_SUMMARY_MODEL",
+        "US_MARKET_SUMMARY_CONTEXT_LENGTH",
         "US_MARKET_SUMMARY_BASE_URL",
         "US_MARKET_SUMMARY_API_KEY",
         "US_MARKET_SUMMARY_DEADLINE_SECONDS",
@@ -166,6 +168,24 @@ def _int_env(name: str, default: int, *, min_value: int) -> int:
     return max(min_value, value)
 
 
+def _token_count_env(*names: str, default: int) -> int:
+    for name in names:
+        raw = str(os.environ.get(name) or "").strip()
+        if not raw:
+            continue
+        compact = raw.replace(",", "").replace("_", "").strip()
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmM]?)", compact)
+        if not match:
+            continue
+        number = float(match.group(1))
+        unit = match.group(2).lower()
+        multiplier = 1_000_000 if unit == "m" else 1_000 if unit == "k" else 1
+        value = int(number * multiplier)
+        if value > 0:
+            return value
+    return default
+
+
 US_MARKET_SUMMARY_MODEL = (
     os.environ.get("US_MARKET_SUMMARY_MODEL")
     or os.environ.get("DASHBOARD_GROK_MODEL")
@@ -173,6 +193,11 @@ US_MARKET_SUMMARY_MODEL = (
 )
 US_MARKET_SUMMARY_DEADLINE_SECONDS = _int_env("US_MARKET_SUMMARY_DEADLINE_SECONDS", 150, min_value=30)
 US_MARKET_SUMMARY_REQUEST_TIMEOUT_SECONDS = _int_env("US_MARKET_SUMMARY_REQUEST_TIMEOUT_SECONDS", 90, min_value=10)
+US_MARKET_SUMMARY_MAX_TOKENS = _token_count_env(
+    "US_MARKET_SUMMARY_CONTEXT_LENGTH",
+    "DASHBOARD_GROK_CONTEXT_LENGTH",
+    default=2200,
+)
 
 
 def previous_us_session_date(cn_day: date | datetime | None = None) -> date:
@@ -249,7 +274,7 @@ def _is_transient_error(err: Exception) -> bool:
     return any(hit in text for hit in ("timed out", "timeout", "temporarily", "connection reset", "empty stream", "ssl"))
 
 
-def _call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = 2200) -> str:
+def _call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = US_MARKET_SUMMARY_MAX_TOKENS) -> str:
     base_url, api_key = _get_grok_credentials()
     if not base_url or not api_key:
         raise RuntimeError("Grok credentials not found: set DASHBOARD_GROK_BASE_URL and DASHBOARD_GROK_API_KEY")

@@ -22,9 +22,11 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 def load_dashboard_env() -> None:
     allowed = {
         "DASHBOARD_GROK_MODEL",
+        "DASHBOARD_GROK_CONTEXT_LENGTH",
         "DASHBOARD_GROK_BASE_URL",
         "DASHBOARD_GROK_API_KEY",
         "X_WATCHLIST_MODEL",
+        "X_WATCHLIST_CONTEXT_LENGTH",
         "X_WATCHLIST_BASE_URL",
         "X_WATCHLIST_API_KEY",
         "X_WATCHLIST_ACCOUNTS",
@@ -74,7 +76,30 @@ def parse_watchlist_accounts(value: str | None) -> list[str]:
     return accounts
 
 
+def env_token_count(*names: str, default: int = 0) -> int:
+    for name in names:
+        raw = str(os.environ.get(name) or "").strip()
+        if not raw:
+            continue
+        compact = raw.replace(",", "").replace("_", "").strip()
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmM]?)", compact)
+        if not match:
+            continue
+        number = float(match.group(1))
+        unit = match.group(2).lower()
+        multiplier = 1_000_000 if unit == "m" else 1_000 if unit == "k" else 1
+        value = int(number * multiplier)
+        if value > 0:
+            return value
+    return default
+
+
+def configured_max_tokens(default: int) -> int:
+    return X_WATCHLIST_MAX_TOKENS or default
+
+
 MODEL = os.environ.get("X_WATCHLIST_MODEL") or os.environ.get("DASHBOARD_GROK_MODEL") or "grok-4.20-multi-agent-xhigh"
+X_WATCHLIST_MAX_TOKENS = env_token_count("X_WATCHLIST_CONTEXT_LENGTH", "DASHBOARD_GROK_CONTEXT_LENGTH")
 CROSSDESK_PROVIDER_NAME = "Crossdesk.ccwu.cc"
 CROSSDESK_PROVIDER_NAME_LOWER = CROSSDESK_PROVIDER_NAME.lower()
 TEMPORARY_HTTP_CODES = {408, 429, 500, 502, 503, 504}
@@ -264,7 +289,13 @@ def call_grok_once(base_url, api_key, account_handles, latest_by_handle, timeout
 - 普通纯文字推文 media 填 [] 即可。
 - 尽量判断 conversation_type：回复填 reply，引用填 quote，转推填 repost，只有确定不是回复/引用/转推时才填 original；不确定填 unknown。
 """
-    parsed = openai_chat_json(base_url, api_key, prompt, min(3000, 1000 + 500 * len(account_handles)), timeout=timeout)
+    parsed = openai_chat_json(
+        base_url,
+        api_key,
+        prompt,
+        configured_max_tokens(min(3000, 1000 + 500 * len(account_handles))),
+        timeout=timeout,
+    )
     return parsed.get("accounts", [])
 
 
@@ -309,7 +340,13 @@ def hydrate_posts(base_url, api_key, new_items, timeout=DETAIL_REQUEST_TIMEOUT_S
 - 如果推文或引用/回复里有图片/视频/GIF，尽量返回可打开的媒体 URL；不需要识图、OCR 或图片内容描述。
 """
     try:
-        parsed = openai_chat_json(base_url, api_key, prompt, min(12000, 2200 + 1700 * len(new_items)), timeout=timeout)
+        parsed = openai_chat_json(
+            base_url,
+            api_key,
+            prompt,
+            configured_max_tokens(min(12000, 2200 + 1700 * len(new_items))),
+            timeout=timeout,
+        )
         by_index = {int(post.get("index")): post for post in parsed.get("posts", []) if isinstance(post, dict) and str(post.get("index", "")).isdigit()}
     except Exception:
         return new_items
@@ -663,7 +700,7 @@ tweet_url：{tweet_url}
 - reply_to_chinese_text / quoted_chinese_text 只填中文：外文原帖只给中文翻译，中文原帖只给中文原文；不要中英双语，不要加“翻译：”。
 - 如果原推包含图片/视频/GIF，尽量返回 reply_to_media/quoted_media 的可打开 URL；不需要识图、OCR 或图片内容描述。
 """
-    parsed = openai_chat_json(base_url, api_key, prompt, 3000, timeout=timeout)
+    parsed = openai_chat_json(base_url, api_key, prompt, configured_max_tokens(3000), timeout=timeout)
     if not isinstance(parsed, dict):
         return post
     merged = dict(post)

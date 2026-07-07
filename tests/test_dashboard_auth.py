@@ -703,6 +703,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('[hidden]{display:none!important}', body)
         self.assertIn("document.addEventListener('input', handleUsFeatureToggle);", body)
         self.assertIn('Grok 模型', body)
+        self.assertIn('Grok 模型上下文长度', body)
+        self.assertIn('美股评级上下文长度', body)
         self.assertIn('推文监控作者', body)
         self.assertIn('推文监控间隔', body)
         self.assertIn('美股买入评级时间', body)
@@ -715,6 +717,9 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('<h2>推文监控周期</h2>', body)
         self.assertNotIn('<h2>美股买入评级周期</h2>', body)
         self.assertIn('买卖决策模型', body)
+        self.assertIn('买卖决策上下文长度', body)
+        self.assertIn('消息面预检上下文长度', body)
+        self.assertIn('可填 1M、128K 或完整数字', body)
         self.assertIn('选股及买卖决策时间点', body)
         self.assertIn('选股策略', body)
         self.assertIn('当前策略来源', body)
@@ -750,6 +755,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('内置策略和预设文字二选一激活', body)
         self.assertIn('盘面监控生产时间点', body)
         self.assertIn('A股盘面模型总结', body)
+        self.assertIn('A股盘面总结上下文长度', body)
         self.assertIn("name='env__A_SHARE_MODEL_SUMMARY_ENABLED'", body)
         a_share_model_toggle_start = body.index("name='env__A_SHARE_MODEL_SUMMARY_ENABLED'")
         a_share_model_toggle_end = body.index('</select>', a_share_model_toggle_start)
@@ -894,7 +900,9 @@ class DashboardAuthTests(unittest.TestCase):
             updates = {
                 'DASHBOARD_US_FEATURES_ENABLED': '1',
                 'DASHBOARD_GROK_MODEL': 'grok-new',
+                'DASHBOARD_GROK_CONTEXT_LENGTH': '1M',
                 'DASHBOARD_NEWS_MODEL': 'search-model',
+                'DASHBOARD_NEWS_CONTEXT_LENGTH': '128K',
                 'DASHBOARD_NEWS_BASE_URL': 'https://news.example/v1',
                 'DASHBOARD_NEWS_API_KEY': 'news-secret',
                 'DASHBOARD_B1_SCHEDULE_TIMES': '09:25, 10:00, 14:50',
@@ -923,7 +931,9 @@ class DashboardAuthTests(unittest.TestCase):
 
         self.assertEqual(parsed['DASHBOARD_US_FEATURES_ENABLED'], '1')
         self.assertEqual(parsed['DASHBOARD_GROK_MODEL'], 'grok-new')
+        self.assertEqual(parsed['DASHBOARD_GROK_CONTEXT_LENGTH'], '1000000')
         self.assertEqual(parsed['DASHBOARD_NEWS_MODEL'], 'search-model')
+        self.assertEqual(parsed['DASHBOARD_NEWS_CONTEXT_LENGTH'], '128000')
         self.assertEqual(parsed['DASHBOARD_NEWS_BASE_URL'], 'https://news.example/v1')
         self.assertEqual(parsed['DASHBOARD_NEWS_API_KEY'], 'news-secret')
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
@@ -1080,9 +1090,12 @@ class DashboardAuthTests(unittest.TestCase):
             body = urllib.parse.urlencode({
                 'env__DASHBOARD_US_FEATURES_ENABLED': '1',
                 'env__DASHBOARD_GROK_MODEL': 'grok-test',
+                'env__DASHBOARD_GROK_CONTEXT_LENGTH': '1M',
                 'env__DASHBOARD_NEWS_MODEL': 'search-model',
+                'env__DASHBOARD_NEWS_CONTEXT_LENGTH': '1M',
                 'env__DASHBOARD_NEWS_BASE_URL': 'https://news.example/v1',
                 'env__DASHBOARD_NEWS_API_KEY': 'news-secret',
+                'env__DASHBOARD_DECISION_CONTEXT_LENGTH': '256K',
                 'env__DASHBOARD_B1_SCHEDULE_TIMES': ['', '09:25', '10:00', '', '14:50'],
                 'env__DASHBOARD_INDICES_TTL_SECONDS': '20',
                 'env__DASHBOARD_US_MARKET_SUMMARY_CRON': '08:01',
@@ -1138,9 +1151,12 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('trader_runtime', response['runtime']['applied'])
         self.assertEqual(parsed['DASHBOARD_US_FEATURES_ENABLED'], '1')
         self.assertEqual(parsed['DASHBOARD_GROK_MODEL'], 'grok-test')
+        self.assertEqual(parsed['DASHBOARD_GROK_CONTEXT_LENGTH'], '1000000')
         self.assertEqual(parsed['DASHBOARD_NEWS_MODEL'], 'search-model')
+        self.assertEqual(parsed['DASHBOARD_NEWS_CONTEXT_LENGTH'], '1000000')
         self.assertEqual(parsed['DASHBOARD_NEWS_BASE_URL'], 'https://news.example/v1')
         self.assertEqual(parsed['DASHBOARD_NEWS_API_KEY'], 'news-secret')
+        self.assertEqual(parsed['DASHBOARD_DECISION_CONTEXT_LENGTH'], '256000')
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
         self.assertEqual(parsed['DASHBOARD_INDICES_TTL_SECONDS'], '20')
         self.assertEqual(parsed['DASHBOARD_US_MARKET_SUMMARY_CRON'], '1 8 * * 1-5')

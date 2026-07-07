@@ -239,17 +239,21 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_US_FEATURES_ENABLED", "label": "开启牛牛美股", "group": "牛牛美股", "kind": "bool", "default": "0", "effect": "next_run"},
     {"name": "US_RATING_BASE_URL", "label": "美股评级 API Base URL", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "US_RATING_API_KEY", "label": "美股评级 API Key", "group": "牛牛美股", "kind": "secret", "default": "", "effect": "next_run"},
+    {"name": "US_RATING_CONTEXT_LENGTH", "label": "美股评级上下文长度", "group": "牛牛美股", "kind": "context_length", "default": "", "effect": "next_run"},
     {"name": "CROSSDESK_BASE_URL", "label": "Crossdesk Base URL", "group": "上游模型覆盖", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "CROSSDESK_API_KEY", "label": "Crossdesk API Key", "group": "上游模型覆盖", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_MODEL", "label": "Grok 模型", "group": "牛牛美股", "kind": "text", "default": "grok-4.20-multi-agent-xhigh", "effect": "next_run"},
+    {"name": "DASHBOARD_GROK_CONTEXT_LENGTH", "label": "Grok 模型上下文长度", "group": "牛牛美股", "kind": "context_length", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_BASE_URL", "label": "Grok API 地址", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_API_KEY", "label": "Grok API 密钥", "group": "牛牛美股", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_MODEL", "label": "消息面预检模型", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_NEWS_CONTEXT_LENGTH", "label": "消息面预检上下文长度", "group": "消息面预检模型", "kind": "context_length", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_BASE_URL", "label": "消息面预检 API 地址", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_API_KEY", "label": "消息面预检 API 密钥", "group": "消息面预检模型", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_TIMEOUT", "label": "消息面预检请求超时", "group": "消息面预检模型", "kind": "int", "default": "45", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_MAX_RETRIES", "label": "消息面预检最大请求次数", "group": "消息面预检模型", "kind": "int", "default": "1", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_MODEL", "label": "买卖决策模型", "group": "买卖决策模型", "kind": "text", "default": "deepseek-v4-pro", "effect": "next_run"},
+    {"name": "DASHBOARD_DECISION_CONTEXT_LENGTH", "label": "买卖决策上下文长度", "group": "买卖决策模型", "kind": "context_length", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_BASE_URL", "label": "买卖决策 API 地址", "group": "买卖决策模型", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_API_KEY", "label": "买卖决策 API 密钥", "group": "买卖决策模型", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_US_MARKET_SUMMARY_CRON", "label": "隔夜美股盘面总结时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "0 8 * * 1-5", "effect": "next_run"},
@@ -258,6 +262,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_MARKET_CLOSE_CRON", "label": "盘后监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "10 15 * * 1-5", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_ENABLED", "label": "A股盘面模型总结", "group": "盘面监控生产时间点", "kind": "bool", "default": "1", "effect": "next_run", "bool_no_default": "1"},
     {"name": "A_SHARE_MODEL_SUMMARY_MODEL", "label": "A股盘面总结模型", "group": "盘面监控生产时间点", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "A_SHARE_MODEL_SUMMARY_CONTEXT_LENGTH", "label": "A股盘面总结上下文长度", "group": "盘面监控生产时间点", "kind": "context_length", "default": "", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_BASE_URL", "label": "A股盘面总结 API地址", "group": "盘面监控生产时间点", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_API_KEY", "label": "A股盘面总结 API密钥", "group": "盘面监控生产时间点", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_DEADLINE_SECONDS", "label": "A股模型总结总超时秒数", "group": "盘面监控生产时间点", "kind": "int", "default": "60", "effect": "next_run"},
@@ -291,19 +296,23 @@ ENV_CONFIG_BY_NAME = {item["name"]: item for item in ENV_CONFIG_SCHEMA}
 ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_US_FEATURES_ENABLED",
     "DASHBOARD_GROK_MODEL",
+    "DASHBOARD_GROK_CONTEXT_LENGTH",
     "DASHBOARD_GROK_BASE_URL",
     "DASHBOARD_GROK_API_KEY",
     "X_WATCHLIST_ACCOUNTS",
     "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
     "DASHBOARD_US_RATING_CRON",
+    "US_RATING_CONTEXT_LENGTH",
     "US_RATING_DEADLINE_SECONDS",
     "US_RATING_REQUEST_TIMEOUT_SECONDS",
     "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_BASE_URL",
     "DASHBOARD_NEWS_API_KEY",
     "DASHBOARD_NEWS_TIMEOUT",
     "DASHBOARD_NEWS_MAX_RETRIES",
     "DASHBOARD_DECISION_MODEL",
+    "DASHBOARD_DECISION_CONTEXT_LENGTH",
     "DASHBOARD_DECISION_BASE_URL",
     "DASHBOARD_DECISION_API_KEY",
     "DASHBOARD_DECISION_MAX_TOKENS",
@@ -331,6 +340,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_MARKET_CLOSE_CRON",
     "A_SHARE_MODEL_SUMMARY_ENABLED",
     "A_SHARE_MODEL_SUMMARY_MODEL",
+    "A_SHARE_MODEL_SUMMARY_CONTEXT_LENGTH",
     "A_SHARE_MODEL_SUMMARY_BASE_URL",
     "A_SHARE_MODEL_SUMMARY_API_KEY",
     "A_SHARE_MODEL_SUMMARY_DEADLINE_SECONDS",
@@ -341,11 +351,13 @@ ADMIN_VISIBLE_ENV_NAMES = [
 ]
 TRADER_RUNTIME_ENV_NAMES = {
     "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_BASE_URL",
     "DASHBOARD_NEWS_API_KEY",
     "DASHBOARD_NEWS_TIMEOUT",
     "DASHBOARD_NEWS_MAX_RETRIES",
     "DASHBOARD_DECISION_MODEL",
+    "DASHBOARD_DECISION_CONTEXT_LENGTH",
     "DASHBOARD_DECISION_BASE_URL",
     "DASHBOARD_DECISION_API_KEY",
     "DASHBOARD_DECISION_MAX_TOKENS",
@@ -1747,12 +1759,31 @@ def quote_env_value(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
+def normalize_context_length_update(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    compact = raw.replace(",", "").replace("_", "").strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmM]?)", compact)
+    if not match:
+        raise ValueError("上下文长度请填写 token 数，例如 128K、1M 或 1000000")
+    number = float(match.group(1))
+    unit = match.group(2).lower()
+    multiplier = 1_000_000 if unit == "m" else 1_000 if unit == "k" else 1
+    normalized = int(number * multiplier)
+    if normalized <= 0:
+        raise ValueError("上下文长度必须大于 0")
+    return str(normalized)
+
+
 def normalize_env_update(name: str, value: str, kind: str) -> str:
     value = str(value or "").strip()
     if kind == "bool":
         return "1" if value.lower() in {"1", "true", "yes", "on"} else "0"
     if kind == "int" and value:
         int(value)
+    if kind == "context_length":
+        return normalize_context_length_update(value)
     if kind == "time":
         normalized = normalize_hhmm(value)
         if value and not normalized:
@@ -1930,12 +1961,12 @@ CRON_TIME_CONFIGS = {
     "DASHBOARD_US_RATING_CRON": {"day_label": "每天"},
 }
 ADMIN_GROUP_NOTES = {
-    "牛牛美股": "集中管理 X/推文监控、美股买入评级和隔夜美股盘面总结使用的 Grok 配置。开启后显示并启用相关设置；关闭时隐藏 X/评级相关设置，隔夜美股总结仍会读取已配置的 Grok 参数。",
-    "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。留空则跳过。",
-    "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。",
+    "牛牛美股": "集中管理 X/推文监控、美股买入评级和隔夜美股盘面总结使用的 Grok 配置。上下文长度单位为 tokens，可填 1M；关闭时隐藏 X/评级相关设置，隔夜美股总结仍会读取已配置的 Grok 参数。",
+    "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。上下文长度单位为 tokens，可填 1M。留空则跳过。",
+    "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。上下文长度单位为 tokens，可填 1M。",
     "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
     "选股策略": "在内置策略和预设文字策略中选择一个激活；内置策略可选基础策略、Z哥或李大霄。",
-    "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发。",
+    "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；模型上下文长度单位为 tokens，可填 1M。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
 }
 US_FEATURE_GATED_GROUPS = {
@@ -1944,7 +1975,9 @@ US_FEATURE_GATED_GROUPS = {
 US_FEATURE_GATED_NAMES = {
     "US_RATING_BASE_URL",
     "US_RATING_API_KEY",
+    "US_RATING_CONTEXT_LENGTH",
     "DASHBOARD_GROK_MODEL",
+    "DASHBOARD_GROK_CONTEXT_LENGTH",
     "DASHBOARD_GROK_BASE_URL",
     "DASHBOARD_GROK_API_KEY",
     "X_WATCHLIST_ACCOUNTS",
@@ -2133,6 +2166,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_preset_strategy_text_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "trade_discipline_text":
             normalized[name] = normalize_trade_discipline_text_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "context_length":
+            normalized[name] = normalize_context_length_update(normalized[name])
     return normalized
 
 
@@ -2203,6 +2238,8 @@ def validate_business_updates(updates: dict[str, str]) -> None:
         elif name in {"US_RATING_DEADLINE_SECONDS", "US_RATING_REQUEST_TIMEOUT_SECONDS"} and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "context_length":
+            normalize_context_length_update(value)
 
 
 def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str] | tuple[str, ...] | None) -> dict[str, Any]:
@@ -6846,6 +6883,12 @@ def render_env_input(item: dict[str, Any]) -> str:
             f"<input type='hidden' name='{field_name}' value=''>"
             + "".join(option_html)
             + "</div><div class='config-meta'>每次只启用一个内置策略</div>"
+        )
+    if kind == "context_length":
+        return (
+            f"<input type='text' name='env__{escaped_name}' value='{html.escape(value)}' "
+            "placeholder='例如 128K、1M 或 1000000' inputmode='numeric'>"
+            "<div class='config-meta'>单位为 tokens；可填 1M、128K 或完整数字，保存后写入数字 token 数</div>"
         )
     input_type = "number" if kind == "int" else "text"
     return f"<input type='{input_type}' name='env__{escaped_name}' value='{html.escape(value)}'>"
