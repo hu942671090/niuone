@@ -173,7 +173,6 @@ def call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = A_SHARE_M
         "model": A_SHARE_MODEL_SUMMARY_MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.2,
         "stream": False,
     }).encode("utf-8")
     req = Request(
@@ -182,6 +181,8 @@ def call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = A_SHARE_M
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": "OpenAI/Python 1.0",
         },
     )
     deadline = time.monotonic() + max(15, A_SHARE_MODEL_SUMMARY_DEADLINE_SECONDS)

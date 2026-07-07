@@ -282,7 +282,6 @@ def _call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = US_MARKE
         "model": US_MARKET_SUMMARY_MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.25,
         "stream": False,
     }).encode("utf-8")
     req = Request(
@@ -291,6 +290,8 @@ def _call_grok_api(messages: list[dict[str, str]], *, max_tokens: int = US_MARKE
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": "OpenAI/Python 1.0",
         },
     )
     deadline = time.monotonic() + max(30, US_MARKET_SUMMARY_DEADLINE_SECONDS)

@@ -39,6 +39,41 @@ class AShareGrokSummaryTests(unittest.TestCase):
         self.assertEqual(mod.A_SHARE_MODEL_SUMMARY_MAX_TOKENS, 256000)
         self.assertEqual(mod.call_grok_api.__kwdefaults__["max_tokens"], 256000)
 
+    def test_call_grok_api_omits_temperature_by_default(self):
+        mod = load_module()
+        captured = {}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        original_credentials = mod._get_grok_credentials
+        original_urlopen = mod.urlopen
+        try:
+            mod._get_grok_credentials = lambda: ("https://ashare.example/v1", "secret")
+
+            def fake_urlopen(req, timeout=0, context=None):
+                captured["payload"] = json.loads(req.data.decode("utf-8"))
+                captured["headers"] = dict(req.header_items())
+                return Resp()
+
+            mod.urlopen = fake_urlopen
+            mod.call_grok_api([{"role": "user", "content": "hello"}], max_tokens=123)
+        finally:
+            mod._get_grok_credentials = original_credentials
+            mod.urlopen = original_urlopen
+
+        self.assertEqual(captured["payload"]["max_tokens"], 123)
+        self.assertNotIn("temperature", captured["payload"])
+        self.assertEqual(captured["headers"]["User-agent"], "OpenAI/Python 1.0")
+        self.assertEqual(captured["headers"]["Accept"], "application/json")
+
     def test_parse_accepts_json_fence(self):
         mod = load_module()
 

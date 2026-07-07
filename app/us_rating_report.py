@@ -147,7 +147,6 @@ def _call_api(base_url, api_key, messages, max_tokens=8192):
         "model": US_RATING_MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.3,
         "stream": False,
     }).encode("utf-8")
 
@@ -157,6 +156,8 @@ def _call_api(base_url, api_key, messages, max_tokens=8192):
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": "OpenAI/Python 1.0",
         },
     )
     last_err = None

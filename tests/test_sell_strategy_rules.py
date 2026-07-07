@@ -1430,6 +1430,7 @@ class SellStrategyRuleTests(unittest.TestCase):
 
         prompt = captured["payload"]["messages"][0]["content"]
         self.assertEqual(result["summary"], "ok")
+        self.assertNotIn("temperature", captured["payload"])
         self.assertIn("当前激活策略来源：预设文字策略", prompt)
         self.assertIn("系统底线风控", prompt)
         self.assertIn("Z哥买入战法和卖出风控不作为本轮新增仓依据", prompt)

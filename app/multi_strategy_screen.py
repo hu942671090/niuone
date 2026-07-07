@@ -1779,9 +1779,17 @@ def grok_industry_classify(candidates: list[dict]) -> None:
         base = crossdesk["base_url"].rstrip("/"); api_key = crossdesk["api_key"]
         stock_list = "\n".join(f"{c['code']} {c['name']}" for c in candidates)
         prompt = f"对以下A股每只给一个简短行业标签（如通信设备、半导体、汽车零部件）。只输出：代码 名称：行业\n\n{stock_list}"
-        payload = {"model":"grok-4.20-multi-agent-xhigh","messages":[{"role":"user","content":prompt}],"temperature":0,"max_tokens":200}
-        req = urllib.request.Request(f"{base}/chat/completions", data=json.dumps(payload).encode(),
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"})
+        payload = {"model":"grok-4.20-multi-agent-xhigh","messages":[{"role":"user","content":prompt}],"max_tokens":200}
+        req = urllib.request.Request(
+            f"{base}/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "OpenAI/Python 1.0",
+            },
+        )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8","ignore"))
         for line in data["choices"][0]["message"]["content"].strip().split("\n"):

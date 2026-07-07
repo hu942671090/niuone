@@ -235,13 +235,17 @@ def openai_chat_json(base_url, api_key, prompt, max_tokens, timeout=REQUEST_TIME
     payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
         "max_tokens": max_tokens,
     }
     req = urllib.request.Request(
         base_url + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "OpenAI/Python 1.0",
+        },
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8", "ignore")

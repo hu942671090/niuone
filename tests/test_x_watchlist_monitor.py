@@ -42,6 +42,41 @@ print(json.dumps({{
             self.assertEqual(data['configured'], 128000)
             self.assertEqual(data['max_tokens'], 128000)
 
+    def test_openai_chat_json_omits_temperature_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            code = f"""
+import importlib.util, json, sys
+sys.path.insert(0, {str(SRC)!r})
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+captured = {{}}
+class Resp:
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+    def read(self):
+        return b'{{"choices":[{{"message":{{"content":"{{\\\\\\"accounts\\\\\\":[]}}"}}}}]}}'
+def fake_urlopen(req, timeout=0):
+    captured['payload'] = json.loads(req.data.decode('utf-8'))
+    captured['headers'] = dict(req.header_items())
+    return Resp()
+m.urllib.request.urlopen = fake_urlopen
+m.openai_chat_json('https://x.example/v1', 'secret', 'return JSON', 123, timeout=3)
+print(json.dumps(captured, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            captured = json.loads(out)
+            payload = captured['payload']
+            self.assertEqual(payload['max_tokens'], 123)
+            self.assertNotIn('temperature', payload)
+            self.assertEqual(captured['headers']['User-agent'], 'OpenAI/Python 1.0')
+            self.assertEqual(captured['headers']['Accept'], 'application/json')
+
     def test_paths_are_dashboard_home_scoped_and_telegram_helpers_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()

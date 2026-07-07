@@ -41,6 +41,41 @@ class UsMarketSummaryTests(unittest.TestCase):
         self.assertEqual(mod.US_MARKET_SUMMARY_MAX_TOKENS, 128000)
         self.assertEqual(mod._call_grok_api.__kwdefaults__["max_tokens"], 128000)
 
+    def test_grok_api_omits_temperature_by_default(self):
+        mod = load_module()
+        captured = {}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        original_credentials = mod._get_grok_credentials
+        original_urlopen = mod.urlopen
+        try:
+            mod._get_grok_credentials = lambda: ("https://summary.example/v1", "secret")
+
+            def fake_urlopen(req, timeout=0, context=None):
+                captured["payload"] = json.loads(req.data.decode("utf-8"))
+                captured["headers"] = dict(req.header_items())
+                return Resp()
+
+            mod.urlopen = fake_urlopen
+            mod._call_grok_api([{"role": "user", "content": "hello"}], max_tokens=123)
+        finally:
+            mod._get_grok_credentials = original_credentials
+            mod.urlopen = original_urlopen
+
+        self.assertEqual(captured["payload"]["max_tokens"], 123)
+        self.assertNotIn("temperature", captured["payload"])
+        self.assertEqual(captured["headers"]["User-agent"], "OpenAI/Python 1.0")
+        self.assertEqual(captured["headers"]["Accept"], "application/json")
+
     def test_previous_us_session_date_uses_friday_on_monday(self):
         mod = load_module()
 

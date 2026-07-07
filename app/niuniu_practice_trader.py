@@ -4053,7 +4053,12 @@ def request_chat_content(base_url: str, api_key: str, payload: dict, model_name:
             req = urllib.request.Request(
                 base_url + "/chat/completions",
                 data=json.dumps(request_payload).encode("utf-8"),
-                headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+                headers={
+                    "Authorization": "Bearer " + api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "OpenAI/Python 1.0",
+                },
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8", "ignore")
@@ -4083,7 +4088,12 @@ def api_call_with_retry(base_url: str, api_key: str, payload: dict, max_retries:
             req = urllib.request.Request(
                 base_url + "/chat/completions",
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+                headers={
+                    "Authorization": "Bearer " + api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "OpenAI/Python 1.0",
+                },
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8", "ignore")
@@ -4205,7 +4215,6 @@ def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
         "max_tokens": NEWS_PRECHECK_MAX_TOKENS,
     }
     content = request_chat_content(
@@ -4479,7 +4488,6 @@ Z哥卖出风控（属于Z哥体系）：
     payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
         "max_tokens": DECISION_MAX_TOKENS,
     }
 
@@ -4631,7 +4639,6 @@ def refine_overlimit_buy_actions(
         payload = {
             "model": MODEL,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
             "max_tokens": min(DECISION_MAX_TOKENS, 2500),
         }
         content = request_chat_content(base_url, api_key, payload, MODEL, max_retries=2, timeout=DECISION_REQUEST_TIMEOUT)

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -91,11 +92,87 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         self.assertEqual(captured["base_url"], "https://news.example/v1")
         self.assertEqual(captured["api_key"], "news-secret")
         self.assertEqual(captured["payload"]["model"], "search-model")
+        self.assertNotIn("temperature", captured["payload"])
         self.assertEqual(captured["model_name"], "search-model")
         self.assertEqual(captured["max_retries"], 1)
         self.assertEqual(captured["timeout"], 45)
         self.assertIn("【消息面预检（实时搜索）】", result)
         self.assertNotIn("Grok", result)
+
+    def test_request_chat_content_sends_compatible_user_agent(self):
+        module = import_trader_with_env({})
+        captured = {}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        original_urlopen = module.urllib.request.urlopen
+        try:
+            def fake_urlopen(req, timeout=0):
+                captured["headers"] = dict(req.header_items())
+                captured["payload"] = json.loads(req.data.decode("utf-8"))
+                return Resp()
+
+            module.urllib.request.urlopen = fake_urlopen
+            result = module.request_chat_content(
+                "https://news.example/v1",
+                "secret",
+                {"messages": [{"role": "user", "content": "hello"}]},
+                "search-model",
+                max_retries=1,
+                timeout=3,
+            )
+        finally:
+            module.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(captured["payload"]["model"], "search-model")
+        self.assertEqual(captured["headers"]["User-agent"], "OpenAI/Python 1.0")
+        self.assertEqual(captured["headers"]["Accept"], "application/json")
+
+    def test_api_call_with_retry_sends_compatible_user_agent(self):
+        module = import_trader_with_env({})
+        captured = {}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok":true}'
+
+        original_urlopen = module.urllib.request.urlopen
+        try:
+            def fake_urlopen(req, timeout=0):
+                captured["headers"] = dict(req.header_items())
+                captured["payload"] = json.loads(req.data.decode("utf-8"))
+                return Resp()
+
+            module.urllib.request.urlopen = fake_urlopen
+            result = module.api_call_with_retry(
+                "https://decision.example/v1",
+                "secret",
+                {"model": "decision-model", "messages": [{"role": "user", "content": "hello"}]},
+                max_retries=1,
+                timeout=3,
+            )
+        finally:
+            module.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(captured["payload"]["model"], "decision-model")
+        self.assertEqual(captured["headers"]["User-agent"], "OpenAI/Python 1.0")
+        self.assertEqual(captured["headers"]["Accept"], "application/json")
 
     def test_news_precheck_honors_timeout_overrides(self):
         module = import_trader_with_env({

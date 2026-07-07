@@ -13,6 +13,40 @@ SRC = ROOT / 'app'
 
 
 class UsRatingReportTests(unittest.TestCase):
+    def test_call_api_omits_temperature_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            code = f"""
+import importlib.util, json, sys
+sys.path.insert(0, {str(SRC)!r})
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+captured = {{}}
+class Resp:
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+    def read(self):
+        return b'{{"choices":[{{"message":{{"content":"ok"}}}}]}}'
+def fake_urlopen(req, timeout=0, context=None):
+    captured['payload'] = json.loads(req.data.decode('utf-8'))
+    captured['headers'] = dict(req.header_items())
+    return Resp()
+m.urlopen = fake_urlopen
+m._call_api('https://rating.example/v1', 'secret', [{{'role':'user','content':'hello'}}], max_tokens=123)
+print(json.dumps(captured, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            captured = json.loads(out)
+            payload = captured['payload']
+            self.assertEqual(payload['max_tokens'], 123)
+            self.assertNotIn('temperature', payload)
+            self.assertEqual(captured['headers']['User-agent'], 'OpenAI/Python 1.0')
+            self.assertEqual(captured['headers']['Accept'], 'application/json')
+
     def test_us_rating_context_length_sets_report_max_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
