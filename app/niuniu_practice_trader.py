@@ -100,6 +100,8 @@ def load_dashboard_env() -> None:
         "DASHBOARD_NEWS_MODEL",
         "DASHBOARD_NEWS_BASE_URL",
         "DASHBOARD_NEWS_API_KEY",
+        "DASHBOARD_NEWS_TIMEOUT",
+        "DASHBOARD_NEWS_MAX_RETRIES",
         "DASHBOARD_DECISION_MODEL",
         "DASHBOARD_DECISION_BASE_URL",
         "DASHBOARD_DECISION_API_KEY",
@@ -269,6 +271,8 @@ EASTMONEY_UT = "bd1d9ddb04089700cf9c27f6f7426281"
 MODEL = os.environ.get("DASHBOARD_DECISION_MODEL") or "deepseek-v4-pro"
 DECISION_MAX_TOKENS = env_int("DASHBOARD_DECISION_MAX_TOKENS", 6000)
 DECISION_REQUEST_TIMEOUT = env_int("DASHBOARD_DECISION_TIMEOUT", 180)
+NEWS_PRECHECK_REQUEST_TIMEOUT = max(5, env_int("DASHBOARD_NEWS_TIMEOUT", 45))
+NEWS_PRECHECK_MAX_RETRIES = max(1, env_int("DASHBOARD_NEWS_MAX_RETRIES", 1))
 PROVIDER_DISPLAY_NAME = "Crossdesk.ccwu.cc"
 CROSSDESK_PROVIDER_NAME = "Crossdesk.ccwu.cc"
 TRADE_LOG_LIMIT = 200
@@ -4186,8 +4190,14 @@ def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
         "temperature": 0,
         "max_tokens": 600,
     }
-    data = api_call_with_retry(base_url, api_key, payload, max_retries=2, timeout=45)
-    content = data["choices"][0]["message"]["content"]
+    content = request_chat_content(
+        base_url,
+        api_key,
+        payload,
+        model,
+        max_retries=NEWS_PRECHECK_MAX_RETRIES,
+        timeout=NEWS_PRECHECK_REQUEST_TIMEOUT,
+    )
     return f"【消息面预检（实时搜索）】\n{content.strip()}"
 
 

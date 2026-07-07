@@ -12,6 +12,8 @@ NEWS_ENV_KEYS = {
     "DASHBOARD_NEWS_MODEL",
     "DASHBOARD_NEWS_BASE_URL",
     "DASHBOARD_NEWS_API_KEY",
+    "DASHBOARD_NEWS_TIMEOUT",
+    "DASHBOARD_NEWS_MAX_RETRIES",
     "DASHBOARD_GROK_MODEL",
     "DASHBOARD_GROK_BASE_URL",
     "DASHBOARD_GROK_API_KEY",
@@ -71,24 +73,62 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         })
         captured = {}
 
-        def fake_api_call(base_url, api_key, payload, max_retries=3, timeout=60):
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
             captured.update({
                 "base_url": base_url,
                 "api_key": api_key,
                 "payload": payload,
+                "model_name": model_name,
                 "max_retries": max_retries,
                 "timeout": timeout,
             })
-            return {"choices": [{"message": {"content": "- 000001 平安银行：无重大消息（中性）"}}]}
+            return "- 000001 平安银行：无重大消息（中性）"
 
-        module.api_call_with_retry = fake_api_call
+        module.request_chat_content = fake_request
         result = module.check_candidate_news_precheck([{"code": "000001", "name": "平安银行"}])
 
         self.assertEqual(captured["base_url"], "https://news.example/v1")
         self.assertEqual(captured["api_key"], "news-secret")
         self.assertEqual(captured["payload"]["model"], "search-model")
+        self.assertEqual(captured["model_name"], "search-model")
+        self.assertEqual(captured["max_retries"], 1)
+        self.assertEqual(captured["timeout"], 45)
         self.assertIn("【消息面预检（实时搜索）】", result)
         self.assertNotIn("Grok", result)
+
+    def test_news_precheck_honors_timeout_overrides(self):
+        module = import_trader_with_env({
+            "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
+            "DASHBOARD_NEWS_API_KEY": "news-secret",
+            "DASHBOARD_NEWS_MODEL": "search-model",
+            "DASHBOARD_NEWS_TIMEOUT": "30",
+            "DASHBOARD_NEWS_MAX_RETRIES": "2",
+        })
+        captured = {}
+
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+            captured.update({"max_retries": max_retries, "timeout": timeout})
+            return "- 000001 平安银行：无重大消息（中性）"
+
+        module.request_chat_content = fake_request
+        module.check_candidate_news_precheck([{"code": "000001", "name": "平安银行"}])
+
+        self.assertEqual(captured["max_retries"], 2)
+        self.assertEqual(captured["timeout"], 30)
+
+    def test_parse_chat_completion_content_accepts_sse_stream(self):
+        module = import_trader_with_env({})
+        raw = (
+            'data: {"choices":[{"delta":{"content":"- 000001 平安银行："}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"消息稳定（中性）"},"finish_reason":"stop"}]}\n\n'
+            "data: [DONE]\n\n"
+        )
+
+        content, detail = module.parse_chat_completion_content(raw)
+
+        self.assertEqual(content, "- 000001 平安银行：消息稳定（中性）")
+        self.assertIn("sse_chunks=2", detail)
+        self.assertIn("finish_reason=stop", detail)
 
 
 if __name__ == "__main__":
