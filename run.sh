@@ -14,6 +14,7 @@ Usage:
 Options:
   --no-browser     Do not open the browser automatically
   --skip-install   Skip dependency installation
+  --port VALUE     Save the dashboard port to dashboard.env before starting
   --admin-password VALUE
                   Save the admin password to dashboard.env before starting
   -h, --help       Show this help
@@ -28,10 +29,26 @@ Environment:
 EOF
 }
 
+normalize_port_arg() {
+  local value="$1"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "--port must be an integer between 1 and 65535" >&2
+    return 1
+  fi
+  local port_num=$((10#$value))
+  if (( port_num < 1 || port_num > 65535 )); then
+    echo "--port must be an integer between 1 and 65535" >&2
+    return 1
+  fi
+  printf '%s\n' "$port_num"
+}
+
 OPEN_BROWSER="${NIUONE_OPEN_BROWSER:-1}"
 INSTALL_DEPS="${NIUONE_INSTALL_DEPS:-1}"
 ADMIN_PASSWORD_ARG=""
 ADMIN_PASSWORD_ARG_SET=0
+PORT_ARG=""
+PORT_ARG_SET=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +57,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-install)
       INSTALL_DEPS=0
+      ;;
+    --port)
+      if [[ $# -lt 2 ]]; then
+        echo "--port requires a value" >&2
+        usage >&2
+        exit 2
+      fi
+      if ! PORT_ARG="$(normalize_port_arg "$2")"; then
+        usage >&2
+        exit 2
+      fi
+      PORT_ARG_SET=1
+      shift
+      ;;
+    --port=*)
+      if ! PORT_ARG="$(normalize_port_arg "${1#*=}")"; then
+        usage >&2
+        exit 2
+      fi
+      PORT_ARG_SET=1
       ;;
     --admin-password)
       if [[ $# -lt 2 ]]; then
@@ -126,8 +163,8 @@ create_default_env() {
     write_env_value DASHBOARD_PORTFOLIO_STATE "$LOCAL_DATA_DIR/runtime/cron/output/niuniu_practice_portfolio.json"
     write_env_value DASHBOARD_TRADER_SCRIPT "$ROOT/app/niuniu_practice_trader.py"
     echo
-    echo "# Local-first default: no login required on 127.0.0.1."
-    echo "# If you expose the dashboard beyond your own machine, set this to 1 and configure access."
+    echo "# Local default: no login required on 127.0.0.1."
+    echo "# Set this to 1 if you want browser access protection."
     write_env_value DASHBOARD_AUTH_ENABLED "${DASHBOARD_AUTH_ENABLED:-0}"
     write_env_value DASHBOARD_ADMIN_PASSWORD "${DASHBOARD_ADMIN_PASSWORD:-}"
   } > "$ENV_FILE"
@@ -138,6 +175,11 @@ create_default_env() {
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "== First run: creating private runtime files =="
   create_default_env
+fi
+
+if [[ "$PORT_ARG_SET" == "1" ]]; then
+  save_env_value DASHBOARD_PORT "$PORT_ARG"
+  echo "== Saved dashboard port to $ENV_FILE =="
 fi
 
 if [[ "$ADMIN_PASSWORD_ARG_SET" == "1" ]]; then
