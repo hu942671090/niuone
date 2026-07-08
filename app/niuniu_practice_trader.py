@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
-from niuone_paths import get_dashboard_home
+from niuone_paths import get_dashboard_env_file, get_dashboard_home
 from strategy_registry import (
     PRESET_STRATEGY_TEXT_ENV,
     PERSONA_STRATEGY_ENV,
@@ -145,7 +145,7 @@ def load_dashboard_env() -> None:
         "CROSSDESK_BASE_URL",
         "CROSSDESK_API_KEY",
     }
-    path = PROJECT_ROOT / "dashboard.env"
+    path = get_dashboard_env_file(PROJECT_ROOT)
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -3963,9 +3963,16 @@ def extract_json(text: str) -> Any:
     except Exception:
         m = re.search(r"[\[{]", text)
         if not m:
-            raise
-        obj, _ = decoder.raw_decode(text[m.start():])
-        return obj
+            raise ValueError(
+                f"模型回复无JSON起始符号。max_tokens可能需要上调。前150字符: {clip_text(text, 150)}"
+            )
+        try:
+            obj, _ = decoder.raw_decode(text[m.start():])
+            return obj
+        except Exception as e:
+            raise ValueError(
+                f"模型回复JSON解析失败：{e}。max_tokens可能不足或回复被截断。前150字符: {clip_text(text, 150)}"
+            )
 
 
 def clip_text(text: str, limit: int = 600) -> str:
@@ -4032,7 +4039,10 @@ def parse_chat_completion_content(raw: str) -> tuple[str, str]:
             detail_bits.append(f"usage={usage}")
         return "".join(parts), ", ".join(detail_bits)
 
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        raise ValueError(f"模型返回了非JSON内容，请检查max_tokens/超时是否够用。前150字符: {clip_text(raw, 150)}")
     choice = (data.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     content = message.get("content") or ""
