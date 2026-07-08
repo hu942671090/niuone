@@ -225,7 +225,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_CRON_MAX_ATTEMPTS", "label": "Cron 失败最大运行次数", "group": "任务调度", "kind": "int", "default": "2", "effect": "next_run"},
     {"name": "DASHBOARD_CRON_RETRY_DELAY_SECONDS", "label": "Cron 失败重试间隔秒数", "group": "任务调度", "kind": "int", "default": "300", "effect": "next_run"},
     {"name": "DASHBOARD_PENDING_DECISION_POLL_SECONDS", "label": "延迟成交检查秒数", "group": "任务调度", "kind": "int", "default": "5", "effect": "restart"},
-    {"name": "DASHBOARD_DECISION_MAX_TOKENS", "label": "决策最大输出长度", "group": "买卖决策模型", "kind": "int", "default": "6000", "effect": "next_run"},
+    {"name": "DASHBOARD_DECISION_MAX_TOKENS", "label": "决策最大输出长度", "group": "买卖决策模型", "kind": "max_tokens", "default": "6000", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_TIMEOUT", "label": "决策请求超时", "group": "买卖决策模型", "kind": "int", "default": "180", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_ENABLED", "label": "启用全局情报包", "group": "买卖决策模型", "kind": "bool", "default": "1", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", "label": "情报包缓存秒数", "group": "买卖决策模型", "kind": "int", "default": "75", "effect": "next_run"},
@@ -243,16 +243,16 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "US_RATING_BASE_URL", "label": "美股评级 API Base URL", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "US_RATING_API_KEY", "label": "美股评级 API Key", "group": "牛牛美股", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "US_RATING_CONTEXT_LENGTH", "label": "美股评级上下文长度", "group": "牛牛美股", "kind": "context_length", "default": "", "effect": "next_run"},
-    {"name": "US_RATING_MAX_TOKENS", "label": "美股评级最大输出长度", "group": "牛牛美股", "kind": "int", "default": "8192", "effect": "next_run"},
+    {"name": "US_RATING_MAX_TOKENS", "label": "美股评级最大输出长度", "group": "牛牛美股", "kind": "max_tokens", "default": "8192", "effect": "next_run"},
     {"name": "CROSSDESK_BASE_URL", "label": "Crossdesk Base URL", "group": "上游模型覆盖", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "CROSSDESK_API_KEY", "label": "Crossdesk API Key", "group": "上游模型覆盖", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_MODEL", "label": "Grok 模型", "group": "牛牛美股", "kind": "text", "default": "grok-4.20-multi-agent-xhigh", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_CONTEXT_LENGTH", "label": "Grok 模型上下文长度", "group": "牛牛美股", "kind": "context_length", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_GROK_MAX_TOKENS", "label": "Grok 最大输出长度", "group": "牛牛美股", "kind": "int", "default": "2200", "effect": "next_run"},
+    {"name": "DASHBOARD_GROK_MAX_TOKENS", "label": "Grok 最大输出长度", "group": "牛牛美股", "kind": "max_tokens", "default": "2200", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_BASE_URL", "label": "Grok API 地址", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_MODEL", "label": "消息面预检模型", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_CONTEXT_LENGTH", "label": "消息面预检上下文长度", "group": "消息面预检模型", "kind": "context_length", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_NEWS_MAX_TOKENS", "label": "消息面预检最大输出长度", "group": "消息面预检模型", "kind": "int", "default": "600", "effect": "next_run"},
+    {"name": "DASHBOARD_NEWS_MAX_TOKENS", "label": "消息面预检最大输出长度", "group": "消息面预检模型", "kind": "max_tokens", "default": "600", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_BASE_URL", "label": "消息面预检 API 地址", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_API_KEY", "label": "消息面预检 API 密钥", "group": "消息面预检模型", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_TIMEOUT", "label": "消息面预检请求超时", "group": "消息面预检模型", "kind": "int", "default": "45", "effect": "next_run"},
@@ -262,20 +262,20 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_DECISION_BASE_URL", "label": "买卖决策 API 地址", "group": "买卖决策模型", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_API_KEY", "label": "买卖决策 API 密钥", "group": "买卖决策模型", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_US_MARKET_SUMMARY_CRON", "label": "隔夜美股盘面总结时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "0 8 * * 1-5", "effect": "next_run"},
-    {"name": "US_MARKET_SUMMARY_MAX_TOKENS", "label": "隔夜美股总结最大输出长度", "group": "盘面监控生产时间点", "kind": "int", "default": "2200", "effect": "next_run"},
+    {"name": "US_MARKET_SUMMARY_MAX_TOKENS", "label": "隔夜美股总结最大输出长度", "group": "盘面监控生产时间点", "kind": "max_tokens", "default": "2200", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_AUCTION_CRON", "label": "盘前竞价监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "25 9 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_MIDDAY_CRON", "label": "午盘监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "40 11 * * 1-5", "effect": "next_run"},
     {"name": "DASHBOARD_MARKET_CLOSE_CRON", "label": "盘后监控时间", "group": "盘面监控生产时间点", "kind": "cron_time", "default": "10 15 * * 1-5", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_ENABLED", "label": "A股盘面模型总结", "group": "盘面监控生产时间点", "kind": "bool", "default": "1", "effect": "next_run", "bool_no_default": "1"},
     {"name": "A_SHARE_MODEL_SUMMARY_MODEL", "label": "A股盘面总结模型", "group": "盘面监控生产时间点", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_CONTEXT_LENGTH", "label": "A股盘面总结上下文长度", "group": "盘面监控生产时间点", "kind": "context_length", "default": "", "effect": "next_run"},
-    {"name": "A_SHARE_MODEL_SUMMARY_MAX_TOKENS", "label": "A股盘面总结最大输出长度", "group": "盘面监控生产时间点", "kind": "int", "default": "1800", "effect": "next_run"},
+    {"name": "A_SHARE_MODEL_SUMMARY_MAX_TOKENS", "label": "A股盘面总结最大输出长度", "group": "盘面监控生产时间点", "kind": "max_tokens", "default": "1800", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_BASE_URL", "label": "A股盘面总结 API地址", "group": "盘面监控生产时间点", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_API_KEY", "label": "A股盘面总结 API密钥", "group": "盘面监控生产时间点", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_DEADLINE_SECONDS", "label": "A股模型总结总超时秒数", "group": "盘面监控生产时间点", "kind": "int", "default": "60", "effect": "next_run"},
     {"name": "A_SHARE_MODEL_SUMMARY_REQUEST_TIMEOUT_SECONDS", "label": "A股模型总结单次超时秒数", "group": "盘面监控生产时间点", "kind": "int", "default": "45", "effect": "next_run"},
     {"name": "X_WATCHLIST_ACCOUNTS", "label": "推文监控作者", "group": "牛牛美股", "kind": "handle_list", "default": "", "effect": "next_run"},
-    {"name": "X_WATCHLIST_MAX_TOKENS", "label": "X 监控最大输出长度", "group": "牛牛美股", "kind": "int", "default": "", "effect": "next_run"},
+    {"name": "X_WATCHLIST_MAX_TOKENS", "label": "X 监控最大输出长度", "group": "牛牛美股", "kind": "max_tokens", "default": "", "effect": "next_run"},
     {"name": "X_WATCHLIST_DAEMON_INTERVAL_SECONDS", "label": "推文监控间隔", "group": "牛牛美股", "kind": "int", "default": "1200", "effect": "next_run"},
     {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "牛牛美股", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
     {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "牛牛美股", "kind": "int", "default": "240", "effect": "next_run"},
@@ -1798,7 +1798,7 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         return "1" if value.lower() in {"1", "true", "yes", "on"} else "0"
     if kind == "int" and value:
         int(value)
-    if kind == "context_length":
+    if kind in {"max_tokens", "context_length"}:
         return normalize_context_length_update(value)
     if kind == "time":
         normalized = normalize_hhmm(value)
@@ -2184,7 +2184,7 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_preset_strategy_text_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "trade_discipline_text":
             normalized[name] = normalize_trade_discipline_text_update(normalized[name])
-        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "context_length":
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"max_tokens", "context_length"}:
             normalized[name] = normalize_context_length_update(normalized[name])
     return normalized
 
@@ -2256,7 +2256,7 @@ def validate_business_updates(updates: dict[str, str]) -> None:
         elif name in {"US_RATING_DEADLINE_SECONDS", "US_RATING_REQUEST_TIMEOUT_SECONDS"} and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
-        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "context_length":
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"max_tokens", "context_length"}:
             normalize_context_length_update(value)
 
 
@@ -6989,7 +6989,7 @@ def render_env_input(item: dict[str, Any]) -> str:
             + "".join(option_html)
             + "</div><div class='config-meta'>每次只启用一个内置策略</div>"
         )
-    if kind == "context_length":
+    if kind in {"max_tokens", "context_length"}:
         return (
             f"<input type='text' name='env__{escaped_name}' value='{html.escape(value)}' "
             "placeholder='例如 128K、1M 或 1000000' inputmode='numeric'>"
