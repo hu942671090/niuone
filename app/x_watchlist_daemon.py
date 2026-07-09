@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from niuone_paths import get_dashboard_env_file, get_dashboard_home
+from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -47,7 +47,7 @@ def parse_env_file(path: Path = DASHBOARD_ENV_FILE) -> dict[str, str]:
             values[key] = parsed[0] if parsed else ""
         except ValueError:
             values[key] = raw_value.strip("\"'")
-    return values
+    return apply_container_runtime_overrides(values, PROJECT_ROOT)
 
 
 def env_int(name: str, default: int, env: dict[str, str] | None = None) -> int:

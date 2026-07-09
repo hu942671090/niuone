@@ -1,0 +1,205 @@
+name: Publish container image
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.repository }}-docker-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Validate, build, and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release tag and commit
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must use strict SemVer format vMAJOR.MINOR.PATCH: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo "Release commit $GITHUB_SHA is not on $DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+
+      - name: Install validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements.txt
+
+      - name: Validate project
+        env:
+          PYTHONUNBUFFERED: "1"
+          DASHBOARD_HOME: /tmp/niuone-runtime
+          DASHBOARD_AUTH_ENABLED: "0"
+          NIUONE_DISABLE_AUTO_RESTART: "1"
+        run: ./scripts/validate.sh
+
+      - name: Verify Docker Hub configuration
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [[ -z "$DOCKERHUB_USERNAME" ]]; then
+            echo "Repository variable DOCKERHUB_USERNAME is not configured" >&2
+            exit 1
+          fi
+          if [[ "$DOCKERHUB_USERNAME" != "kunkundi" ]]; then
+            echo "DOCKERHUB_USERNAME must be kunkundi for this repository" >&2
+            exit 1
+          fi
+          if [[ -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "Repository secret DOCKERHUB_TOKEN is not configured" >&2
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: docker.io/${{ vars.DOCKERHUB_USERNAME }}/niuone
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.title=NiuOne
+            org.opencontainers.image.description=Local-first market research dashboard and automation workspace
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build smoke-test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          tags: niuone:smoke
+          cache-from: type=gha,scope=niuone-release
+
+      - name: Smoke test container
+        run: |
+          docker run --detach --name niuone-smoke \
+            --publish 127.0.0.1:18787:8787 niuone:smoke
+          cleanup() {
+            docker rm --force --volumes niuone-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          ready=0
+          for _ in {1..120}; do
+            if curl --fail --silent --show-error --head http://127.0.0.1:18787/ >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.25
+          done
+          if [[ "$ready" != "1" ]]; then
+            docker logs niuone-smoke >&2
+            exit 1
+          fi
+          curl --fail --silent --show-error \
+            'http://127.0.0.1:18787/api/messages?limit=1' >/dev/null
+
+      - name: Build and push multi-platform image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=niuone-release
+          cache-to: type=gha,scope=niuone-release,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Update latest tag for the highest release
+        id: latest
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: docker.io/${{ vars.DOCKERHUB_USERNAME }}/niuone
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --force --tags origin
+          highest_tag=""
+          while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+              && git merge-base --is-ancestor "$candidate^{commit}" \
+                "refs/remotes/origin/${{ github.event.repository.default_branch }}"; then
+              highest_tag="$candidate"
+              break
+            fi
+          done < <(git tag --list 'v*.*.*' --sort=-version:refname)
+          if [[ "$RELEASE_TAG" == "$highest_tag" ]]; then
+            docker buildx imagetools create \
+              --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$IMAGE_DIGEST"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping latest: highest release is $highest_tag"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write release summary
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+          LATEST_PUBLISHED: ${{ steps.latest.outputs.published }}
+        run: |
+          {
+            echo "### Published container image"
+            echo
+            echo '```text'
+            echo "$IMAGE_TAGS"
+            echo '```'
+            echo
+            echo "Digest: \`$IMAGE_DIGEST\`"
+            echo "Updated latest: \`$LATEST_PUBLISHED\`"
+          } >> "$GITHUB_STEP_SUMMARY"

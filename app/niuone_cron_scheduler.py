@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from niuone_paths import get_dashboard_env_file, get_dashboard_home
+from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -83,7 +83,7 @@ def parse_env_file(path: Path = DASHBOARD_ENV_FILE) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip("\"'")
-    return values
+    return apply_container_runtime_overrides(values, PROJECT_ROOT)
 
 
 def read_int_setting(env_values: dict[str, str], name: str, default: int, *, min_value: int, max_value: int) -> int:

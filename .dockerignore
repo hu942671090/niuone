@@ -1,0 +1,8 @@
+**
+!.dockerignore
+!Dockerfile
+!requirements.txt
+!app/
+!app/**
+!scripts/
+!scripts/docker-entrypoint.sh

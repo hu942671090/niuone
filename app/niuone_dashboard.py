@@ -32,7 +32,7 @@ from http import cookies
 import urllib.request
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
-from niuone_paths import get_dashboard_env_file, get_dashboard_home, get_local_data_dir
+from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
 from strategy_registry import (
     PERSONA_STRATEGY_ENV,
@@ -1685,7 +1685,7 @@ def display_secret(value: Any) -> str:
     return "已设置，留空保持不变" if str(value or "") else "未设置"
 
 
-def parse_env_file(path: Path | None = None) -> dict[str, str]:
+def parse_env_file(path: Path | None = None, *, include_container_overrides: bool = True) -> dict[str, str]:
     path = path or DASHBOARD_ENV_FILE
     values: dict[str, str] = {}
     if not path.exists():
@@ -1708,6 +1708,8 @@ def parse_env_file(path: Path | None = None) -> dict[str, str]:
             values[key] = parsed[0] if parsed else ""
         except ValueError:
             values[key] = raw_value.strip("\"'")
+    if include_container_overrides:
+        return apply_container_runtime_overrides(values, PROJECT_ROOT)
     return values
 
 
@@ -1775,7 +1777,7 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
 
 def write_env_file_values(updates: dict[str, str], path: Path | None = None) -> dict[str, Any]:
     path = path or DASHBOARD_ENV_FILE
-    existing = parse_env_file(path)
+    existing = parse_env_file(path, include_container_overrides=False)
     next_values = dict(existing)
     changed_names: list[str] = []
     for name, value in updates.items():

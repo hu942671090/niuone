@@ -103,6 +103,42 @@ run.bat --port 8877 --no-browser
 NIUONE_LOCAL_DATA_DIR=/path/to/private-data ./run.sh
 ```
 
+## 容器化部署
+
+项目提供单一镜像和 Compose 编排。Compose 会启动 dashboard、定时调度器和 X 关注源守护进程，并通过同一个 `niuone-data` volume 持久化配置、数据库、日志和任务输出。
+
+从源码构建并启动：
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+默认仅在宿主机 `127.0.0.1:8787` 提供服务，访问 <http://127.0.0.1:8787/>。查看日志或停止服务：
+
+```bash
+docker compose logs -f
+docker compose down
+```
+
+从 Docker Hub 部署指定版本：
+
+```bash
+export NIUONE_IMAGE=kunkundi/niuone:v0.0.1
+docker compose pull
+docker compose up -d --no-build
+```
+
+如需修改宿主机端口，可设置 `NIUONE_PORT`。只有在已经配置反向代理、HTTPS 和独立访问控制时，才应将监听地址改为 `0.0.0.0`：
+
+```bash
+NIUONE_BIND_ADDRESS=0.0.0.0 NIUONE_PORT=8877 docker compose up -d
+```
+
+> 当前管理入口不提供独立登录保护，不要直接暴露到公网。运行配置与密钥保存在 volume 的 `/data/dashboard.env` 和 `/data/runtime/` 中，不会打入镜像。
+
+推送严格 SemVer tag（例如 `v0.0.1`）会触发 GitHub Actions，验证项目并构建 `linux/amd64`、`linux/arm64` 镜像，随后推送 `kunkundi/niuone:v0.0.1`、`kunkundi/niuone:0.0.1` 和 `kunkundi/niuone:latest`。工作流使用仓库变量 `DOCKERHUB_USERNAME` 与仓库密钥 `DOCKERHUB_TOKEN` 登录 Docker Hub。
+
 ## 首次配置
 
 基础页面无需模型密钥即可启动。信息检索、智能摘要和部分自动化流程需要额外配置外部服务。

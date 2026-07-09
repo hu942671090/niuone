@@ -1,0 +1,44 @@
+x-niuone-common: &niuone-common
+  image: ${NIUONE_IMAGE:-niuone:local}
+  build:
+    context: .
+    args:
+      PYTHON_VERSION: "${PYTHON_VERSION:-3.11}"
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 6m
+  environment:
+    NIUONE_CONTAINER_DATA_DIR: /data
+    NIUONE_CONTAINER_HOST: 0.0.0.0
+    NIUONE_CONTAINER_PORT: "8787"
+    TZ: Asia/Shanghai
+  volumes:
+    - niuone-data:/data
+
+services:
+  dashboard:
+    <<: *niuone-common
+    command: ["dashboard"]
+    ports:
+      - "${NIUONE_BIND_ADDRESS:-127.0.0.1}:${NIUONE_PORT:-8787}:8787"
+
+  scheduler:
+    <<: *niuone-common
+    command: ["scheduler"]
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+  x-watchlist:
+    <<: *niuone-common
+    command: ["x-watchlist"]
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+volumes:
+  niuone-data:
