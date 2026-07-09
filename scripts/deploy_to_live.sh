@@ -31,6 +31,6 @@ if [[ -n "$PID" ]]; then
 fi
 
 echo "== Smoke check =="
-curl -s -o /dev/null -w 'dashboard /login HTTP:%{http_code} TTFB:%{time_starttransfer} TOTAL:%{time_total}\n' http://127.0.0.1:8787/login || true
+curl -s -o /dev/null -w 'dashboard / HTTP:%{http_code} TTFB:%{time_starttransfer} TOTAL:%{time_total}\n' http://127.0.0.1:8787/ || true
 
 echo "Deployed. Backup: $BACKUP"

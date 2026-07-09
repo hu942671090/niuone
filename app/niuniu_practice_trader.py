@@ -140,14 +140,6 @@ def load_dashboard_env() -> None:
         "DASHBOARD_MIN_CASH_RESERVE_PCT",
         "DASHBOARD_MARKET_GUIDANCE_ENABLED",
         "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
-        "DASHBOARD_CONTEST_ENABLED",
-        "DASHBOARD_CONTEST_SERVER_URL",
-        "DASHBOARD_CONTEST_ID",
-        "DASHBOARD_CONTEST_NICKNAME",
-        "DASHBOARD_CONTEST_PARTICIPANT_ID",
-        "DASHBOARD_CONTEST_SECRET",
-        "DASHBOARD_CONTEST_TIMEOUT_SECONDS",
-        "DASHBOARD_CONTEST_STATE",
         STRATEGY_SOURCE_ENV,
         PERSONA_STRATEGY_ENV,
         PRESET_STRATEGY_TEXT_ENV,
@@ -4917,7 +4909,6 @@ def execute_actions(
                              "total_cost": round(total_cost, 2), "price_source": price_source,
                              "quote_time": q.get("quote_time") or now_ts(),
                              "quote_source": q.get("source") or price_source,
-                             "_contest_quote_snapshot": _json_safe_copy(q),
                              "order_position_pct": order_position_pct,
                              "position_after_trade_pct": position_after_trade_pct,
                              "total_position_after_trade_pct": total_position_after_trade_pct,
@@ -4991,7 +4982,6 @@ def execute_actions(
                              "pnl_pct": round(realized_pnl_pct, 2), "price_source": price_source,
                              "quote_time": q.get("quote_time") or now_ts(),
                              "quote_source": q.get("source") or price_source,
-                             "_contest_quote_snapshot": _json_safe_copy(q),
                              "order_position_pct": order_position_pct,
                              "position_before_trade_pct": position_before_trade_pct,
                              "position_after_trade_pct": position_after_trade_pct,
@@ -5000,7 +4990,6 @@ def execute_actions(
                              "buy_strategy": entry_strategy, "exit_rule": exit_rule,
                              "strategy_mark": entry_mark, "exit_strategy_mark": exit_mark})
     state["cash"] = round(cash, 2)
-    _sync_contest_trades(executed)
     state.setdefault("trade_log", []).extend(executed)
     del state["trade_log"][:-TRADE_LOG_LIMIT]
     return executed
@@ -5023,25 +5012,6 @@ def _sync_trades_to_db(executed: list[dict[str, Any]]):
         for item in executed:
             _rt(item)
     except Exception: pass
-
-
-def _sync_contest_trades(executed: list[dict[str, Any]]) -> None:
-    """Mirror local fills to the contest server without affecting local trading."""
-    if not executed:
-        return
-    try:
-        import contest_client
-        if contest_client.is_enabled():
-            contest_client.submit_trades(executed)
-    except Exception as exc:
-        contest_id = os.environ.get("DASHBOARD_CONTEST_ID") or ""
-        for item in executed:
-            item["contest_id"] = contest_id
-            item["contest_status"] = "upload_failed"
-            item["contest_reject_reason"] = f"{type(exc).__name__}: {exc}"
-    finally:
-        for item in executed:
-            item.pop("_contest_quote_snapshot", None)
 
 
 def _sync_positions_to_db(state: dict[str, Any]):

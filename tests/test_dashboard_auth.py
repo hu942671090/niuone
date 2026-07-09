@@ -4,15 +4,12 @@ import gzip
 import io
 import json
 import os
-import sqlite3
 import tempfile
 import unittest
 import sys
 import urllib.parse
-from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'app'
@@ -71,15 +68,13 @@ class DashboardAuthTests(unittest.TestCase):
         }
         for name in self.saved_env:
             os.environ.pop(name, None)
-        dashboard.AUTH_DB = self.tmp_path / 'dashboard_users.db'
-        dashboard.ADMIN_TOKEN_FILE = self.tmp_path / 'dashboard_admin_token.txt'
+        dashboard.STATS_DB = self.tmp_path / 'dashboard_stats.db'
         dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
         dashboard.CRON_STATE_DIR = self.tmp_path / 'cron' / 'state'
         dashboard.API_RESPONSE_CACHE.clear()
         dashboard.API_CACHE_KEY_LOCKS.clear()
         dashboard.RATE_LIMIT_BUCKETS.clear()
-        dashboard.AUTH_TOUCH_CACHE.clear()
-        dashboard.ensure_auth_db()
+        dashboard.ensure_stats_db()
 
     def tearDown(self):
         dashboard.DASHBOARD_ENV_FILE = self.original_dashboard_env_file
@@ -91,58 +86,16 @@ class DashboardAuthTests(unittest.TestCase):
                 os.environ[name] = value
         self.tmp.cleanup()
 
-    def test_invite_redeem_creates_viewer_token_and_exhausts_limit(self):
-        invite = dashboard.create_invite_code(code='TEST-CODE', max_uses=1, ttl_hours=1, note='unittest')
-        self.assertEqual(invite['code'], 'TEST-CODE')
+    def test_dashboard_routes_do_not_require_login(self):
+        home = FakeHandler(path='/')
+        home.do_GET()
+        self.assertEqual(home.status, 200)
+        self.assertIn('<title>牛牛1号</title>', home.wfile.getvalue().decode('utf-8'))
 
-        first = dashboard.redeem_invite_code('TEST-CODE', nickname='alpha', ip='127.0.0.1', user_agent='unittest')
-        self.assertTrue(first['ok'])
-        self.assertTrue(first['token'].startswith('nv_'))
-
-        viewer = dashboard.authenticate_viewer_token(first['token'], ip='127.0.0.1', user_agent='unittest')
-        self.assertIsNotNone(viewer)
-        self.assertEqual(viewer['nickname'], 'alpha')
-        self.assertEqual(viewer['role'], 'viewer')
-
-        second = dashboard.redeem_invite_code('TEST-CODE', nickname='beta', ip='127.0.0.1', user_agent='unittest')
-        self.assertFalse(second['ok'])
-        self.assertIn('已用完', second['error'])
-
-    def test_disabled_viewer_is_rejected(self):
-        dashboard.create_invite_code(code='BAN-CODE', max_uses=1, ttl_hours=1, note='unittest')
-        redeemed = dashboard.redeem_invite_code('BAN-CODE', nickname='banme', ip='127.0.0.1', user_agent='unittest')
-        self.assertTrue(redeemed['ok'])
-        self.assertTrue(dashboard.set_viewer_disabled(redeemed['token'], True)['ok'])
-        self.assertIsNone(dashboard.authenticate_viewer_token(redeemed['token'], ip='127.0.0.1', user_agent='unittest'))
-
-    def test_admin_bootstrap_token_can_create_invites_and_list_viewers(self):
-        token = dashboard.get_or_create_admin_token()
-        admin = dashboard.authenticate_viewer_token(token, ip='127.0.0.1', user_agent='unittest')
-        self.assertIsNotNone(admin)
-        self.assertEqual(admin['role'], 'admin')
-
-        created = dashboard.create_invite_code(code='ADMIN-CODE', max_uses=2, ttl_hours=24, note='admin')
-        self.assertEqual(created['max_uses'], 2)
-        self.assertTrue(any(i['code'] == 'ADMIN-CODE' for i in dashboard.list_invite_codes()))
-        self.assertIsInstance(dashboard.list_viewers(), list)
-
-    def test_auth_touch_is_throttled_to_reduce_public_polling_writes(self):
-        dashboard.create_invite_code(code='TOUCH-CODE', max_uses=1, ttl_hours=1, note='unittest')
-        redeemed = dashboard.redeem_invite_code('TOUCH-CODE', nickname='viewer', ip='0.0.0.0', user_agent='redeem')
-        self.assertTrue(redeemed['ok'])
-
-        first = dashboard.authenticate_viewer_token(redeemed['token'], ip='1.1.1.1', user_agent='first')
-        second = dashboard.authenticate_viewer_token(redeemed['token'], ip='2.2.2.2', user_agent='second')
-        self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
-
-        with closing(sqlite3.connect(dashboard.AUTH_DB)) as con:
-            last_ip, user_agent = con.execute(
-                'SELECT last_ip, user_agent FROM viewers WHERE token_hash=?',
-                (dashboard.hash_token(redeemed['token']),),
-            ).fetchone()
-        self.assertEqual(last_ip, '1.1.1.1')
-        self.assertEqual(user_agent, 'first')
+        admin = FakeHandler(path='/admin')
+        admin.do_GET()
+        self.assertEqual(admin.status, 200)
+        self.assertIn('<h1>设置</h1>', admin.wfile.getvalue().decode('utf-8'))
 
     def test_compact_intraday_equity_history_keeps_latest_day_endpoints(self):
         old_points = [
@@ -515,27 +468,23 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('最近交易日收益', dashboard.INDEX_HTML)
         self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', dashboard.INDEX_HTML)
 
-    def test_admin_token_redirect_sets_secure_cookie_and_security_headers(self):
-        token = dashboard.get_or_create_admin_token()
+    def test_admin_page_sends_security_headers_without_login_cookie(self):
         handler = FakeHandler(
-            path=f'/admin?token={token}',
+            path='/admin',
             headers={'X-Forwarded-Proto': 'https', 'CF-Connecting-IP': '203.0.113.11'},
             ip='127.0.0.1',
         )
         handler.do_GET()
 
-        self.assertEqual(handler.status, 303)
-        self.assertEqual(handler.header('Location'), '/admin')
-        self.assertIn('HttpOnly', handler.header('Set-Cookie') or '')
-        self.assertIn('SameSite=Lax', handler.header('Set-Cookie') or '')
-        self.assertIn('Secure', handler.header('Set-Cookie') or '')
+        self.assertEqual(handler.status, 200)
+        self.assertIsNone(handler.header('Set-Cookie'))
         self.assertEqual(handler.header('X-Frame-Options'), 'DENY')
         self.assertEqual(handler.header('X-Content-Type-Options'), 'nosniff')
         self.assertIn('max-age=31536000', handler.header('Strict-Transport-Security') or '')
 
     def test_forwarded_headers_are_only_trusted_from_configured_proxies(self):
         untrusted = FakeHandler(
-            path='/login',
+            path='/admin',
             headers={'CF-Connecting-IP': '203.0.113.10', 'X-Forwarded-Proto': 'https'},
             ip='198.51.100.44',
         )
@@ -543,39 +492,26 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertFalse(untrusted.is_secure_request())
 
         trusted = FakeHandler(
-            path='/login',
+            path='/admin',
             headers={'CF-Connecting-IP': '203.0.113.10', 'X-Forwarded-Proto': 'https'},
             ip='127.0.0.1',
         )
         self.assertEqual(trusted.client_ip(), '203.0.113.10')
         self.assertTrue(trusted.is_secure_request())
 
-    def test_login_rate_limit_returns_429(self):
-        original_login_limit = dashboard.RATE_LIMIT_LOGIN
-        dashboard.RATE_LIMIT_LOGIN = 1
+    def test_public_rate_limit_returns_429(self):
+        original_anon_limit = dashboard.RATE_LIMIT_ANON
+        dashboard.RATE_LIMIT_ANON = 1
         try:
-            body = b'code=NOPE&nickname=test'
-            headers = {'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '203.0.113.77'}
-            first = FakeHandler(
-                path='/login',
-                method='POST',
-                headers={**headers, 'Content-Length': str(len(body))},
-                body=body,
-            )
-            first.do_POST()
+            first = FakeHandler(path='/api/admin/config', headers={'CF-Connecting-IP': '203.0.113.77'})
+            first.do_GET()
+            second = FakeHandler(path='/api/admin/config', headers={'CF-Connecting-IP': '203.0.113.77'})
+            second.do_GET()
 
-            second = FakeHandler(
-                path='/login',
-                method='POST',
-                headers={**headers, 'Content-Length': str(len(body))},
-                body=body,
-            )
-            second.do_POST()
-
-            self.assertEqual(first.status, 403)
+            self.assertEqual(first.status, 200)
             self.assertEqual(second.status, 429)
         finally:
-            dashboard.RATE_LIMIT_LOGIN = original_login_limit
+            dashboard.RATE_LIMIT_ANON = original_anon_limit
 
     def test_send_payload_gzips_large_json_when_client_accepts_it(self):
         payload = json.dumps({"items": ["牛" * 50 for _ in range(200)]}, ensure_ascii=False).encode("utf-8")
@@ -589,87 +525,15 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertLess(len(body), len(payload))
         self.assertEqual(gzip.decompress(body), payload)
 
-    def test_admin_page_requires_configured_password_session(self):
-        original_password = dashboard.ADMIN_PASSWORD
-        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
-        try:
-            dashboard.ADMIN_PASSWORD = 'secret-pass'
-            dashboard.RATE_LIMIT_ADMIN = 100
-            token = dashboard.get_or_create_admin_token()
-            auth_cookie = f'{dashboard.AUTH_COOKIE_NAME}={token}'
-
-            locked_page = FakeHandler(path='/admin', headers={'Cookie': auth_cookie})
-            locked_page.do_GET()
-            self.assertEqual(locked_page.status, 200)
-            locked_body = locked_page.wfile.getvalue().decode('utf-8')
-            self.assertIn('name="admin_password"', locked_body)
-            self.assertIn('enterkeyhint="done"', locked_body)
-            self.assertIn("data-admin-password-form", locked_body)
-            self.assertIn("form.requestSubmit", locked_body)
-            self.assertIn("event.key !== 'Enter'", locked_body)
-
-            locked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': auth_cookie})
-            locked_api.do_GET()
-            self.assertEqual(locked_api.status, 403)
-            self.assertEqual(json.loads(locked_api.wfile.getvalue().decode('utf-8'))['error'], 'admin_password_required')
-
-            wrong_body = urllib.parse.urlencode({'admin_password': 'wrong'}).encode('utf-8')
-            wrong = FakeHandler(
-                path='/admin/password',
-                method='POST',
-                headers={
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Content-Length': str(len(wrong_body)),
-                    'Cookie': auth_cookie,
-                },
-                body=wrong_body,
-            )
-            wrong.do_POST()
-            self.assertEqual(wrong.status, 403)
-            self.assertIn('管理员密码错误', wrong.wfile.getvalue().decode('utf-8'))
-
-            correct_body = urllib.parse.urlencode({'admin_password': 'secret-pass'}).encode('utf-8')
-            correct = FakeHandler(
-                path='/admin/password',
-                method='POST',
-                headers={
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Content-Length': str(len(correct_body)),
-                    'Cookie': auth_cookie,
-                },
-                body=correct_body,
-            )
-            correct.do_POST()
-            self.assertEqual(correct.status, 303)
-            self.assertEqual(correct.header('Location'), '/admin')
-            set_cookies = [value for key, value in correct.sent_headers if key.lower() == 'set-cookie']
-            admin_cookie = next(value for value in set_cookies if value.startswith(f'{dashboard.ADMIN_PASSWORD_COOKIE_NAME}='))
-            self.assertIn('HttpOnly', admin_cookie)
-            session_cookie = admin_cookie.split(';', 1)[0]
-
-            unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': f'{auth_cookie}; {session_cookie}'})
-            unlocked_api.do_GET()
-            self.assertEqual(unlocked_api.status, 200)
-            api_payload = json.loads(unlocked_api.wfile.getvalue().decode('utf-8'))
-            self.assertNotIn('env_file', api_payload)
-            self.assertTrue(api_payload.get('items'))
-        finally:
-            dashboard.ADMIN_PASSWORD = original_password
-            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
-
     def test_state_changing_api_requires_post_action_header(self):
-        original_password = dashboard.ADMIN_PASSWORD
         original_admin_limit = dashboard.RATE_LIMIT_ADMIN
         original_trigger = dashboard.trigger_b1_scan
         calls = []
         try:
-            dashboard.ADMIN_PASSWORD = ''
             dashboard.RATE_LIMIT_ADMIN = 100
             dashboard.trigger_b1_scan = lambda force=False: calls.append(force) or {'ok': True, 'forced': force}
-            token = dashboard.get_or_create_admin_token()
-            auth_cookie = f'{dashboard.AUTH_COOKIE_NAME}={token}'
 
-            get_handler = FakeHandler(path='/api/b1_screen/trigger', headers={'Cookie': auth_cookie})
+            get_handler = FakeHandler(path='/api/b1_screen/trigger')
             get_handler.do_GET()
             self.assertEqual(get_handler.status, 405)
             self.assertEqual(get_handler.header('Allow'), 'POST')
@@ -677,7 +541,7 @@ class DashboardAuthTests(unittest.TestCase):
             missing_header = FakeHandler(
                 path='/api/b1_screen/trigger',
                 method='POST',
-                headers={'Cookie': auth_cookie, 'Content-Length': '0'},
+                headers={'Content-Length': '0'},
             )
             missing_header.do_POST()
             self.assertEqual(missing_header.status, 403)
@@ -688,7 +552,6 @@ class DashboardAuthTests(unittest.TestCase):
                 path='/api/b1_screen/trigger',
                 method='POST',
                 headers={
-                    'Cookie': auth_cookie,
                     'Content-Length': '0',
                     dashboard.ACTION_HEADER_NAME: '1',
                 },
@@ -698,27 +561,13 @@ class DashboardAuthTests(unittest.TestCase):
             self.assertEqual(json.loads(ok.wfile.getvalue().decode('utf-8'))['forced'], True)
             self.assertEqual(calls, [True])
         finally:
-            dashboard.ADMIN_PASSWORD = original_password
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
             dashboard.trigger_b1_scan = original_trigger
 
     def test_admin_page_only_shows_business_config_content(self):
-        original_password = dashboard.ADMIN_PASSWORD
-        try:
-            dashboard.ADMIN_PASSWORD = ''
-            token = dashboard.get_or_create_admin_token()
-            dashboard.create_invite_code(code='HIDDEN-CODE', max_uses=1, ttl_hours=1, note='hidden')
-            redeemed = dashboard.redeem_invite_code('HIDDEN-CODE', nickname='viewer', ip='127.0.0.1', user_agent='unittest')
-            self.assertTrue(redeemed['ok'])
-
-            handler = FakeHandler(
-                path='/admin',
-                headers={'Cookie': f'{dashboard.AUTH_COOKIE_NAME}={token}'},
-            )
-            handler.do_GET()
-            body = handler.wfile.getvalue().decode('utf-8')
-        finally:
-            dashboard.ADMIN_PASSWORD = original_password
+        handler = FakeHandler(path='/admin')
+        handler.do_GET()
+        body = handler.wfile.getvalue().decode('utf-8')
 
         self.assertEqual(handler.status, 200)
         self.assertIn('<title>牛牛1号</title>', body)
@@ -848,20 +697,15 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('LaunchAgent', body)
 
     def test_home_page_uses_us_feature_flag_for_tabs_without_deleting_data(self):
-        original_auth_enabled = dashboard.AUTH_ENABLED
-        try:
-            dashboard.AUTH_ENABLED = False
-            dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
-            disabled = FakeHandler(path='/?category=x_monitor')
-            disabled.do_GET()
-            disabled_body = disabled.wfile.getvalue().decode('utf-8')
+        dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
+        disabled = FakeHandler(path='/?category=x_monitor')
+        disabled.do_GET()
+        disabled_body = disabled.wfile.getvalue().decode('utf-8')
 
-            dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=1\n', encoding='utf-8')
-            enabled = FakeHandler(path='/?category=x_monitor')
-            enabled.do_GET()
-            enabled_body = enabled.wfile.getvalue().decode('utf-8')
-        finally:
-            dashboard.AUTH_ENABLED = original_auth_enabled
+        dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=1\n', encoding='utf-8')
+        enabled = FakeHandler(path='/?category=x_monitor')
+        enabled.do_GET()
+        enabled_body = enabled.wfile.getvalue().decode('utf-8')
 
         self.assertEqual(disabled.status, 200)
         self.assertIn('const US_FEATURES_ENABLED = false;', disabled_body)
@@ -1174,7 +1018,6 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.schedule_niuone_services_restart = (
                 lambda: restart_calls.append(True) or {'ok': True, 'labels': ['ai.niuone.dashboard']}
             )
-            token = dashboard.get_or_create_admin_token()
             body = urllib.parse.urlencode({
                 'env__DASHBOARD_US_FEATURES_ENABLED': '1',
                 'env__DASHBOARD_GROK_MODEL': 'grok-test',
@@ -1202,7 +1045,6 @@ class DashboardAuthTests(unittest.TestCase):
                 headers={
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Content-Length': str(len(body)),
-                    'Cookie': f'{dashboard.AUTH_COOKIE_NAME}={token}',
                 },
                 body=body,
             )
@@ -1271,7 +1113,6 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.schedule_niuone_services_restart = (
                 lambda: restart_calls.append(True) or {'ok': True}
             )
-            token = dashboard.get_or_create_admin_token()
             body = urllib.parse.urlencode({
                 'env__DASHBOARD_GROK_MODEL': 'grok-test',
             }).encode('utf-8')
@@ -1281,7 +1122,6 @@ class DashboardAuthTests(unittest.TestCase):
                 headers={
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Content-Length': str(len(body)),
-                    'Cookie': f'{dashboard.AUTH_COOKIE_NAME}={token}',
                 },
                 body=body,
             )
@@ -1297,120 +1137,30 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertFalse(response['changed'])
         self.assertEqual(response['restart']['skipped'], 'unchanged')
 
-    def test_contest_dashboard_api_login_status_and_join(self):
-        login_body = json.dumps({
-            'server_url': 'http://contest.test',
-            'username': 'alice',
-            'password': 'secret123',
-        }).encode('utf-8')
-        with patch.object(dashboard.contest_client, 'login_user', return_value={'ok': True, 'user': {'nickname': 'Alice'}}) as login:
-            handler = FakeHandler(
-                '/api/contest/login',
-                method='POST',
-                headers={'Content-Length': str(len(login_body)), 'X-NiuOne-Action': '1'},
-                body=login_body,
-            )
-            handler.do_POST()
-        self.assertEqual(handler.status, 200)
-        self.assertEqual(json.loads(handler.wfile.getvalue())['user']['nickname'], 'Alice')
-        login.assert_called_once_with('http://contest.test', 'alice', 'secret123')
-
-        with patch.object(dashboard.contest_client, 'client_status', return_value={'ok': True, 'logged_in': True, 'available_contests': []}) as status:
-            handler = FakeHandler('/api/contest/status')
-            handler.do_GET()
-        self.assertEqual(handler.status, 200)
-        self.assertTrue(json.loads(handler.wfile.getvalue())['logged_in'])
-        status.assert_called_once_with(fetch_remote=True)
-
-        join_body = json.dumps({'contest_id': 'demo'}).encode('utf-8')
-        with patch.object(dashboard.contest_client, 'join_contest', return_value={'ok': True, 'contest_id': 'demo', 'participant_id': 'p1'}) as join:
-            handler = FakeHandler(
-                '/api/contest/join',
-                method='POST',
-                headers={'Content-Length': str(len(join_body)), 'X-NiuOne-Action': '1'},
-                body=join_body,
-            )
-            handler.do_POST()
-        self.assertEqual(handler.status, 200)
-        self.assertEqual(json.loads(handler.wfile.getvalue())['participant_id'], 'p1')
-        join.assert_called_once_with('demo')
-
-    def test_contest_dashboard_linuxdo_start_and_complete(self):
-        start_body = json.dumps({'server_url': 'http://contest.test'}).encode('utf-8')
-        with patch.object(dashboard.contest_client, 'start_linuxdo_login', return_value={
-            'ok': True,
-            'auth_url': 'https://connect.linux.do/oauth2/authorize?state=abc',
-        }) as start:
-            handler = FakeHandler(
-                '/api/contest/linuxdo/start',
-                method='POST',
-                headers={
-                    'Content-Length': str(len(start_body)),
-                    'X-NiuOne-Action': '1',
-                    'Host': '127.0.0.1:8787',
-                },
-                body=start_body,
-            )
-            handler.do_POST()
-        self.assertEqual(handler.status, 200)
-        self.assertEqual(json.loads(handler.wfile.getvalue())['auth_url'], 'https://connect.linux.do/oauth2/authorize?state=abc')
-        start.assert_called_once_with(
-            'http://contest.test',
-            'http://127.0.0.1:8787/api/contest/linuxdo/complete',
-        )
-
-        complete_url = '/api/contest/linuxdo/complete?ticket=lt_ticket&server_url=http%3A%2F%2Fcontest.test'
-        with patch.object(dashboard.contest_client, 'complete_linuxdo_login', return_value={
-            'ok': True,
-            'user': {'nickname': 'Alice LinuxDo'},
-        }) as complete:
-            handler = FakeHandler(complete_url, headers={'Host': '127.0.0.1:8787'})
-            handler.do_GET()
-        self.assertEqual(handler.status, 303)
-        self.assertEqual(handler.header('Location'), '/admin?contest_login=linuxdo_ok')
-        complete.assert_called_once_with('http://contest.test', 'lt_ticket')
-
-    def test_settings_page_contains_contest_panel_hooks_and_home_omits_panel(self):
+    def test_settings_page_omits_contest_panel_and_config(self):
+        payload = dashboard.build_admin_config_payload()
         body = dashboard.render_admin_page().decode('utf-8')
-        self.assertIn("<h2>策略大赛</h2>", body)
-        first_group_start = body.index("class='settings-group'")
-        first_group_end = body.index("</section>", first_group_start)
-        first_group_html = body[first_group_start:first_group_end]
-        self.assertIn("<h2>策略大赛</h2>", first_group_html)
-        contest_group_start = body.index("<h2>策略大赛</h2>")
-        contest_group_end = body.index("</section>", contest_group_start)
-        contest_group_html = body[contest_group_start:contest_group_end]
-
-        self.assertIn('id="contestPanel"', contest_group_html)
-        self.assertIn('/api/contest/status', body)
-        self.assertIn('/api/contest/events', body)
-        self.assertIn('/api/contest/linuxdo/start', body)
-        self.assertIn('LinuxDo', body)
-        self.assertIn('new EventSource', body)
-        self.assertIn('function renderContestPanel', body)
-        self.assertNotIn('${renderContestPanel()}', dashboard.INDEX_HTML)
-
-    def test_contest_settings_visibility_is_decided_server_side(self):
-        with patch.object(dashboard, 'contest_settings_visible', return_value=False, create=True):
-            payload = dashboard.build_admin_config_payload()
-            body = dashboard.render_admin_page().decode('utf-8')
 
         self.assertFalse(any(str(item.get('name') or '').startswith('DASHBOARD_CONTEST_') for item in payload['items']))
         self.assertNotIn('<h2>策略大赛</h2>', body)
         self.assertNotIn('id="contestPanel"', body)
         self.assertNotIn('/api/contest/status', body)
+        self.assertNotIn('LinuxDo', body)
 
-    def test_contest_dashboard_events_proxy_streams_sse(self):
-        payload = {'ok': True, 'events': [{'id': 9, 'event': 'contest', 'data': {'contest_id': 'demo'}}]}
-        with patch.object(dashboard.contest_client, 'fetch_contest_events', return_value=payload) as events:
-            handler = FakeHandler('/api/contest/events')
-            handler.do_GET()
-        self.assertEqual(handler.status, 200)
-        self.assertEqual(handler.header('Content-Type'), 'text/event-stream; charset=utf-8')
-        body = handler.wfile.getvalue().decode('utf-8')
-        self.assertIn('event: contest', body)
-        self.assertIn('"contest_id":"demo"', body)
-        events.assert_called_once_with()
+    def test_contest_routes_are_removed(self):
+        get_handler = FakeHandler('/api/contest/status')
+        get_handler.do_GET()
+        self.assertEqual(get_handler.status, 404)
+
+        post_body = json.dumps({'contest_id': 'demo'}).encode('utf-8')
+        post_handler = FakeHandler(
+            '/api/contest/join',
+            method='POST',
+            headers={'Content-Length': str(len(post_body)), dashboard.ACTION_HEADER_NAME: '1'},
+            body=post_body,
+        )
+        post_handler.do_POST()
+        self.assertEqual(post_handler.status, 404)
 
 
 if __name__ == '__main__':

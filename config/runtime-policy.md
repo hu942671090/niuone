@@ -63,7 +63,7 @@ X 关注列表监控和美股机构评级日报由 `DASHBOARD_US_FEATURES_ENABLE
 不要直接拿真实 `.local-data/runtime/` 做实验。测试时使用临时运行目录：
 
 ```bash
-DASHBOARD_HOME=/tmp/niuone-smoke DASHBOARD_AUTH_ENABLED=0 DASHBOARD_PORT=8877 ./scripts/run_standalone.sh
+DASHBOARD_HOME=/tmp/niuone-smoke DASHBOARD_PORT=8877 ./scripts/run_standalone.sh
 ```
 
 提交前运行：

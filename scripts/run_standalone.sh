@@ -31,6 +31,5 @@ echo "牛牛1号 standalone"
 echo "  root:           $ROOT"
 echo "  dashboard home: $DASHBOARD_HOME"
 echo "  listen:         http://$HOST:$PORT"
-echo "  auth:           ${DASHBOARD_AUTH_ENABLED:-1}"
 
 exec "$PYTHON_BIN" "$ROOT/app/niuone_dashboard.py" --host "$HOST" --port "$PORT"

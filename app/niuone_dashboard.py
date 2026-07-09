@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
-import hmac
 import html
 import ipaddress
 import json
@@ -32,7 +31,6 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from http import cookies
 import urllib.request
 
-import contest_client
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
 from niuone_paths import get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
@@ -71,10 +69,7 @@ DASHBOARD_ENV_FILE = get_dashboard_env_file(PROJECT_ROOT)
 CRON_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 CRON_STATE_DIR = DASHBOARD_HOME / "cron" / "state"
 B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
-AUTH_DB = DASHBOARD_HOME / "dashboard_users.db"
-ADMIN_TOKEN_FILE = DASHBOARD_HOME / "dashboard_admin_token.txt"
-AUTH_COOKIE_NAME = "dashboard_token"
-ADMIN_PASSWORD_COOKIE_NAME = "dashboard_admin_session"
+STATS_DB = DASHBOARD_HOME / "dashboard_stats.db"
 VISITOR_COOKIE_NAME = "niuone_visitor_id"
 ACTION_HEADER_NAME = "X-NiuOne-Action"
 ACTION_HEADER_VALUES = {"1", "true", "yes", "on"}
@@ -86,16 +81,11 @@ NIUONE_LAUNCHD_LABELS = (
     "ai.niuone.dashboard",
 )
 NIUONE_RESTART_DELAY_SECONDS = float(os.environ.get("NIUONE_RESTART_DELAY_SECONDS", "1.2") or "1.2")
-ADMIN_PASSWORD = os.environ.get("DASHBOARD_ADMIN_PASSWORD", "").strip()
-AUTH_ENABLED = os.environ.get("DASHBOARD_AUTH_ENABLED", "0").lower() not in {"0", "false", "no"}
 TRUSTED_PROXY_CIDRS = tuple(
     value.strip()
     for value in os.environ.get("DASHBOARD_TRUSTED_PROXIES", "127.0.0.1/32,::1/128").split(",")
     if value.strip()
 )
-AUTH_MAX_ONLINE = int(os.environ.get("DASHBOARD_MAX_ONLINE", "0") or "0")
-AUTH_ONLINE_WINDOW_SECONDS = int(os.environ.get("DASHBOARD_ONLINE_WINDOW_SECONDS", "300") or "300")
-AUTH_TOUCH_INTERVAL_SECONDS = int(os.environ.get("DASHBOARD_AUTH_TOUCH_INTERVAL_SECONDS", "30") or "30")
 MAX_POST_BODY_BYTES = int(os.environ.get("DASHBOARD_MAX_POST_BODY_BYTES", str(256 * 1024)) or str(256 * 1024))
 GZIP_MIN_BYTES = int(os.environ.get("DASHBOARD_GZIP_MIN_BYTES", "1024") or "1024")
 GZIP_CONTENT_TYPE_PREFIXES = ("application/json", "text/html", "text/plain")
@@ -149,13 +139,10 @@ API_OFFSET_MAX = int(os.environ.get("DASHBOARD_API_OFFSET_MAX", "5000") or "5000
 RATE_LIMIT_ENABLED = os.environ.get("DASHBOARD_RATE_LIMIT_ENABLED", "1").lower() not in {"0", "false", "no"}
 RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("DASHBOARD_RATE_LIMIT_WINDOW_SECONDS", "60") or "60")
 RATE_LIMIT_ANON = int(os.environ.get("DASHBOARD_RATE_LIMIT_ANON", "240") or "240")
-RATE_LIMIT_AUTH = int(os.environ.get("DASHBOARD_RATE_LIMIT_AUTH", "900") or "900")
-RATE_LIMIT_LOGIN = int(os.environ.get("DASHBOARD_RATE_LIMIT_LOGIN", "20") or "20")
+RATE_LIMIT_API = int(os.environ.get("DASHBOARD_RATE_LIMIT_API", "900") or "900")
 RATE_LIMIT_ADMIN = int(os.environ.get("DASHBOARD_RATE_LIMIT_ADMIN", "90") or "90")
 RATE_LIMIT_BUCKETS: dict[tuple[str, str], tuple[float, int]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
-AUTH_TOUCH_CACHE: dict[str, float] = {}
-AUTH_TOUCH_LOCK = threading.Lock()
 VISIT_STATS_LOCK = threading.Lock()
 API_TTLS = {
     "messages": 10,
@@ -196,19 +183,13 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_WATCHLIST_STATE", "label": "X 监控状态文件", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "state" / "x_watchlist_latest.json"), "effect": "next_run"},
     {"name": "DASHBOARD_X_WATCHLIST_ARCHIVE_DIR", "label": "X 监控归档目录", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "output" / "x_watchlist_direct"), "effect": "next_run"},
 
-    {"name": "DASHBOARD_AUTH_ENABLED", "label": "启用访问认证", "group": "访问控制", "kind": "bool", "default": "0", "effect": "restart"},
-    {"name": "DASHBOARD_ADMIN_PASSWORD", "label": "设置页管理员密码", "group": "访问控制", "kind": "secret", "default": "", "effect": "restart"},
-    {"name": "DASHBOARD_MAX_ONLINE", "label": "最大在线 viewer", "group": "访问控制", "kind": "int", "default": "0", "effect": "restart"},
-    {"name": "DASHBOARD_ONLINE_WINDOW_SECONDS", "label": "在线判断窗口秒数", "group": "访问控制", "kind": "int", "default": "300", "effect": "restart"},
-    {"name": "DASHBOARD_AUTH_TOUCH_INTERVAL_SECONDS", "label": "访问时间写库间隔秒数", "group": "访问控制", "kind": "int", "default": "30", "effect": "restart"},
     {"name": "DASHBOARD_EDGE_CACHE_ENABLED", "label": "允许 CDN 缓存 API", "group": "访问控制", "kind": "bool", "default": "0", "effect": "restart"},
     {"name": "DASHBOARD_MAX_POST_BODY_BYTES", "label": "POST 表单最大字节", "group": "访问控制", "kind": "int", "default": str(256 * 1024), "effect": "restart"},
 
     {"name": "DASHBOARD_RATE_LIMIT_ENABLED", "label": "启用限流", "group": "限流与缓存", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": "DASHBOARD_RATE_LIMIT_WINDOW_SECONDS", "label": "限流窗口秒数", "group": "限流与缓存", "kind": "int", "default": "60", "effect": "restart"},
-    {"name": "DASHBOARD_RATE_LIMIT_ANON", "label": "未登录请求/窗口", "group": "限流与缓存", "kind": "int", "default": "240", "effect": "restart"},
-    {"name": "DASHBOARD_RATE_LIMIT_AUTH", "label": "已登录请求/窗口", "group": "限流与缓存", "kind": "int", "default": "900", "effect": "restart"},
-    {"name": "DASHBOARD_RATE_LIMIT_LOGIN", "label": "登录尝试/窗口", "group": "限流与缓存", "kind": "int", "default": "20", "effect": "restart"},
+    {"name": "DASHBOARD_RATE_LIMIT_ANON", "label": "公开请求/窗口", "group": "限流与缓存", "kind": "int", "default": "240", "effect": "restart"},
+    {"name": "DASHBOARD_RATE_LIMIT_API", "label": "API 请求/窗口", "group": "限流与缓存", "kind": "int", "default": "900", "effect": "restart"},
     {"name": "DASHBOARD_RATE_LIMIT_ADMIN", "label": "管理操作/窗口", "group": "限流与缓存", "kind": "int", "default": "90", "effect": "restart"},
     {"name": "DASHBOARD_API_CACHE_MAX_ENTRIES", "label": "API 缓存条目上限", "group": "限流与缓存", "kind": "int", "default": "256", "effect": "restart"},
     {"name": "DASHBOARD_API_OFFSET_MAX", "label": "消息分页最大 offset", "group": "限流与缓存", "kind": "int", "default": "5000", "effect": "restart"},
@@ -229,15 +210,6 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_CRON_MAX_ATTEMPTS", "label": "Cron 失败最大运行次数", "group": "任务调度", "kind": "int", "default": "2", "effect": "next_run"},
     {"name": "DASHBOARD_CRON_RETRY_DELAY_SECONDS", "label": "Cron 失败重试间隔秒数", "group": "任务调度", "kind": "int", "default": "300", "effect": "next_run"},
     {"name": "DASHBOARD_PENDING_DECISION_POLL_SECONDS", "label": "延迟成交检查秒数", "group": "任务调度", "kind": "int", "default": "5", "effect": "restart"},
-
-    {"name": "DASHBOARD_CONTEST_ENABLED", "label": "启用策略大赛上报", "group": "策略大赛", "kind": "bool", "default": "0", "effect": "next_run"},
-    {"name": "DASHBOARD_CONTEST_SERVER_URL", "label": "策略大赛服务端 URL", "group": "策略大赛", "kind": "text", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_CONTEST_ID", "label": "策略大赛 ID", "group": "策略大赛", "kind": "text", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_CONTEST_NICKNAME", "label": "参赛昵称", "group": "策略大赛", "kind": "text", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_CONTEST_PARTICIPANT_ID", "label": "参赛者 ID", "group": "策略大赛", "kind": "text", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_CONTEST_SECRET", "label": "参赛密钥", "group": "策略大赛", "kind": "secret", "default": "", "effect": "next_run"},
-    {"name": "DASHBOARD_CONTEST_TIMEOUT_SECONDS", "label": "上报超时秒数", "group": "策略大赛", "kind": "int", "default": "3", "effect": "next_run"},
-    {"name": "DASHBOARD_CONTEST_STATE", "label": "比赛本地状态文件", "group": "策略大赛", "kind": "path", "default": "", "effect": "restart"},
 
     {"name": "DASHBOARD_DECISION_MAX_TOKENS", "label": "决策最大输出长度", "group": "买卖决策模型", "kind": "max_tokens", "default": DEFAULT_MODEL_MAX_TOKENS, "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_TIMEOUT", "label": "决策请求超时", "group": "买卖决策模型", "kind": "int", "default": "180", "effect": "next_run"},
@@ -317,19 +289,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "X_WATCHLIST_SENT_CONTEXT_REPAIR_ITEMS", "label": "X 已发修复条数", "group": "X 监控", "kind": "int", "default": "2", "effect": "next_run"},
 ]
 ENV_CONFIG_BY_NAME = {item["name"]: item for item in ENV_CONFIG_SCHEMA}
-CONTEST_SETTINGS_VISIBLE_ENV = "DASHBOARD_CONTEST_SETTINGS_VISIBLE"
-CONTEST_ENV_NAMES = [
-    "DASHBOARD_CONTEST_ENABLED",
-    "DASHBOARD_CONTEST_SERVER_URL",
-    "DASHBOARD_CONTEST_ID",
-    "DASHBOARD_CONTEST_NICKNAME",
-    "DASHBOARD_CONTEST_PARTICIPANT_ID",
-    "DASHBOARD_CONTEST_SECRET",
-    "DASHBOARD_CONTEST_TIMEOUT_SECONDS",
-    "DASHBOARD_CONTEST_STATE",
-]
 ADMIN_VISIBLE_ENV_NAMES = [
-    *CONTEST_ENV_NAMES,
     "DASHBOARD_US_FEATURES_ENABLED",
     "DASHBOARD_GROK_MODEL",
     "DASHBOARD_GROK_CONTEXT_LENGTH",
@@ -451,20 +411,6 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(str(token).encode('utf-8')).hexdigest()
 
 
-def should_touch_auth(token_hash: str, now: float) -> bool:
-    with AUTH_TOUCH_LOCK:
-        last = AUTH_TOUCH_CACHE.get(token_hash, 0.0)
-        if now - last < AUTH_TOUCH_INTERVAL_SECONDS:
-            return False
-        AUTH_TOUCH_CACHE[token_hash] = now
-        if len(AUTH_TOUCH_CACHE) > 5000:
-            cutoff = now - AUTH_ONLINE_WINDOW_SECONDS * 2
-            for key, ts in list(AUTH_TOUCH_CACHE.items()):
-                if ts < cutoff:
-                    AUTH_TOUCH_CACHE.pop(key, None)
-        return True
-
-
 def check_rate_limit(scope: str, key: str, limit: int, window: int | None = None) -> tuple[bool, int]:
     if not RATE_LIMIT_ENABLED or limit <= 0:
         return True, 0
@@ -486,43 +432,9 @@ def check_rate_limit(scope: str, key: str, limit: int, window: int | None = None
     return True, 0
 
 
-def new_viewer_token() -> str:
-    return 'nv_' + secrets.token_urlsafe(32)
-
-
-def new_invite_code() -> str:
-    alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-    return 'NN-' + ''.join(secrets.choice(alphabet) for _ in range(4)) + '-' + ''.join(secrets.choice(alphabet) for _ in range(4))
-
-
-def ensure_auth_db() -> None:
-    AUTH_DB.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS invite_codes (
-                code TEXT PRIMARY KEY,
-                max_uses INTEGER NOT NULL DEFAULT 1,
-                used_count INTEGER NOT NULL DEFAULT 0,
-                expires_at REAL,
-                note TEXT DEFAULT '',
-                disabled INTEGER NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS viewers (
-                token_hash TEXT PRIMARY KEY,
-                token_prefix TEXT NOT NULL,
-                invite_code TEXT,
-                nickname TEXT DEFAULT '',
-                role TEXT NOT NULL DEFAULT 'viewer',
-                created_at REAL NOT NULL,
-                last_seen_at REAL NOT NULL,
-                last_ip TEXT DEFAULT '',
-                user_agent TEXT DEFAULT '',
-                disabled INTEGER NOT NULL DEFAULT 0
-            )
-        """)
+def ensure_stats_db() -> None:
+    STATS_DB.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(STATS_DB)) as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS visit_stats (
                 key TEXT PRIMARY KEY,
@@ -540,49 +452,13 @@ def ensure_auth_db() -> None:
         con.commit()
 
 
-def create_invite_code(code: str | None = None, max_uses: int = 1, ttl_hours: int = 168, note: str = '') -> dict[str, Any]:
-    ensure_auth_db()
-    code = (code or new_invite_code()).strip().upper()
-    max_uses = max(1, int(max_uses or 1))
-    expires_at = _now_ts() + max(1, int(ttl_hours or 168)) * 3600 if ttl_hours else None
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        con.execute('INSERT INTO invite_codes(code,max_uses,used_count,expires_at,note,disabled,created_at) VALUES(?,?,?,?,?,?,?)',
-                    (code, max_uses, 0, expires_at, note or '', 0, _now_ts()))
-        con.commit()
-    return {'code': code, 'max_uses': max_uses, 'used_count': 0, 'expires_at': expires_at, 'note': note or '', 'disabled': False}
-
-
-def list_invite_codes() -> list[dict[str, Any]]:
-    ensure_auth_db()
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        con.row_factory = sqlite3.Row
-        rows = con.execute('SELECT * FROM invite_codes ORDER BY created_at DESC').fetchall()
-    return [dict(r) for r in rows]
-
-
-def list_viewers() -> list[dict[str, Any]]:
-    ensure_auth_db()
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        con.row_factory = sqlite3.Row
-        rows = con.execute('SELECT token_hash, token_prefix, invite_code, nickname, role, created_at, last_seen_at, last_ip, user_agent, disabled FROM viewers ORDER BY last_seen_at DESC').fetchall()
-    return [dict(r) for r in rows]
-
-
-def count_online_viewers() -> int:
-    ensure_auth_db()
-    cutoff = _now_ts() - AUTH_ONLINE_WINDOW_SECONDS
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        row = con.execute("SELECT COUNT(*) FROM viewers WHERE disabled=0 AND role='viewer' AND last_seen_at>=?", (cutoff,)).fetchone()
-    return int(row[0] if row else 0)
-
-
 def increment_visit_count(visitor_id: str) -> dict[str, int]:
     """Count page views for the main dashboard only; API polling is excluded."""
-    ensure_auth_db()
+    ensure_stats_db()
     now = _now_ts()
     visitor_hash = hash_token(visitor_id)
     with VISIT_STATS_LOCK:
-        with closing(sqlite3.connect(AUTH_DB)) as con:
+        with closing(sqlite3.connect(STATS_DB)) as con:
             con.execute("INSERT OR IGNORE INTO visit_stats(key,value,updated_at) VALUES('home_views',0,?)", (now,))
             con.execute("UPDATE visit_stats SET value=value+1, updated_at=? WHERE key='home_views'", (now,))
             con.execute(
@@ -594,99 +470,6 @@ def increment_visit_count(visitor_id: str) -> dict[str, int]:
             unique_row = con.execute("SELECT COUNT(*) FROM unique_visitors").fetchone()
             con.commit()
     return {"visits": int(visit_row[0] if visit_row else 0), "unique": int(unique_row[0] if unique_row else 0)}
-
-
-def redeem_invite_code(code: str, nickname: str = '', ip: str = '', user_agent: str = '') -> dict[str, Any]:
-    ensure_auth_db()
-    code = (code or '').strip().upper()
-    if not code:
-        return {'ok': False, 'error': '请输入邀请码'}
-    now = _now_ts()
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        con.row_factory = sqlite3.Row
-        row = con.execute('SELECT * FROM invite_codes WHERE code=?', (code,)).fetchone()
-        if not row:
-            return {'ok': False, 'error': '邀请码不存在'}
-        if int(row['disabled'] or 0):
-            return {'ok': False, 'error': '邀请码已停用'}
-        if row['expires_at'] and float(row['expires_at']) < now:
-            return {'ok': False, 'error': '邀请码已过期'}
-        if int(row['used_count'] or 0) >= int(row['max_uses'] or 1):
-            return {'ok': False, 'error': '邀请码已用完'}
-        if AUTH_MAX_ONLINE and count_online_viewers() >= AUTH_MAX_ONLINE:
-            return {'ok': False, 'error': '当前观看人数已满，请稍后再试'}
-        token = new_viewer_token()
-        token_hash = hash_token(token)
-        con.execute('UPDATE invite_codes SET used_count=used_count+1 WHERE code=?', (code,))
-        con.execute("""INSERT INTO viewers(token_hash,token_prefix,invite_code,nickname,role,created_at,last_seen_at,last_ip,user_agent,disabled)
-                       VALUES(?,?,?,?,?,?,?,?,?,0)""",
-                    (token_hash, token[:10], code, (nickname or '').strip()[:80], 'viewer', now, now, ip[:80], user_agent[:300]))
-        con.commit()
-    return {'ok': True, 'token': token, 'role': 'viewer'}
-
-
-def get_or_create_admin_token() -> str:
-    ensure_auth_db()
-    if ADMIN_TOKEN_FILE.exists():
-        token = ADMIN_TOKEN_FILE.read_text().strip()
-        if token:
-            return token
-    token = 'na_' + secrets.token_urlsafe(36)
-    ADMIN_TOKEN_FILE.write_text(token + '\n')
-    try:
-        ADMIN_TOKEN_FILE.chmod(0o600)
-    except OSError:
-        pass
-    now = _now_ts()
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        con.execute("""INSERT OR REPLACE INTO viewers(token_hash,token_prefix,invite_code,nickname,role,created_at,last_seen_at,last_ip,user_agent,disabled)
-                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (hash_token(token), token[:10], 'admin-bootstrap', '牛牛大王', 'admin', now, now, '', 'bootstrap', 0))
-        con.commit()
-    return token
-
-
-def authenticate_viewer_token(token: str | None, ip: str = '', user_agent: str = '') -> dict[str, Any] | None:
-    ensure_auth_db()
-    token = (token or '').strip()
-    if not token:
-        return None
-    if ADMIN_TOKEN_FILE.exists() and secrets.compare_digest(token, ADMIN_TOKEN_FILE.read_text().strip()):
-        get_or_create_admin_token()
-    token_hash = hash_token(token)
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        con.row_factory = sqlite3.Row
-        row = con.execute('SELECT * FROM viewers WHERE token_hash=?', (token_hash,)).fetchone()
-        if not row or int(row['disabled'] or 0):
-            return None
-        now = _now_ts()
-        if should_touch_auth(token_hash, now):
-            con.execute('UPDATE viewers SET last_seen_at=?, last_ip=?, user_agent=? WHERE token_hash=?',
-                        (now, ip[:80], user_agent[:300], row['token_hash']))
-            con.commit()
-        result = dict(row)
-        result['last_seen_at'] = now
-        return result
-
-
-def set_viewer_disabled(token_or_hash: str, disabled: bool = True) -> dict[str, Any]:
-    ensure_auth_db()
-    key = (token_or_hash or '').strip()
-    if not key:
-        return {'ok': False, 'error': 'missing token'}
-    token_hash = key if len(key) == 64 and re.fullmatch(r'[0-9a-f]+', key) else hash_token(key)
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        cur = con.execute('UPDATE viewers SET disabled=? WHERE token_hash=?', (1 if disabled else 0, token_hash))
-        con.commit()
-    return {'ok': cur.rowcount > 0}
-
-
-def set_invite_disabled(code: str, disabled: bool = True) -> dict[str, Any]:
-    ensure_auth_db()
-    with closing(sqlite3.connect(AUTH_DB)) as con:
-        cur = con.execute('UPDATE invite_codes SET disabled=? WHERE code=?', (1 if disabled else 0, (code or '').strip().upper()))
-        con.commit()
-    return {'ok': cur.rowcount > 0}
 
 
 def parse_request_cookies(header: str | None) -> dict[str, str]:
@@ -1730,18 +1513,6 @@ def first_forwarded_ip(*headers: str | None) -> str:
     return ""
 
 
-def remove_query_param(path: str, param_name: str) -> str:
-    parsed = urlparse(path)
-    pairs = []
-    for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
-        if key == param_name:
-            continue
-        for value in values:
-            pairs.append((key, value))
-    query = urlencode(pairs)
-    return parsed.path + (f"?{query}" if query else "")
-
-
 def clamp_limit(raw: str | None, default: int = API_DEFAULT_LIMIT) -> int:
     try:
         value = int(raw) if raw else default
@@ -1799,21 +1570,8 @@ def us_features_enabled(env_values: dict[str, str] | None = None) -> bool:
     return str(raw).strip().lower() in TRUTHY_VALUES
 
 
-def contest_settings_visible(env_values: dict[str, str] | None = None) -> bool:
-    values = env_values if env_values is not None else parse_env_file()
-    raw = os.environ.get(CONTEST_SETTINGS_VISIBLE_ENV)
-    if raw is None:
-        raw = values.get(CONTEST_SETTINGS_VISIBLE_ENV)
-    if raw is None or str(raw).strip() == "":
-        return True
-    return str(raw).strip().lower() in TRUTHY_VALUES
-
-
 def admin_visible_env_names(env_values: dict[str, str] | None = None) -> list[str]:
-    names = list(ADMIN_VISIBLE_ENV_NAMES)
-    if not contest_settings_visible(env_values):
-        names = [name for name in names if name not in CONTEST_ENV_NAMES]
-    return names
+    return list(ADMIN_VISIBLE_ENV_NAMES)
 
 
 def quote_env_value(value: str) -> str:
@@ -2030,7 +1788,6 @@ ADMIN_GROUP_NOTES = {
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
     "选股策略": "在内置策略和预设文字策略中选择一个激活；内置策略可选基础策略、Z哥或李大霄。",
-    "策略大赛": "登录比赛服务端、参加比赛，并管理本地比赛上报配置；本地模拟交易不因比赛拒单回滚。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
 }
@@ -2496,52 +2253,6 @@ def build_admin_config_payload() -> dict[str, Any]:
 
 INDICES_HTML = None
 
-LOGIN_HTML = r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>牛牛1号 · 观看登录</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
-<style>
-:root{color-scheme:dark;--bg:#06070a;--panel:#10131a;--line:#252b38;--text:#f2f4f8;--muted:#99a3b3;--accent:#7c5cff;--red:#fb7185;--green:#34d399}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 20% 0%,rgba(124,92,255,.30),transparent 34rem),var(--bg);color:var(--text);padding:20px}.box{width:min(440px,100%);border:1px solid var(--line);border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(16,19,26,.94),rgba(21,26,36,.88));box-shadow:0 28px 90px rgba(0,0,0,.36)}h1{margin:0 0 8px;font-size:30px;letter-spacing:-.04em}.sub{color:var(--muted);line-height:1.6;margin-bottom:22px}label{display:block;color:#cbd5e1;font-weight:800;font-size:13px;margin:14px 0 7px}input{width:100%;border:1px solid var(--line);background:#0b0e14;color:var(--text);border-radius:14px;padding:13px 14px;font:inherit;outline:none}input:focus{border-color:rgba(124,92,255,.75);box-shadow:0 0 0 4px rgba(124,92,255,.13)}button{width:100%;margin-top:18px;border:0;border-radius:14px;padding:13px 14px;font:inherit;font-weight:900;color:white;background:linear-gradient(135deg,var(--accent),#24c6dc);cursor:pointer}.error{border:1px solid rgba(251,113,133,.35);background:rgba(127,29,29,.25);color:#fecdd3;border-radius:14px;padding:10px 12px;margin-bottom:14px}.hint{font-size:12px;color:#64748b;margin-top:14px;line-height:1.5}.ok{color:var(--green)}</style>
-</head><body><form class="box" method="post" action="/login">
-<h1>🐮 牛牛1号</h1><div class="sub">请输入牛牛大王发放的邀请码，激活本设备的观看权限。</div>
-__ERROR__
-<label>邀请码</label><input name="code" autocomplete="one-time-code" placeholder="NN-XXXX-XXXX" required autofocus>
-<label>昵称（可选）</label><input name="nickname" autocomplete="nickname" placeholder="方便牛牛1号识别访问者">
-<button type="submit">进入牛牛1号</button>
-<div class="hint">邀请码只用于首次激活；成功后会在浏览器保存个人访问凭证。请勿转发邀请码或访问链接。</div>
-</form></body></html>"""
-
-ADMIN_PASSWORD_HTML = r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>牛牛1号 · 设置验证</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
-<style>
-:root{color-scheme:dark;--bg:#06070a;--panel:#10131a;--line:#252b38;--text:#f2f4f8;--muted:#99a3b3;--accent:#7c5cff;--cyan:#24c6dc;--red:#fb7185}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 20% 0%,rgba(124,92,255,.28),transparent 34rem),var(--bg);color:var(--text);padding:20px}.box{width:min(420px,100%);border:1px solid var(--line);border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(16,19,26,.94),rgba(21,26,36,.88));box-shadow:0 28px 90px rgba(0,0,0,.36)}h1{margin:0 0 8px;font-size:28px;letter-spacing:0}.sub{color:var(--muted);line-height:1.6;margin-bottom:22px}label{display:block;color:#cbd5e1;font-weight:800;font-size:13px;margin:14px 0 7px}input{width:100%;border:1px solid var(--line);background:#0b0e14;color:var(--text);border-radius:14px;padding:13px 14px;font:inherit;outline:none}input:focus{border-color:rgba(124,92,255,.75);box-shadow:0 0 0 4px rgba(124,92,255,.13)}button{width:100%;margin-top:18px;border:0;border-radius:14px;padding:13px 14px;font:inherit;font-weight:900;color:white;background:linear-gradient(135deg,var(--accent),var(--cyan));cursor:pointer}.error{border:1px solid rgba(251,113,133,.35);background:rgba(127,29,29,.25);color:#fecdd3;border-radius:14px;padding:10px 12px;margin-bottom:14px}.hint{font-size:12px;color:#64748b;margin-top:14px;line-height:1.5}.toplink{display:inline-block;color:#9db2ff;text-decoration:none;margin-top:14px;font-weight:800}
-</style>
-</head><body><form class="box" method="post" action="/admin/password" data-admin-password-form>
-<h1>设置页验证</h1><div class="sub">请输入管理员密码后进入业务配置。</div>
-__ERROR__
-<label>管理员密码</label><input name="admin_password" type="password" autocomplete="current-password" placeholder="管理员密码" required autofocus enterkeyhint="done">
-<button type="submit">进入设置</button>
-<div class="hint">该密码来自启动配置 <code>DASHBOARD_ADMIN_PASSWORD</code>，修改后重启服务生效。</div>
-<a class="toplink" href="/">返回首页</a>
-<script>
-(function(){
-  var form = document.querySelector('[data-admin-password-form]');
-  var input = form ? form.querySelector('input[name="admin_password"]') : null;
-  var button = form ? form.querySelector('button[type="submit"]') : null;
-  if (!form || !input) return;
-  input.addEventListener('keydown', function(event) {
-    if (event.key !== 'Enter' || event.isComposing) return;
-    event.preventDefault();
-    if (typeof form.requestSubmit === 'function') form.requestSubmit(button || undefined);
-    else if (button) button.click();
-    else form.submit();
-  });
-})();
-</script>
-</form></body></html>"""
-
 ADMIN_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>牛牛1号</title>
@@ -2604,7 +2315,6 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,#9
 .time-list-add,.time-list-remove{transition:border-color .12s ease,background .12s ease,color .12s ease}
 .time-list-add:hover,.time-list-remove:hover{border-color:rgba(125,211,252,.38);background:rgba(30,41,59,.72)}
 .okmsg,.errmsg{box-shadow:0 12px 34px rgba(0,0,0,.18)}
-__CONTEST_ADMIN_CSS__
 @media(max-width:1120px){.settings-shell{grid-template-columns:1fr}.settings-sidebar{position:static;top:auto}.settings-nav{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px}.settings-nav-link{grid-template-columns:auto minmax(max-content,1fr) auto;flex:0 0 auto}.settings-actions{max-width:none}}
 @media(max-width:940px){.settings-overview{align-items:stretch;flex-direction:column}.settings-overview-stats{justify-content:flex-start}.setting-row{grid-template-columns:1fr}.setting-state{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:620px){h1{font-size:24px}.settings-overview{padding:15px}.settings-overview-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.settings-stat{min-width:0}.settings-nav-link{min-height:34px}.settings-group-head{gap:10px}.settings-count{align-self:flex-start}.setting-state{grid-template-columns:1fr}.settings-actions{right:auto}}
@@ -2795,203 +2505,8 @@ document.addEventListener('click', function(event) {
     resetEnvSaveIfDirty(form);
   }
 });
-__CONTEST_ADMIN_JS__
 </script>
 </body></html>"""
-
-CONTEST_ADMIN_CSS = r"""
-.contest-settings-panel{padding:14px 18px;border-bottom:1px solid rgba(148,163,184,.10);background:rgba(2,6,12,.16)}
-.contest-panel{border:1px solid rgba(45,212,191,.20);border-radius:8px;background:rgba(2,6,23,.34);overflow:hidden}
-.contest-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid rgba(148,163,184,.10);background:rgba(15,23,42,.46)}
-.contest-title{color:#dbeafe;font-size:13px;font-weight:900}
-.contest-state{color:#8da0b8;font-size:11px;font-weight:800;white-space:nowrap}
-.contest-body{display:grid;gap:10px;padding:10px 12px 12px}
-.contest-account-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.contest-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.contest-login-grid{display:grid;grid-template-columns:minmax(180px,1.2fr) repeat(3,minmax(92px,.8fr)) auto auto auto;gap:7px;align-items:center}
-.contest-login-grid input{width:100%;min-width:0;border-radius:8px;padding:7px 9px;font-size:12px}
-.contest-btn{border-radius:8px;padding:7px 10px;border:1px solid rgba(45,212,191,.24);background:rgba(20,184,166,.14);color:#ccfbf1;font-size:12px;font-weight:850;white-space:nowrap}
-.contest-btn.secondary{border-color:rgba(148,163,184,.18);background:rgba(15,23,42,.62);color:#dbeafe}
-.contest-list{display:grid;gap:7px}
-.contest-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;align-items:center;border:1px solid rgba(148,163,184,.12);border-radius:8px;padding:9px;background:rgba(15,23,42,.38)}
-.contest-name{color:#eef4fb;font-size:13px;font-weight:850;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.contest-meta{margin-top:3px;color:#8da0b8;font-size:11px;overflow-wrap:anywhere}
-.contest-chip-row{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
-.contest-chip{border:1px solid rgba(96,165,250,.22);border-radius:8px;padding:2px 6px;color:#bfdbfe;background:rgba(37,99,235,.12);font-size:10.5px;font-weight:850}
-.contest-chip.joined{color:#bbf7d0;border-color:rgba(52,211,153,.24);background:rgba(6,78,59,.18)}
-.contest-message{color:#94a3b8;font-size:12px;overflow-wrap:anywhere}
-.contest-message.ok{color:#bbf7d0}
-.contest-message.err{color:#fecdd3}
-@media(max-width:940px){.contest-login-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.contest-row{grid-template-columns:1fr}.contest-row .contest-btn{width:100%}}
-@media(max-width:560px){.contest-login-grid{grid-template-columns:1fr}.contest-head{align-items:flex-start;flex-direction:column}}
-"""
-
-CONTEST_ADMIN_JS = r"""
-var contestStatusData = {ok:true, logged_in:false, available_contests:[]};
-var contestEventSource = null;
-function contestEl(id){return document.getElementById(id);}
-function contestEsc(value){return String(value == null ? '' : value).replace(/[&<>"']/g,function(ch){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];});}
-function contestJsArg(value){return contestEsc(JSON.stringify(String(value == null ? '' : value)));}
-function contestFmtAmount(value){var n=Number(value);return Number.isFinite(n)?n.toLocaleString('zh-CN',{maximumFractionDigits:2}):'--';}
-function contestRowsFromStatus(status){
-  var remote = status && status.contests && status.contests.ok ? status.contests.items : null;
-  return Array.isArray(remote) ? remote : (Array.isArray(status && status.available_contests) ? status.available_contests : []);
-}
-function renderContestPanel(){
-  var st = contestStatusData || {};
-  var rows = contestRowsFromStatus(st);
-  var pending = rows.filter(function(item){return !item.joined && ['active','upcoming'].includes(String(item.status || ''));});
-  var user = st.user || {};
-  var stateText = st.logged_in ? (pending.length ? '有 ' + pending.length + ' 场可参加' : (st.enabled ? '参赛中 ' + (st.active_contest_id || '') : '已登录')) : '未登录';
-  var message = st.local_message || st.last_error || '';
-  var messageClass = st.local_error ? 'err' : (message ? 'ok' : '');
-  var loginBlock = st.logged_in ? (
-    '<div class="contest-account-row">' +
-      '<div class="contest-message">账号：' + contestEsc(user.nickname || user.username || '已登录') + (st.active_contest_id ? ' · 当前比赛 ' + contestEsc(st.active_contest_id) : '') + '</div>' +
-      '<div class="contest-actions">' +
-        '<button type="button" class="contest-btn secondary" onclick="refreshContestStatus()">刷新</button>' +
-        '<button type="button" class="contest-btn secondary" onclick="contestLogout()">退出</button>' +
-      '</div>' +
-    '</div>'
-  ) : (
-    '<div class="contest-login-grid">' +
-      '<input id="contestServerUrl" placeholder="服务端 URL" value="' + contestEsc(st.server_url || '') + '" autocomplete="url">' +
-      '<input id="contestUsername" placeholder="用户名" autocomplete="username">' +
-      '<input id="contestPassword" placeholder="密码" type="password" autocomplete="current-password">' +
-      '<input id="contestNickname" placeholder="昵称" autocomplete="nickname">' +
-      '<button type="button" class="contest-btn" onclick="contestLogin(\'login\')">登录</button>' +
-      '<button type="button" class="contest-btn secondary" onclick="contestLogin(\'register\')">注册</button>' +
-      '<button type="button" class="contest-btn secondary" onclick="contestLinuxDoLogin()">LinuxDo 登录</button>' +
-    '</div>'
-  );
-  var list = rows.length ? '<div class="contest-list">' + rows.map(function(item){
-    var joined = !!item.joined || item.contest_id === st.active_contest_id;
-    var action = joined
-      ? '<button type="button" class="contest-btn secondary" onclick="refreshContestStatus()">已参加</button>'
-      : '<button type="button" class="contest-btn" onclick="contestJoin(' + contestJsArg(item.contest_id) + ')">参加</button>';
-    return '<div class="contest-row">' +
-      '<div>' +
-        '<div class="contest-name">' + contestEsc(item.name || item.contest_id || '--') + '</div>' +
-        '<div class="contest-meta">' + contestEsc(item.starts_at || '') + ' 至 ' + contestEsc(item.ends_at || '') + '</div>' +
-        '<div class="contest-chip-row">' +
-          '<span class="contest-chip">' + contestEsc(item.status || 'contest') + '</span>' +
-          (joined ? '<span class="contest-chip joined">已参加</span>' : '') +
-          '<span class="contest-chip">初始 ' + contestFmtAmount(item.initial_cash) + '</span>' +
-        '</div>' +
-      '</div>' +
-      '<div>' + action + '</div>' +
-    '</div>';
-  }).join('') + '</div>' : '<div class="contest-message">' + (st.logged_in ? '暂无比赛' : '登录后显示比赛') + '</div>';
-  return '<div id="contestPanel" class="contest-panel" data-contest-panel>' +
-    '<div class="contest-head"><div class="contest-title">策略大赛</div><div class="contest-state">' + contestEsc(stateText) + '</div></div>' +
-    '<div class="contest-body">' +
-      loginBlock +
-      (message ? '<div id="contestMessage" class="contest-message ' + messageClass + '">' + contestEsc(message) + '</div>' : '<div id="contestMessage" class="contest-message"></div>') +
-      list +
-    '</div>' +
-  '</div>';
-}
-function renderContestPanelIntoSettings(){
-  var panel = contestEl('contestPanel');
-  if (panel) panel.outerHTML = renderContestPanel();
-}
-function postContestApi(path, payload){
-  return fetch(path, {
-    method:'POST',
-    credentials:'same-origin',
-    headers:{'Content-Type':'application/json; charset=utf-8','Accept':'application/json','X-NiuOne-Action':'1'},
-    body:JSON.stringify(payload || {})
-  }).then(function(response){
-    return response.json().catch(function(){return null;}).then(function(data){
-      if (!response.ok || !data) throw new Error((data && data.error) || '请求失败');
-      return data;
-    });
-  });
-}
-function connectContestEvents(){
-  if (contestEventSource || typeof EventSource === 'undefined') return;
-  contestEventSource = new EventSource('/api/contest/events');
-  contestEventSource.addEventListener('contest', function(event){
-    try {
-      var data = JSON.parse(event.data || '{}');
-      contestStatusData = Object.assign({}, contestStatusData || {}, {local_error:false, local_message:'收到比赛通知：' + (data.contest_id || '新比赛')});
-    } catch (_err) {
-      contestStatusData = Object.assign({}, contestStatusData || {}, {local_error:false, local_message:'收到比赛通知'});
-    }
-    refreshContestStatus();
-  });
-  contestEventSource.onerror = function(){
-    if (contestEventSource) contestEventSource.close();
-    contestEventSource = null;
-    window.setTimeout(function(){if ((contestStatusData || {}).logged_in) connectContestEvents();}, 15000);
-  };
-}
-async function refreshContestStatus(){
-  try {
-    var response = await fetch('/api/contest/status', {credentials:'same-origin', headers:{'Accept':'application/json'}});
-    contestStatusData = await response.json();
-    if (contestStatusData && contestStatusData.logged_in) connectContestEvents();
-  } catch (error) {
-    contestStatusData = Object.assign({}, contestStatusData || {}, {local_error:true, local_message:String(error)});
-  }
-  renderContestPanelIntoSettings();
-}
-async function contestLogin(mode){
-  var payload = {
-    server_url: contestEl('contestServerUrl') ? contestEl('contestServerUrl').value : '',
-    username: contestEl('contestUsername') ? contestEl('contestUsername').value : '',
-    password: contestEl('contestPassword') ? contestEl('contestPassword').value : '',
-    nickname: contestEl('contestNickname') ? contestEl('contestNickname').value : ''
-  };
-  try {
-    var data = await postContestApi(mode === 'register' ? '/api/contest/register' : '/api/contest/login', payload);
-    contestStatusData = Object.assign({}, contestStatusData || {}, data, {local_error:!data.ok, local_message:data.ok ? '已连接比赛服务端' : (data.error || '登录失败')});
-    if (data.ok) await refreshContestStatus();
-  } catch (error) {
-    contestStatusData = Object.assign({}, contestStatusData || {}, {local_error:true, local_message:String(error)});
-  }
-  renderContestPanelIntoSettings();
-}
-async function contestLinuxDoLogin(){
-  var payload = {
-    server_url: contestEl('contestServerUrl') ? contestEl('contestServerUrl').value : ''
-  };
-  try {
-    var data = await postContestApi('/api/contest/linuxdo/start', payload);
-    if (data && data.ok && data.auth_url) {
-      window.location.href = data.auth_url;
-      return;
-    }
-    contestStatusData = Object.assign({}, contestStatusData || {}, data || {}, {local_error:true, local_message:(data && data.error) || 'LinuxDo 登录不可用'});
-  } catch (error) {
-    contestStatusData = Object.assign({}, contestStatusData || {}, {local_error:true, local_message:String(error)});
-  }
-  renderContestPanelIntoSettings();
-}
-async function contestJoin(id){
-  try {
-    var data = await postContestApi('/api/contest/join', {contest_id:id});
-    contestStatusData = Object.assign({}, contestStatusData || {}, data, {local_error:!data.ok, local_message:data.ok ? '已参加比赛' : (data.error || '参加失败')});
-    if (data.ok) await refreshContestStatus();
-  } catch (error) {
-    contestStatusData = Object.assign({}, contestStatusData || {}, {local_error:true, local_message:String(error)});
-  }
-  renderContestPanelIntoSettings();
-}
-async function contestLogout(){
-  try {
-    var data = await postContestApi('/api/contest/logout', {});
-    contestStatusData = {ok:true, logged_in:false, available_contests:[], local_error:!data.ok, local_message:data.ok ? '已退出比赛账号' : (data.error || '退出失败')};
-    if (contestEventSource) contestEventSource.close();
-    contestEventSource = null;
-  } catch (error) {
-    contestStatusData = Object.assign({}, contestStatusData || {}, {local_error:true, local_message:String(error)});
-  }
-  renderContestPanelIntoSettings();
-}
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', refreshContestStatus, {once:true});
-else refreshContestStatus();
-"""
 
 INDEX_HTML = r"""<!doctype html>
 <html lang="zh-CN">
@@ -7039,38 +6554,6 @@ def fmt_admin_time(ts: float | None) -> str:
     return datetime.fromtimestamp(float(ts)).strftime('%m-%d %H:%M')
 
 
-def render_login_page(error: str = '') -> bytes:
-    err = f'<div class="error">{html.escape(error)}</div>' if error else ''
-    return LOGIN_HTML.replace('__ERROR__', err).encode('utf-8')
-
-
-def render_admin_password_page(error: str = '') -> bytes:
-    err = f'<div class="error">{html.escape(error)}</div>' if error else ''
-    return ADMIN_PASSWORD_HTML.replace('__ERROR__', err).encode('utf-8')
-
-
-def admin_password_enabled() -> bool:
-    return bool(ADMIN_PASSWORD)
-
-
-def admin_session_value() -> str:
-    if not ADMIN_PASSWORD:
-        return ""
-    secret = get_or_create_admin_token()
-    digest = hmac.new(secret.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"), hashlib.sha256).hexdigest()
-    return "ad_" + digest
-
-
-def verify_admin_password(password: str) -> bool:
-    return bool(ADMIN_PASSWORD) and secrets.compare_digest(str(password or ""), ADMIN_PASSWORD)
-
-
-def validate_admin_session(cookie_value: str) -> bool:
-    if not admin_password_enabled():
-        return True
-    return bool(cookie_value) and secrets.compare_digest(cookie_value, admin_session_value())
-
-
 def render_admin_notice(params: dict[str, list[str]]) -> str:
     if params.get("config_saved", [""])[0] in {"env", "env_restart"}:
         return "<div class='okmsg'>业务配置已保存；设置页配置会在后续任务或请求中直接使用。</div>"
@@ -7267,17 +6750,6 @@ def render_nav_label(label: str) -> str:
     return html.escape(label[0]) + f"<span>{html.escape(label[1:])}</span>"
 
 
-def render_contest_settings_panel() -> str:
-    return (
-        "<div class='contest-settings-panel'>"
-        "<div id=\"contestPanel\" class=\"contest-panel\" data-contest-panel>"
-        "<div class=\"contest-head\"><div class=\"contest-title\">策略大赛</div><div class=\"contest-state\">读取中</div></div>"
-        "<div class=\"contest-body\"><div class=\"contest-message\">正在读取比赛状态...</div></div>"
-        "</div>"
-        "</div>"
-    )
-
-
 def render_env_config_table(payload: dict[str, Any]) -> str:
     us_feature_enabled = False
     groups: list[dict[str, Any]] = []
@@ -7327,7 +6799,6 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
                 "</div>"
                 "</div>"
             )
-        group_extra_html = render_contest_settings_panel() if group_name == "策略大赛" else ""
         gated_attrs = ""
         if group_name in US_FEATURE_GATED_GROUPS:
             gated_attrs = " data-feature-gated='us'"
@@ -7352,7 +6823,6 @@ def render_env_config_table(payload: dict[str, Any]) -> str:
             f"<span class='settings-count'>{len(group['items'])} 项</span>"
             "</div>"
             "<div class='settings-list'>"
-            + group_extra_html
             + "".join(rows)
             + "</div>"
             "</section>"
@@ -7405,10 +6875,7 @@ def render_yaml_config(payload: dict[str, Any]) -> str:
 def render_admin_page(params: dict[str, list[str]] | None = None) -> bytes:
     params = params or {}
     config_payload = build_admin_config_payload()
-    contest_visible = any(str(item.get("name") or "") in CONTEST_ENV_NAMES for item in config_payload.get("items") or [])
     page = ADMIN_HTML
-    page = page.replace('__CONTEST_ADMIN_CSS__', CONTEST_ADMIN_CSS if contest_visible else "")
-    page = page.replace('__CONTEST_ADMIN_JS__', CONTEST_ADMIN_JS if contest_visible else "")
     page = page.replace('__NOTICE__', render_admin_notice(params))
     page = page.replace('__ENV_CONFIG__', render_env_config_table(config_payload))
     return page.encode('utf-8')
@@ -7438,33 +6905,14 @@ class Handler(BaseHTTPRequestHandler):
         cf_visitor = self.headers.get("CF-Visitor") or ""
         return '"scheme":"https"' in cf_visitor.replace(" ", "").lower()
 
-    def public_base_url(self) -> str:
-        proto = "https" if self.is_secure_request() else "http"
-        host = str(self.headers.get("Host") or "").strip()
-        if not host:
-            host = f"{self.client_address[0]}:{self.server.server_address[1]}" if getattr(self, "server", None) else "127.0.0.1"
-        return f"{proto}://{host}"
-
-    def query_token(self) -> str:
-        parsed = urlparse(self.path)
-        return parse_qs(parsed.query).get("token", [""])[0].strip()
-
-    def request_token(self) -> str:
-        token = self.query_token()
-        if token:
-            return token
-        return parse_request_cookies(self.headers.get("Cookie")).get(AUTH_COOKIE_NAME, "")
-
     def request_visitor_id(self) -> tuple[str, bool]:
         visitor_id = parse_request_cookies(self.headers.get("Cookie")).get(VISITOR_COOKIE_NAME, "").strip()
         if re.fullmatch(r"nvst_[A-Za-z0-9_-]{20,80}", visitor_id or ""):
             return visitor_id, False
         return "nvst_" + secrets.token_urlsafe(24), True
 
-    def current_user(self) -> dict[str, Any] | None:
-        if not AUTH_ENABLED:
-            return {"role": "admin", "nickname": "auth-disabled"}
-        return authenticate_viewer_token(self.request_token(), ip=self.client_ip(), user_agent=self.headers.get("User-Agent", ""))
+    def current_user(self) -> dict[str, Any]:
+        return {"role": "admin", "nickname": "local"}
 
     def send_security_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -7539,9 +6987,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.write_response(json.dumps({"error": "rate_limited", "retry_after": retry_after}, ensure_ascii=False).encode("utf-8"))
         else:
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.write_response(render_login_page("访问过于频繁，请稍后再试"))
+            self.write_response(b"rate limited")
 
     def enforce_rate_limit(self, scope: str, key: str, limit: int) -> bool:
         ok, retry_after = check_rate_limit(scope, key, limit)
@@ -7550,21 +6998,9 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def cookie_flags(self) -> str:
-        secure = "; Secure" if self.is_secure_request() else ""
-        return f"Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax{secure}"
-
     def visitor_cookie_flags(self) -> str:
         secure = "; Secure" if self.is_secure_request() else ""
         return f"Path=/; Max-Age=31536000; SameSite=Lax{secure}"
-
-    def admin_session_cookie_flags(self) -> str:
-        secure = "; Secure" if self.is_secure_request() else ""
-        return f"Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}"
-
-    def admin_password_session_valid(self) -> bool:
-        cookie_value = parse_request_cookies(self.headers.get("Cookie")).get(ADMIN_PASSWORD_COOKIE_NAME, "")
-        return validate_admin_session(cookie_value)
 
     def send_html(self, payload: bytes, status: int = 200) -> None:
         content_type = "text/html; charset=utf-8"
@@ -7576,82 +7012,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.write_response(body)
 
-    def redirect(
-        self,
-        location: str,
-        *,
-        set_cookie: str | None = None,
-        clear_cookie: bool = False,
-        set_admin_cookie: str | None = None,
-        clear_admin_cookie: bool = False,
-    ) -> None:
+    def redirect(self, location: str) -> None:
         self.send_response(303)
         self.send_header("Location", location)
         self.send_header("Cache-Control", "no-store")
-        if set_cookie:
-            self.send_header("Set-Cookie", f"{AUTH_COOKIE_NAME}={set_cookie}; {self.cookie_flags()}")
-        if clear_cookie:
-            secure = "; Secure" if self.is_secure_request() else ""
-            self.send_header("Set-Cookie", f"{AUTH_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}")
-        if set_admin_cookie:
-            self.send_header("Set-Cookie", f"{ADMIN_PASSWORD_COOKIE_NAME}={set_admin_cookie}; {self.admin_session_cookie_flags()}")
-        if clear_admin_cookie:
-            secure = "; Secure" if self.is_secure_request() else ""
-            self.send_header("Set-Cookie", f"{ADMIN_PASSWORD_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}")
         self.end_headers()
 
-    def send_auth_required(self) -> bool:
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/"):
-            self.send_response(401)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.write_response(json.dumps({"error": "auth_required"}, ensure_ascii=False).encode("utf-8"))
-        else:
-            self.redirect("/login")
-        return False
-
-    def send_admin_password_required(self) -> bool:
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/"):
-            self.send_response(403)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.write_response(json.dumps({"error": "admin_password_required"}, ensure_ascii=False).encode("utf-8"))
-        else:
-            self.send_html(render_admin_password_page())
-        return False
-
-    def require_user(self) -> dict[str, Any] | None:
-        user = self.current_user()
-        if not user:
-            self.send_auth_required()
-            return None
-        return user
-
-    def require_admin_identity(self) -> dict[str, Any] | None:
-        user = self.require_user()
-        if not user:
-            return None
-        if user.get("role") != "admin":
-            self.send_response(403)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.write_response(json.dumps({"error": "admin_required"}, ensure_ascii=False).encode("utf-8"))
-            return None
-        return user
-
-    def require_admin(self) -> dict[str, Any] | None:
-        user = self.require_admin_identity()
-        if not user:
-            return None
-        if not self.admin_password_session_valid():
-            self.send_admin_password_required()
-            return None
-        return user
+    def require_admin(self) -> dict[str, Any]:
+        return self.current_user()
 
     def read_form(self) -> dict[str, str]:
         try:
@@ -7671,21 +7039,6 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 result[key] = values[-1] if values else ""
         return result
-
-    def read_json_body(self) -> dict[str, Any]:
-        try:
-            length = int(self.headers.get("Content-Length", "0") or 0)
-        except ValueError:
-            length = 0
-        if length > MAX_POST_BODY_BYTES:
-            raise RequestTooLarge(f"request body too large: {length}")
-        raw = self.rfile.read(length)
-        if not raw:
-            return {}
-        data = json.loads(raw.decode("utf-8", "ignore"))
-        if not isinstance(data, dict):
-            raise ValueError("json_object_required")
-        return data
 
     def send_payload(self, payload: bytes, *, content_type: str = "application/json; charset=utf-8",
                      edge_ttl: int = 10, browser_ttl: int = 3, cache_hit: bool | None = None) -> None:
@@ -7715,52 +7068,19 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
         self.send_payload(payload, edge_ttl=0 if no_store else 1)
 
-    def send_contest_sse(self, result: dict[str, Any]) -> None:
-        events = result.get("events") if isinstance(result, dict) else []
-        chunks: list[str] = []
-        if isinstance(events, list):
-            for item in events:
-                if not isinstance(item, dict):
-                    continue
-                data = json.dumps(item.get("data") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                chunks.append(
-                    f"id: {int(item.get('id') or 0)}\n"
-                    f"event: {item.get('event') or 'message'}\n"
-                    f"data: {data}\n\n"
-                )
-        body = ("".join(chunks) if chunks else ": heartbeat\n\n").encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.write_response(body)
-
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
         if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
             return
-        if parsed.path == "/login":
+        if parsed.path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", "private, max-age=30, stale-while-revalidate=300")
+            self.send_header("CDN-Cache-Control", "no-store")
             self.end_headers()
             return
-        if parsed.path == "/":
-            if self.current_user():
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Cache-Control", "private, max-age=30, stale-while-revalidate=300")
-                self.send_header("CDN-Cache-Control", "no-store")
-                self.end_headers()
-            else:
-                self.redirect("/login")
-            return
         if parsed.path.startswith("/api/"):
-            if self.current_user():
-                self.send_response(200)
-            else:
-                self.send_response(401)
+            self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -7772,48 +7092,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
             return
-        query_token = self.query_token()
-        if query_token and not parsed.path.startswith("/api/"):
-            user = authenticate_viewer_token(query_token, ip=self.client_ip(), user_agent=self.headers.get("User-Agent", ""))
-            if user:
-                self.redirect(remove_query_param(self.path, "token"), set_cookie=query_token)
-                return
-        if parsed.path == "/login":
-            if self.current_user():
-                self.redirect("/")
-            else:
-                self.send_html(render_login_page())
-            return
-        if parsed.path == "/logout":
-            self.redirect("/login", clear_cookie=True, clear_admin_cookie=True)
-            return
         if parsed.path == "/admin":
-            if not self.require_admin():
-                return
             self.send_html(render_admin_page(parse_qs(parsed.query)))
             return
-        if parsed.path == "/api/auth/status":
-            user = self.current_user()
-            self.send_json_uncached({"authenticated": bool(user), "user": user and {"nickname": user.get("nickname"), "role": user.get("role")}, "online": count_online_viewers()})
-            return
-        if parsed.path == "/api/admin/invites":
-            if not self.require_admin():
-                return
-            self.send_json_uncached({"items": list_invite_codes()})
-            return
-        if parsed.path == "/api/admin/viewers":
-            if not self.require_admin():
-                return
-            self.send_json_uncached({"items": list_viewers(), "online": count_online_viewers()})
-            return
         if parsed.path == "/api/admin/config":
-            if not self.require_admin():
-                return
             self.send_json_uncached(build_admin_config_payload())
             return
         if parsed.path == "/":
-            if not self.require_user():
-                return
             visitor_id, new_visitor = self.request_visitor_id()
             visit_stats = increment_visit_count(visitor_id)
             page = INDEX_HTML.replace("__VISIT_COUNT__", f"{visit_stats['visits']:,}")
@@ -7832,29 +7117,8 @@ class Handler(BaseHTTPRequestHandler):
             self.write_response(body)
             return
         if parsed.path.startswith("/api/"):
-            user = self.require_user()
-            if not user:
+            if not self.enforce_rate_limit("api", self.client_ip(), RATE_LIMIT_API):
                 return
-            token_key = hash_token(self.request_token())[:16] if self.request_token() else self.client_ip()
-            if not self.enforce_rate_limit("auth", token_key, RATE_LIMIT_AUTH):
-                return
-        if parsed.path == "/api/contest/linuxdo/complete":
-            query = parse_qs(parsed.query)
-            result = contest_client.complete_linuxdo_login(
-                str(query.get("server_url", [""])[0] or ""),
-                str(query.get("ticket", [""])[0] or ""),
-            )
-            if result.get("ok"):
-                self.redirect("/admin?contest_login=linuxdo_ok")
-            else:
-                self.redirect("/admin?contest_login=linuxdo_error")
-            return
-        if parsed.path == "/api/contest/events":
-            self.send_contest_sse(contest_client.fetch_contest_events())
-            return
-        if parsed.path == "/api/contest/status":
-            self.send_json_uncached(contest_client.client_status(fetch_remote=True))
-            return
         if parsed.path == "/api/x_media":
             params = parse_qs(parsed.query)
             media_url = params.get("url", [""])[0].strip()
@@ -7969,87 +7233,6 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
             return
-        if parsed.path == "/login":
-            if not self.enforce_rate_limit("login", self.client_ip(), RATE_LIMIT_LOGIN):
-                return
-            try:
-                form = self.read_form()
-            except RequestTooLarge:
-                self.send_response(413)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.write_response(render_login_page("请求过大，请重新提交"))
-                return
-            result = redeem_invite_code(form.get("code", ""), nickname=form.get("nickname", ""), ip=self.client_ip(), user_agent=self.headers.get("User-Agent", ""))
-            if result.get("ok"):
-                self.redirect("/", set_cookie=result["token"])
-            else:
-                self.send_html(render_login_page(result.get("error", "邀请码无效")), status=403)
-            return
-        if parsed.path == "/admin/password":
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            user = self.require_admin_identity()
-            if not user:
-                return
-            try:
-                form = self.read_form()
-            except RequestTooLarge:
-                self.send_html(render_admin_password_page("请求过大，请重新提交"), status=413)
-                return
-            if verify_admin_password(form.get("admin_password", "")):
-                self.redirect("/admin", set_admin_cookie=admin_session_value())
-            else:
-                self.send_html(render_admin_password_page("管理员密码错误"), status=403)
-            return
-        if parsed.path.startswith("/api/contest/"):
-            if not self.require_user():
-                return
-            if not self.require_api_action_request():
-                return
-            try:
-                payload = self.read_json_body()
-                if parsed.path == "/api/contest/login":
-                    result = contest_client.login_user(
-                        str(payload.get("server_url") or ""),
-                        str(payload.get("username") or ""),
-                        str(payload.get("password") or ""),
-                    )
-                elif parsed.path == "/api/contest/linuxdo/start":
-                    result = contest_client.start_linuxdo_login(
-                        str(payload.get("server_url") or ""),
-                        self.public_base_url().rstrip("/") + "/api/contest/linuxdo/complete",
-                    )
-                elif parsed.path == "/api/contest/register":
-                    result = contest_client.register_user(
-                        str(payload.get("server_url") or ""),
-                        str(payload.get("username") or ""),
-                        str(payload.get("password") or ""),
-                        str(payload.get("nickname") or ""),
-                    )
-                elif parsed.path == "/api/contest/join":
-                    result = contest_client.join_contest(str(payload.get("contest_id") or ""))
-                elif parsed.path == "/api/contest/logout":
-                    result = contest_client.logout_user()
-                else:
-                    self.send_json_error(404, "not_found")
-                    return
-            except RequestTooLarge:
-                self.send_response(413)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.write_response(json.dumps({"ok": False, "error": "request_too_large"}, ensure_ascii=False).encode("utf-8"))
-                return
-            except json.JSONDecodeError:
-                self.send_json_uncached({"ok": False, "error": "invalid_json"})
-                return
-            except Exception as exc:
-                self.send_json_uncached({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
-                return
-            self.send_json_uncached(result)
-            return
         if parsed.path in {"/api/b1_screen", "/api/b1_screen/trigger"}:
             params = parse_qs(parsed.query)
             if parsed.path == "/api/b1_screen" and params.get("force", ["0"])[0].lower() not in {"1", "true", "yes"}:
@@ -8140,55 +7323,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json_uncached(result)
             else:
                 self.redirect("/admin?config_saved=yaml#yaml")
-            return
-        if parsed.path in {"/admin/invite/create", "/api/admin/invite/create"}:
-            if not self.require_admin():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            try:
-                form = self.read_form()
-            except RequestTooLarge:
-                self.send_json_uncached({"ok": False, "error": "request_too_large"})
-                return
-            try:
-                invite = create_invite_code(code=form.get("code") or None, max_uses=int(form.get("max_uses") or 1), ttl_hours=int(form.get("ttl_hours") or 168), note=form.get("note", ""))
-            except Exception as exc:
-                if parsed.path.startswith("/api/"):
-                    self.send_json_uncached({"ok": False, "error": str(exc)})
-                else:
-                    self.redirect("/admin")
-                return
-            if parsed.path.startswith("/api/"):
-                self.send_json_uncached({"ok": True, "invite": invite})
-            else:
-                self.redirect("/admin")
-            return
-        if parsed.path == "/admin/invite/toggle":
-            if not self.require_admin():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            try:
-                form = self.read_form()
-            except RequestTooLarge:
-                self.redirect("/admin")
-                return
-            set_invite_disabled(form.get("code", ""), form.get("disabled", "1") in {"1", "true", "yes"})
-            self.redirect("/admin")
-            return
-        if parsed.path == "/admin/viewer/toggle":
-            if not self.require_admin():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            try:
-                form = self.read_form()
-            except RequestTooLarge:
-                self.redirect("/admin")
-                return
-            set_viewer_disabled(form.get("token_hash", ""), form.get("disabled", "1") in {"1", "true", "yes"})
-            self.redirect("/admin")
             return
         self.send_response(404)
         self.end_headers()
@@ -8337,8 +7471,7 @@ def _safe_float(v: str) -> float | None:
 
 
 def main() -> None:
-    ensure_auth_db()
-    get_or_create_admin_token()
+    ensure_stats_db()
     parser = argparse.ArgumentParser(description="NiuOne dashboard")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
@@ -8347,7 +7480,8 @@ def main() -> None:
     start_b1_scheduler()
     start_pending_decision_executor()
     print(f"牛牛1号：http://{args.host}:{args.port}")
-    print(f"用户管理：admin token saved at {ADMIN_TOKEN_FILE}; open /admin?token=<token-from-file>")
+    print("设置页：/admin")
+    print(f"访问统计：{STATS_DB}")
     print(f"消息历史：{push_history.DB_PATH}")
     try:
         server.serve_forever()

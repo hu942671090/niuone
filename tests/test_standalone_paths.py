@@ -26,7 +26,7 @@ spec.loader.exec_module(d)
 import push_history
 print(json.dumps({{
   'runtime_home': str(d.DASHBOARD_HOME),
-  'auth_db': str(d.AUTH_DB),
+  'stats_db': str(d.STATS_DB),
   'cron_output_dir': str(d.CRON_OUTPUT_DIR),
   'trader_script': str(d.TRADER_SCRIPT),
   'push_history_db': str(push_history.DB_PATH),
@@ -35,7 +35,7 @@ print(json.dumps({{
             out = subprocess.check_output([sys.executable, '-c', code], env=env, text=True)
             data = json.loads(out)
             self.assertEqual(data['runtime_home'], tmp)
-            self.assertTrue(data['auth_db'].startswith(tmp + os.sep))
+            self.assertTrue(data['stats_db'].startswith(tmp + os.sep))
             self.assertTrue(data['cron_output_dir'].startswith(tmp + os.sep))
             self.assertEqual(data['push_history_db'], str(Path(tmp) / 'push_history.db'))
             self.assertEqual(data['trader_script'], str(SRC / 'niuniu_practice_trader.py'))

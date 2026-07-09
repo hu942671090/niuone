@@ -47,7 +47,7 @@ script = Path("run.bat")
 if not script.exists():
     raise SystemExit("run.bat is missing")
 text = script.read_text(encoding="utf-8")
-for needle in ("--port", "--admin-password", "--no-browser", "DASHBOARD_PORT"):
+for needle in ("--port", "--no-browser", "DASHBOARD_PORT"):
     if needle not in text:
         raise SystemExit(f"run.bat is missing {needle}")
 PY
