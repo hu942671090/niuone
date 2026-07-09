@@ -47,9 +47,12 @@ script = Path("run.bat")
 if not script.exists():
     raise SystemExit("run.bat is missing")
 text = script.read_text(encoding="utf-8")
-for needle in ("--port", "--no-browser", "DASHBOARD_PORT"):
+for needle in ("--port", "--no-browser", "--service", "DASHBOARD_PORT", "manage-long-running.ps1"):
     if needle not in text:
         raise SystemExit(f"run.bat is missing {needle}")
+for path in (Path("scripts/manage-long-running.ps1"), Path("scripts/run-windows-service.ps1")):
+    if not path.exists():
+        raise SystemExit(f"{path} is missing")
 PY
 
 echo "== Unit tests =="

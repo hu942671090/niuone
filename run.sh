@@ -15,6 +15,7 @@ Options:
   --no-browser     Do not open the browser automatically
   --skip-install   Skip dependency installation
   --port VALUE     Save the dashboard port to dashboard.env before starting
+  --service        Install and start native long-running services
   -h, --help       Show this help
 
 Environment:
@@ -40,6 +41,7 @@ normalize_port_arg() {
 
 OPEN_BROWSER="${NIUONE_OPEN_BROWSER:-1}"
 INSTALL_DEPS="${NIUONE_INSTALL_DEPS:-1}"
+SERVICE_MODE=0
 PORT_ARG=""
 PORT_ARG_SET=0
 
@@ -50,6 +52,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-install)
       INSTALL_DEPS=0
+      ;;
+    --service)
+      SERVICE_MODE=1
       ;;
     --port)
       if [[ $# -lt 2 ]]; then
@@ -179,6 +184,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   python3 -m venv "$VENV_DIR"
   PYTHON_BIN="$VENV_DIR/bin/python"
   VENV_CREATED=1
+  save_env_value PYTHON_BIN "$PYTHON_BIN"
 fi
 
 if [[ "$INSTALL_DEPS" != "0" ]]; then
@@ -205,13 +211,6 @@ else
   echo "== Skipping dependency installation =="
 fi
 
-URL="http://$DASHBOARD_HOST:$DASHBOARD_PORT/"
-echo "== Starting NiuOne Dashboard =="
-echo "  URL:        $URL"
-echo "  data:       $DASHBOARD_HOME"
-echo "  env:        $ENV_FILE"
-echo "  stop:       Ctrl+C"
-
 open_url() {
   if command -v open >/dev/null 2>&1; then
     open "$1"
@@ -220,10 +219,9 @@ open_url() {
   fi
 }
 
-if [[ "$OPEN_BROWSER" != "0" ]]; then
-  (
-    for _ in {1..80}; do
-      if "$PYTHON_BIN" - "$DASHBOARD_HOST" "$DASHBOARD_PORT" <<'PY' >/dev/null 2>&1
+open_dashboard_when_ready() {
+  for _ in {1..80}; do
+    if "$PYTHON_BIN" - "$DASHBOARD_HOST" "$DASHBOARD_PORT" <<'PY' >/dev/null 2>&1
 import socket
 import sys
 
@@ -231,15 +229,40 @@ host, port = sys.argv[1], int(sys.argv[2])
 with socket.create_connection((host, port), timeout=0.25):
     pass
 PY
-      then
-        open_url "$URL" >/dev/null 2>&1 || true
-        exit 0
-      fi
-      sleep 0.25
-    done
-  ) &
-fi
+    then
+      open_url "$URL" >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
 
+URL="http://$DASHBOARD_HOST:$DASHBOARD_PORT/"
 export DASHBOARD_ENV_FILE="$ENV_FILE"
 export DASHBOARD_HOME DASHBOARD_HOST DASHBOARD_PORT PYTHON_BIN
+
+if [[ "$SERVICE_MODE" == "1" ]]; then
+  echo "== Installing NiuOne long-running services =="
+  "$ROOT/scripts/manage-long-running.sh" install
+  echo "== NiuOne is running in service mode =="
+  echo "  URL:        $URL"
+  echo "  data:       $DASHBOARD_HOME"
+  echo "  env:        $ENV_FILE"
+  if [[ "$OPEN_BROWSER" != "0" ]]; then
+    open_dashboard_when_ready || true
+  fi
+  exit 0
+fi
+
+echo "== Starting NiuOne Dashboard =="
+echo "  URL:        $URL"
+echo "  data:       $DASHBOARD_HOME"
+echo "  env:        $ENV_FILE"
+echo "  stop:       Ctrl+C"
+
+if [[ "$OPEN_BROWSER" != "0" ]]; then
+  open_dashboard_when_ready &
+fi
+
 exec "$ROOT/run-dashboard.sh"

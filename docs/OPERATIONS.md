@@ -127,37 +127,33 @@ curl -s -o /dev/null -w 'HTTP:%{http_code} TOTAL:%{time_total}\n' 'http://127.0.
 
 ## 5. 本机长期运行
 
-macOS LaunchAgent 文件通常位于：
-
-```text
-~/Library/LaunchAgents/ai.niuone.dashboard.plist
-~/Library/LaunchAgents/ai.niuone.cron-scheduler.plist
-~/Library/LaunchAgents/ai.niuone.x-watchlist.plist
-```
-
-它们应分别调用：
-
-```text
-/path/to/NiuOne/run-dashboard.sh
-/path/to/NiuOne/run-niuone-cron-scheduler.sh
-/path/to/NiuOne/run-x-watchlist-daemon.sh
-```
-
-查看状态：
+通过一键启动入口注册并启动当前平台的长期运行服务：
 
 ```bash
-launchctl print gui/$(id -u)/ai.niuone.dashboard | sed -n '1,100p'
-launchctl print gui/$(id -u)/ai.niuone.cron-scheduler | sed -n '1,100p'
-launchctl print gui/$(id -u)/ai.niuone.x-watchlist | sed -n '1,100p'
+./run.sh --service
 ```
 
-重启：
+Windows：
+
+```cmd
+run.bat --service
+```
+
+macOS / Linux 查看状态或重启：
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/ai.niuone.dashboard
-launchctl kickstart -k gui/$(id -u)/ai.niuone.cron-scheduler
-launchctl kickstart -k gui/$(id -u)/ai.niuone.x-watchlist
+./scripts/manage-long-running.sh status
+./scripts/manage-long-running.sh restart
 ```
+
+Windows PowerShell：
+
+```powershell
+powershell -File .\scripts\manage-long-running.ps1 -Action Status
+powershell -File .\scripts\manage-long-running.ps1 -Action Restart
+```
+
+macOS 使用 LaunchAgent，Linux 使用用户级 systemd，Windows 使用任务计划程序。安装位置、无人值守运行、日志和卸载方式见 [独立运行说明](STANDALONE.md)。
 
 ## 6. 部署流程
 
@@ -176,7 +172,7 @@ cd /path/to/NiuOne
 - 对当前 `127.0.0.1:8787` 服务进程发送 `HUP`
 - 访问 `/` 做 smoke check
 
-如果服务由 LaunchAgent 托管，`HUP` 后通常会由托管器拉起新进程；如果没有托管器，请手动重新运行 `./run.sh` 或对应启动脚本。
+如果服务由长期运行模式托管，`HUP` 后通常会由平台服务管理器拉起新进程；如果没有托管器，请手动重新运行 `./run.sh` 或对应启动脚本。
 
 部署后检查：
 

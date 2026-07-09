@@ -7,6 +7,7 @@ cd /d "%ROOT%" || exit /b 1
 
 set "NO_BROWSER=0"
 set "SKIP_INSTALL=0"
+set "SERVICE_MODE=0"
 set "HELP=0"
 set "PORT_ARG="
 set "PORT_ARG_SET=0"
@@ -20,6 +21,11 @@ if /I "%~1"=="--no-browser" (
 )
 if /I "%~1"=="--skip-install" (
     set "SKIP_INSTALL=1"
+    shift
+    goto parse_args
+)
+if /I "%~1"=="--service" (
+    set "SERVICE_MODE=1"
     shift
     goto parse_args
 )
@@ -131,6 +137,32 @@ if "%SKIP_INSTALL%"=="1" (
 )
 
 set "URL=http://%DASHBOARD_HOST%:%DASHBOARD_PORT%/"
+set "DASHBOARD_ENV_FILE=%ENV_FILE%"
+set "PYTHONDONTWRITEBYTECODE=1"
+if not defined DASHBOARD_CONFIG set "DASHBOARD_CONFIG=%DASHBOARD_HOME%\config.yaml"
+if not defined DASHBOARD_PUSH_HISTORY_DB set "DASHBOARD_PUSH_HISTORY_DB=%DASHBOARD_HOME%\push_history.db"
+if not defined DASHBOARD_PORTFOLIO_STATE set "DASHBOARD_PORTFOLIO_STATE=%DASHBOARD_HOME%\cron\output\niuniu_practice_portfolio.json"
+if not defined DASHBOARD_TRADER_SCRIPT set "DASHBOARD_TRADER_SCRIPT=%ROOT%\app\niuniu_practice_trader.py"
+
+if "%SERVICE_MODE%"=="1" (
+    where powershell.exe >nul 2>nul
+    if errorlevel 1 (
+        echo powershell.exe is required to install Windows scheduled tasks. 1>&2
+        exit /b 1
+    )
+    echo == Installing NiuOne long-running scheduled tasks ==
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\manage-long-running.ps1" -Action Install -Root "%ROOT%" -Python "%PYTHON_BIN%" -LocalDataDir "%LOCAL_DATA_DIR%" -EnvFile "%ENV_FILE%"
+    if errorlevel 1 exit /b 1
+    echo == NiuOne is running in service mode ==
+    echo   URL:        %URL%
+    echo   data:       %DASHBOARD_HOME%
+    echo   env:        %ENV_FILE%
+    if "%NO_BROWSER%"=="0" (
+        start "NiuOne Browser Opener" /min cmd /c "timeout /t 2 /nobreak >nul & start "" "%URL%""
+    )
+    exit /b 0
+)
+
 echo == Starting NiuOne Dashboard ==
 echo   URL:        %URL%
 echo   data:       %DASHBOARD_HOME%
@@ -140,13 +172,6 @@ echo   stop:       Ctrl+C
 if "%NO_BROWSER%"=="0" (
     start "NiuOne Browser Opener" /min cmd /c "timeout /t 2 /nobreak >nul & start "" "%URL%""
 )
-
-set "DASHBOARD_ENV_FILE=%ENV_FILE%"
-set "PYTHONDONTWRITEBYTECODE=1"
-if not defined DASHBOARD_CONFIG set "DASHBOARD_CONFIG=%DASHBOARD_HOME%\config.yaml"
-if not defined DASHBOARD_PUSH_HISTORY_DB set "DASHBOARD_PUSH_HISTORY_DB=%DASHBOARD_HOME%\push_history.db"
-if not defined DASHBOARD_PORTFOLIO_STATE set "DASHBOARD_PORTFOLIO_STATE=%DASHBOARD_HOME%\cron\output\niuniu_practice_portfolio.json"
-if not defined DASHBOARD_TRADER_SCRIPT set "DASHBOARD_TRADER_SCRIPT=%ROOT%\app\niuniu_practice_trader.py"
 
 "%PYTHON_BIN%" "%ROOT%\app\niuone_dashboard.py" --host "%DASHBOARD_HOST%" --port "%DASHBOARD_PORT%"
 exit /b %ERRORLEVEL%
@@ -161,6 +186,7 @@ echo Options:
 echo   --no-browser            Do not open the browser automatically
 echo   --skip-install          Skip dependency installation
 echo   --port VALUE            Save the dashboard port to dashboard.env before starting
+echo   --service               Install and start long-running scheduled tasks
 echo   -h, --help              Show this help
 echo.
 echo Environment:
