@@ -2993,7 +2993,7 @@ INDEX_HTML = r"""<!doctype html>
     .practice-hover-tooltip-row strong.up { color:#ff4d4f; }
     .practice-hover-tooltip-row strong.down { color:#39d98a; }
     .practice-chart-hover-layer.active .practice-hover-line, .practice-chart-hover-layer.active .practice-hover-marker, .practice-chart-hover-layer.active .practice-hover-tooltip { opacity:1; }
-    .practice-trade-marker { appearance:none; position:absolute; z-index:8; width:18px; height:18px; display:grid; place-items:center; padding:0; border-radius:999px; border:2px solid rgba(248,250,252,.92); color:#fff; font-size:9px; line-height:1; font-weight:950; font-family:inherit; cursor:default; transform:translate(-50%,-50%); box-shadow:0 4px 13px rgba(0,0,0,.40), 0 0 0 2px rgba(15,23,42,.62); }
+    .practice-trade-marker { --marker-size:18px; --marker-radius:9px; appearance:none; position:absolute; z-index:8; left:clamp(var(--marker-radius), var(--marker-x), calc(100% - var(--marker-radius))); width:var(--marker-size); min-width:var(--marker-size); max-width:var(--marker-size); height:var(--marker-size); display:grid; place-items:center; padding:0; border-radius:999px; border:2px solid rgba(248,250,252,.92); color:#fff; font-size:9px; line-height:1; font-weight:950; font-family:inherit; cursor:default; transform:translate(-50%,-50%); box-shadow:0 4px 13px rgba(0,0,0,.40), 0 0 0 2px rgba(15,23,42,.62); }
     .practice-trade-marker.buy { background:#2563eb; }
     .practice-trade-marker.sell-partial { background:#f59e0b; color:#241500; }
     .practice-trade-marker.sell-full { background:#ef4444; }
@@ -3096,7 +3096,7 @@ INDEX_HTML = r"""<!doctype html>
     .practice-calendar-day-curve-close { width:22px; height:22px; min-width:22px; display:grid; place-items:center; padding:0; border-radius:7px; border:1px solid rgba(191,219,254,.18); background:rgba(30,41,59,.76); color:#cbd5e1; font-size:13px; line-height:1; font-weight:850; }
     .practice-calendar-day-curve-chart { position:relative; width:100%; height:78px; }
     .practice-calendar-day-curve-svg { width:100%; height:100%; display:block; }
-    .practice-calendar-day-curve-chart .practice-trade-marker { width:15px; height:15px; border-width:1.5px; font-size:7.5px; }
+    .practice-calendar-day-curve-chart .practice-trade-marker { --marker-size:15px; --marker-radius:7.5px; border-width:1.5px; font-size:7.5px; }
     .practice-calendar-day-curve-chart .practice-trade-marker-tooltip { min-width:176px; max-width:min(290px, calc(100vw - 52px)); padding:7px 8px; font-size:10px; }
     .practice-calendar-day-curve-empty { min-height:56px; display:grid; place-items:center; border:1px dashed rgba(148,163,184,.20); border-radius:8px; color:#7b8aa0; font-size:11px; }
     .practice-calendar-card { width:100%; max-height:inherit; min-height:0; display:grid; grid-template-rows:auto auto minmax(0,1fr); overflow:hidden; border:1px solid transparent; border-radius:12px; background:linear-gradient(180deg, #172033, #101827) padding-box, linear-gradient(135deg, rgba(96,165,250,.68), rgba(124,92,255,.56) 48%, rgba(52,211,153,.32)) border-box; box-shadow:0 24px 90px rgba(0,0,0,.58), 0 0 0 1px rgba(15,23,42,.72), inset 0 1px 0 rgba(255,255,255,.075); }
@@ -4559,7 +4559,7 @@ function renderPracticeTradeMarkers(date, xFromTime, series, viewportWidth, view
     const lines = groupTrades.map(practiceTradeMarkerLine);
     const timeText = minuteKey.slice(11);
     const ariaLabel = `${timeText} ${lines.join('；')}`;
-    return `<button type="button" class="practice-trade-marker ${sideClass} ${placement}" style="left:${xPct.toFixed(2)}%;top:${yPct.toFixed(2)}%" aria-label="${esc(ariaLabel)}">
+    return `<button type="button" class="practice-trade-marker ${sideClass} ${placement}" style="--marker-x:${xPct.toFixed(2)}%;top:${yPct.toFixed(2)}%" aria-label="${esc(ariaLabel)}">
       ${esc(markerText)}
       <span class="practice-trade-marker-tooltip" aria-hidden="true">
         <span class="practice-trade-marker-time">${esc(timeText)}</span>

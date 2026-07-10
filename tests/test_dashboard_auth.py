@@ -590,7 +590,17 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn("const side = trade.action === 'BUY' ? '买' : '卖';", dashboard.INDEX_HTML)
         self.assertIn('function renderPracticeTradeMarkerLine', dashboard.INDEX_HTML)
         self.assertIn('practice-trade-marker-side', dashboard.INDEX_HTML)
-        self.assertIn('.practice-trade-marker { appearance:none;', dashboard.INDEX_HTML)
+        self.assertIn('.practice-trade-marker { --marker-size:18px; --marker-radius:9px; appearance:none;', dashboard.INDEX_HTML)
+        self.assertIn(
+            'left:clamp(var(--marker-radius), var(--marker-x), calc(100% - var(--marker-radius)));',
+            dashboard.INDEX_HTML,
+        )
+        self.assertIn('min-width:var(--marker-size); max-width:var(--marker-size);', dashboard.INDEX_HTML)
+        self.assertIn(
+            '.practice-calendar-day-curve-chart .practice-trade-marker { --marker-size:15px; --marker-radius:7.5px;',
+            dashboard.INDEX_HTML,
+        )
+        self.assertIn('style="--marker-x:${xPct.toFixed(2)}%;top:${yPct.toFixed(2)}%"', dashboard.INDEX_HTML)
         self.assertIn('font-family:inherit; cursor:default;', dashboard.INDEX_HTML)
         self.assertNotIn('font-family:inherit; cursor:help;', dashboard.INDEX_HTML)
         self.assertIn('.practice-trade-marker-pnl.up { color:#ff6b6d; }', dashboard.INDEX_HTML)
