@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
+import json
+import os
 import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
@@ -46,6 +51,150 @@ class FakeFrame:
 
 
 class AShareCloseSummaryTests(unittest.TestCase):
+    def test_direct_spot_retries_with_backup_endpoint(self):
+        mod = load_module()
+        items = [
+            {
+                "f12": f"60{i:04d}",
+                "f14": f"测试{i:03d}",
+                "f2": 10 + i / 100,
+                "f3": 1.5,
+                "f6": 1000000 + i,
+                "f10": 1.2,
+                "f100": "半导体",
+            }
+            for i in range(150)
+        ]
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(req, timeout=0):
+            parsed = urlparse(req.full_url)
+            page = int(parse_qs(parsed.query)["pn"][0])
+            calls.append((parsed.hostname, page))
+            if parsed.hostname == "primary.invalid":
+                raise mod.RemoteDisconnected("upstream reset")
+            start = (page - 1) * 100
+            return FakeResponse({"data": {"total": len(items), "diff": items[start:start + 100]}})
+
+        original_urlopen = mod.urlopen
+        original_sleep = mod.time.sleep
+        env_names = (
+            "A_SHARE_SUMMARY_DIRECT_ENDPOINTS",
+            "A_SHARE_SUMMARY_DIRECT_RETRIES",
+            "A_SHARE_SUMMARY_DIRECT_DEADLINE",
+            "A_SHARE_SUMMARY_DIRECT_WORKERS",
+        )
+        original_env = {name: os.environ.get(name) for name in env_names}
+        try:
+            mod.urlopen = fake_urlopen
+            mod.time.sleep = lambda _seconds: None
+            os.environ["A_SHARE_SUMMARY_DIRECT_ENDPOINTS"] = (
+                "https://primary.invalid/api/qt/clist/get,"
+                "https://backup.invalid/api/qt/clist/get"
+            )
+            os.environ["A_SHARE_SUMMARY_DIRECT_RETRIES"] = "2"
+            os.environ["A_SHARE_SUMMARY_DIRECT_DEADLINE"] = "5"
+            os.environ["A_SHARE_SUMMARY_DIRECT_WORKERS"] = "2"
+
+            rows, warning = mod.fetch_eastmoney_spot_direct()
+        finally:
+            mod.urlopen = original_urlopen
+            mod.time.sleep = original_sleep
+            for name, value in original_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.assertEqual(len(rows), 150)
+        self.assertIn("已切换备用域名", warning)
+        self.assertEqual(calls.count(("primary.invalid", 1)), 1)
+        self.assertIn(("backup.invalid", 1), calls)
+        self.assertIn(("backup.invalid", 2), calls)
+
+    def test_fetch_spot_continues_to_sina_after_partial_direct_snapshot(self):
+        mod = load_module()
+        full_rows = sample_spot_rows()
+        class FakeAk:
+            stock_zh_a_spot_em = staticmethod(lambda: [])
+            stock_zh_a_spot = staticmethod(lambda: full_rows)
+
+        mod.ak = FakeAk()
+        mod.quiet_call = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+        mod.fetch_eastmoney_spot_direct = lambda: (
+            sample_spot_rows(),
+            "东财直连只取到 6/5000 只，已按现有样本生成",
+        )
+        original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "5"
+            spot, warning = mod.fetch_spot()
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = original_min_rows
+
+        self.assertIs(spot, full_rows)
+        self.assertIn("已切换新浪现货", warning)
+
+    def test_spot_completeness_rejects_silent_all_zero_snapshot(self):
+        mod = load_module()
+        rows = [
+            {
+                "code": f"60000{i}",
+                "name": f"测试{i}",
+                "pct": 0.0,
+                "price": 0.0,
+                "amount": 0.0,
+                "vol_ratio": 0.0,
+                "industry": "测试",
+            }
+            for i in range(5)
+        ]
+        original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "5"
+            issue = mod.spot_snapshot_issue(rows, None)
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = original_min_rows
+
+        self.assertIn("最新价有效覆盖率", issue)
+
+    def test_spot_completeness_rejects_preclose_delayed_snapshot(self):
+        mod = load_module()
+        mod.MODE = "close"
+        mod.NOW = datetime(2026, 7, 10, 15, 10, tzinfo=mod.CN_TZ)
+        stale_timestamp = int(datetime(2026, 7, 10, 14, 45, tzinfo=mod.CN_TZ).timestamp())
+        rows = [dict(row, quote_ts=stale_timestamp) for row in sample_spot_rows()]
+        original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "5"
+            issue = mod.spot_snapshot_issue(rows, None)
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = original_min_rows
+
+        self.assertIn("收盘后时间戳覆盖率", issue)
+
     def test_build_report_adds_next_day_premarket_guidance(self):
         mod = load_module()
         mod.NOW = datetime(2026, 7, 3, 15, 30, tzinfo=mod.CN_TZ)
@@ -84,6 +233,51 @@ class AShareCloseSummaryTests(unittest.TestCase):
         self.assertIn("默认不开新仓", report)
         self.assertNotIn("涨停 `0`", report)
         self.assertNotIn("成交额 `0元`", report)
+
+    def test_scheduled_report_rejects_missing_spot_before_optional_fetches(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 2, 15, 30, tzinfo=mod.CN_TZ)
+        mod.fetch_spot = lambda: ([], "现货主接口暂不可用")
+        optional_calls = []
+        mod.fetch_industry_fund_flow = lambda: optional_calls.append("fund")
+        mod.fetch_zt_pool = lambda: optional_calls.append("zt")
+
+        with self.assertRaises(mod.SpotSnapshotUnavailable):
+            mod.build_report(require_complete_spot=True)
+
+        self.assertEqual(optional_calls, [])
+
+    def test_scheduled_report_rejects_partial_spot_snapshot(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 2, 15, 30, tzinfo=mod.CN_TZ)
+        mod.fetch_spot = lambda: (sample_spot_rows(), None)
+        original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "1000"
+            with self.assertRaisesRegex(mod.SpotSnapshotUnavailable, "完整性下限"):
+                mod.build_report(require_complete_spot=True)
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = original_min_rows
+
+    def test_main_exits_nonzero_so_scheduler_retries_missing_spot(self):
+        mod = load_module()
+        strict_values = []
+
+        def missing_report(*, require_complete_spot=False):
+            strict_values.append(require_complete_spot)
+            raise mod.SpotSnapshotUnavailable("现货快照为空")
+
+        mod.build_report = missing_report
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            mod.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(strict_values, [True])
+        self.assertIn("等待调度器重试", output.getvalue())
 
 
 if __name__ == "__main__":

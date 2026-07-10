@@ -18,10 +18,12 @@ import re
 import signal
 import sys
 import time
+from http.client import RemoteDisconnected
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -41,6 +43,10 @@ NOW = dt.datetime.now(CN_TZ)
 SCRIPT_NAME = Path(sys.argv[0]).name.lower()
 MODE = "midday" if "midday" in SCRIPT_NAME or "noon" in SCRIPT_NAME else "close"
 TITLE = "午盘总结" if MODE == "midday" else "盘后总结"
+
+
+class SpotSnapshotUnavailable(RuntimeError):
+    """Raised when a scheduled summary cannot obtain a complete spot snapshot."""
 
 
 def is_trading_day_guess(day: dt.date) -> bool:
@@ -179,23 +185,45 @@ def extract_eastmoney_spot_rows(diff: list[dict[str, Any]]) -> list[dict[str, An
             "amount": safe_float(item.get("f6")),
             "vol_ratio": safe_float(item.get("f10")),
             "industry": industry,
+            "quote_ts": safe_int(item.get("f124")),
         })
     return rows
 
 
+def eastmoney_spot_endpoints() -> list[str]:
+    """Return ordered close-summary endpoints, including the delayed close fallback."""
+    configured = os.getenv(
+        "A_SHARE_SUMMARY_DIRECT_ENDPOINTS",
+        "https://push2.eastmoney.com/api/qt/clist/get,"
+        "https://push2delay.eastmoney.com/api/qt/clist/get,"
+        "https://82.push2.eastmoney.com/api/qt/clist/get",
+    )
+    return [item.strip().rstrip("?") for item in configured.split(",") if item.strip()] or [
+        "https://push2.eastmoney.com/api/qt/clist/get"
+    ]
+
+
 def fetch_eastmoney_spot_direct() -> tuple[list[dict[str, Any]], str | None]:
-    """Direct Eastmoney push2 fallback with explicit pagination."""
-    fields = "f12,f14,f2,f3,f6,f10,f100"
+    """Fetch a full Eastmoney snapshot with page retries and endpoint failover."""
+    fields = "f12,f14,f2,f3,f6,f10,f100,f124"
     page_size = 100
     max_pages = safe_int(os.getenv("A_SHARE_SUMMARY_DIRECT_MAX_PAGES", "70"), 70)
     deadline = time.monotonic() + safe_int(os.getenv("A_SHARE_SUMMARY_DIRECT_DEADLINE", "20"), 20)
     workers = max(1, min(12, safe_int(os.getenv("A_SHARE_SUMMARY_DIRECT_WORKERS", "8"), 8)))
+    attempts = max(1, min(5, safe_int(os.getenv("A_SHARE_SUMMARY_DIRECT_RETRIES", "3"), 3)))
+    endpoints = eastmoney_spot_endpoints()
     all_items: list[dict[str, Any]] = []
+    page_errors: list[str] = []
 
-    def fetch_page(page: int) -> tuple[int, int, list[dict[str, Any]]]:
+    def is_retryable_error(exc: Exception) -> bool:
+        if isinstance(exc, HTTPError):
+            return exc.code in {403, 408, 429, 500, 502, 503, 504}
+        return isinstance(exc, (RemoteDisconnected, URLError, TimeoutError, OSError, json.JSONDecodeError))
+
+    def fetch_page_once(page: int, endpoint: str) -> tuple[int, int, list[dict[str, Any]]]:
         remaining = deadline - time.monotonic()
         if remaining <= 1:
-            return 0, page, []
+            raise TimeoutError("东财直连总时限已用尽")
         params = {
             "pn": str(page),
             "pz": str(page_size),
@@ -208,26 +236,48 @@ def fetch_eastmoney_spot_direct() -> tuple[list[dict[str, Any]], str | None]:
             "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
             "fields": fields,
         }
-        url = "https://push2.eastmoney.com/api/qt/clist/get?" + urlencode(params)
+        url = endpoint + "?" + urlencode(params)
         req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"})
         with urlopen(req, timeout=min(5, max(1, remaining))) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
         data = ((payload or {}).get("data") or {})
         return safe_int(data.get("total"), 0), page, data.get("diff") or []
 
-    total, _, first_items = fetch_page(1)
+    def fetch_page(page: int, preferred_endpoint: str | None = None) -> tuple[int, int, list[dict[str, Any]], str]:
+        ordered = ([preferred_endpoint] if preferred_endpoint else []) + [
+            endpoint for endpoint in endpoints if endpoint != preferred_endpoint
+        ]
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            endpoint = ordered[(attempt - 1) % len(ordered)]
+            try:
+                total, fetched_page, diff = fetch_page_once(page, endpoint)
+                if not diff:
+                    raise RemoteDisconnected("empty Eastmoney page")
+                return total, fetched_page, diff, endpoint
+            except Exception as exc:
+                last_exc = exc
+                if attempt < attempts and is_retryable_error(exc) and (deadline - time.monotonic()) > 1.5:
+                    time.sleep(min(0.25 * attempt, max(0.0, deadline - time.monotonic() - 1)))
+                    continue
+                raise
+        raise last_exc or RuntimeError("unknown Eastmoney page error")
+
+    total, _, first_items, preferred_endpoint = fetch_page(1)
     all_items.extend(first_items)
     total_pages = min(max_pages, max(1, math.ceil((total or len(first_items)) / page_size)))
-    page_errors: list[str] = []
     if total_pages > 1 and time.monotonic() < deadline:
         page_items: dict[int, list[dict[str, Any]]] = {}
         pool = ThreadPoolExecutor(max_workers=workers)
         try:
-            futures = {pool.submit(fetch_page, page): page for page in range(2, total_pages + 1)}
+            futures = {
+                pool.submit(fetch_page, page, preferred_endpoint): page
+                for page in range(2, total_pages + 1)
+            }
             try:
                 for future in as_completed(futures, timeout=max(1, deadline - time.monotonic())):
                     try:
-                        _total, page, diff = future.result()
+                        _total, page, diff, _endpoint = future.result()
                     except Exception as e:
                         page_errors.append(f"{futures[future]}页{type(e).__name__}")
                         continue
@@ -242,17 +292,19 @@ def fetch_eastmoney_spot_direct() -> tuple[list[dict[str, Any]], str | None]:
         for page in sorted(page_items):
             all_items.extend(page_items[page])
     rows = extract_eastmoney_spot_rows(all_items)
-    warning = None
+    warnings = []
+    if preferred_endpoint != endpoints[0]:
+        warnings.append("东财直连已切换备用域名")
     if total and len(all_items) < total:
-        warning = f"东财直连只取到 {len(all_items)}/{total} 只，已按现有样本生成"
+        warnings.append(f"东财直连只取到 {len(all_items)}/{total} 只，已按现有样本生成")
     elif page_errors:
-        warning = "东财直连部分分页失败：" + "、".join(page_errors[:3])
-    return rows, warning
+        warnings.append("东财直连部分分页失败：" + "、".join(page_errors[:3]))
+    return rows, "；".join(warnings) or None
 
 
 def fetch_eastmoney_spot_direct_single_page():
     """Deprecated single-page shape kept only as a last-ditch fallback."""
-    fields = "f12,f14,f2,f3,f6,f10,f100"
+    fields = "f12,f14,f2,f3,f6,f10,f100,f124"
     params = {
         "pn": "1",
         "pz": "100",
@@ -265,42 +317,67 @@ def fetch_eastmoney_spot_direct_single_page():
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
         "fields": fields,
     }
-    url = "https://push2.eastmoney.com/api/qt/clist/get?" + urlencode(params)
-    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"})
-    with urlopen(req, timeout=safe_int(os.getenv("A_SHARE_SUMMARY_DIRECT_TIMEOUT", "20"), 20)) as resp:
-        payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
-    diff = (((payload or {}).get("data") or {}).get("diff") or [])
-    return extract_eastmoney_spot_rows(diff)
+    last_err: Exception | None = None
+    for endpoint in eastmoney_spot_endpoints():
+        try:
+            url = endpoint + "?" + urlencode(params)
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"})
+            with urlopen(req, timeout=safe_int(os.getenv("A_SHARE_SUMMARY_DIRECT_TIMEOUT", "20"), 20)) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            diff = (((payload or {}).get("data") or {}).get("diff") or [])
+            rows = extract_eastmoney_spot_rows(diff)
+            if rows:
+                return rows
+        except Exception as exc:
+            last_err = exc
+    if last_err:
+        raise last_err
+    return []
 
 
 def fetch_spot():
-    last_err = None
-    for fname in ["stock_zh_a_spot_em", "stock_zh_a_spot"]:
-        try:
-            with time_limit(safe_int(os.getenv("A_SHARE_SUMMARY_SPOT_TIMEOUT", "50"), 50)):
-                df = quiet_call(getattr(ak, fname))
-            if df is not None and len(df):
+    errors: list[str] = []
+    try:
+        with time_limit(safe_int(os.getenv("A_SHARE_SUMMARY_SPOT_TIMEOUT", "50"), 50)):
+            df = quiet_call(ak.stock_zh_a_spot_em)
+        if df is not None and len(df):
+            issue = spot_snapshot_issue(extract_market(df), None)
+            if not issue:
                 return df, None
-        except Exception as e:
-            last_err = f"{fname}: {type(e).__name__}: {e}"
+            errors.append(f"stock_zh_a_spot_em: {issue}")
+        else:
+            errors.append("stock_zh_a_spot_em: returned empty")
+    except Exception as e:
+        errors.append(f"stock_zh_a_spot_em: {type(e).__name__}: {e}")
+
     try:
         rows, direct_warning = fetch_eastmoney_spot_direct()
         if rows:
-            msg = f"akshare现货接口失败，已切换东方财富直连：{last_err}"
-            if direct_warning:
-                msg += f"；{direct_warning}"
-            return rows, msg
+            issue = spot_snapshot_issue(rows, direct_warning)
+            if not issue:
+                msg = "akshare东财现货接口失败，已切换东方财富直连：" + errors[-1]
+                if direct_warning:
+                    msg += f"；{direct_warning}"
+                return rows, msg
+            errors.append(f"东财分页直连不完整: {issue}")
+        else:
+            errors.append("东财分页直连返回空")
     except Exception as e:
-        direct_err = f"东财分页直连: {type(e).__name__}: {e}"
-        try:
-            rows = fetch_eastmoney_spot_direct_single_page()
-            if rows:
-                return rows, f"akshare现货接口失败，东财分页也失败，已使用单页样本：{last_err}; {direct_err}"
-        except Exception as single_e:
-            direct_err += f"; 东财单页直连: {type(single_e).__name__}: {single_e}"
-    else:
-        direct_err = "东财直连返回空"
-    return [], f"现货主接口暂不可用：{last_err}; {direct_err}"
+        errors.append(f"东财分页直连: {type(e).__name__}: {e}")
+
+    try:
+        with time_limit(safe_int(os.getenv("A_SHARE_SUMMARY_SINA_TIMEOUT", "10"), 10)):
+            df = quiet_call(ak.stock_zh_a_spot)
+        if df is not None and len(df):
+            issue = spot_snapshot_issue(extract_market(df), None)
+            if not issue:
+                return df, "东财现货接口失败，已切换新浪现货：" + "；".join(errors[-2:])
+            errors.append(f"stock_zh_a_spot: {issue}")
+        else:
+            errors.append("stock_zh_a_spot: returned empty")
+    except Exception as e:
+        errors.append(f"stock_zh_a_spot: {type(e).__name__}: {e}")
+    return [], "现货主接口暂不可用：" + "；".join(errors[-4:])
 
 
 def fetch_industry_fund_flow():
@@ -590,14 +667,61 @@ def build_next_day_premarket_guidance(
     return lines
 
 
-def build_report() -> str:
+def spot_snapshot_issue(rows: list[dict[str, Any]], spot_err: str | None) -> str | None:
+    """Return a retry-worthy completeness issue for a scheduled close snapshot."""
+    if not rows:
+        return spot_err or "现货行情返回数据缺少有效A股样本"
+    min_rows = max(1, safe_int(os.getenv("A_SHARE_SUMMARY_SPOT_MIN_ROWS", "4000"), 4000))
+    unique_codes = {normalize_code(row.get("code")) for row in rows if normalize_code(row.get("code"))}
+    if len(unique_codes) < min_rows:
+        return f"唯一有效A股样本仅 {len(unique_codes)} 只，低于完整性下限 {min_rows} 只"
+    if len(unique_codes) < len(rows) * 0.98:
+        return f"现货行情重复代码过多：{len(unique_codes)}/{len(rows)}"
+    partial_markers = ("只取到", "单页样本", "部分分页失败", "分页超时")
+    if spot_err and any(marker in spot_err for marker in partial_markers):
+        return spot_err
+
+    price_coverage = sum(1 for row in rows if safe_float(row.get("price")) > 0) / len(rows)
+    amount_coverage = sum(1 for row in rows if safe_float(row.get("amount")) > 0) / len(rows)
+    movement_coverage = sum(1 for row in rows if abs(safe_float(row.get("pct"))) > 1e-8) / len(rows)
+    if price_coverage < 0.80:
+        return f"现货最新价有效覆盖率仅 {price_coverage:.1%}"
+    if amount_coverage < 0.70:
+        return f"现货成交额有效覆盖率仅 {amount_coverage:.1%}"
+    if movement_coverage < 0.10:
+        return f"现货涨跌幅非零覆盖率仅 {movement_coverage:.1%}"
+
+    stamped_rows = [
+        safe_int(row.get("quote_ts"))
+        for row in rows
+        if safe_float(row.get("amount")) > 0 and safe_int(row.get("quote_ts")) > 0
+    ]
+    if len(stamped_rows) >= min_rows * 0.5:
+        fresh_count = sum(
+            1 for timestamp in stamped_rows
+            if dt.datetime.fromtimestamp(timestamp, CN_TZ).date() == NOW.date()
+        )
+        if fresh_count / len(stamped_rows) < 0.80:
+            return f"现货快照当日时间戳覆盖率仅 {fresh_count / len(stamped_rows):.1%}"
+        if MODE == "close" and NOW.time() >= dt.time(15, 5):
+            close_cutoff = dt.datetime.combine(NOW.date(), dt.time(15, 0), tzinfo=CN_TZ).timestamp()
+            close_count = sum(1 for timestamp in stamped_rows if timestamp >= close_cutoff)
+            if close_count / len(stamped_rows) < 0.50:
+                return f"现货快照收盘后时间戳覆盖率仅 {close_count / len(stamped_rows):.1%}"
+    return None
+
+
+def build_report(*, require_complete_spot: bool = False) -> str:
     if not is_trading_day_guess(NOW.date()):
         return ""
     spot, spot_err = fetch_spot()
+    rows = extract_market(spot) if spot is not None else []
+    completeness_issue = spot_snapshot_issue(rows, spot_err)
+    if require_complete_spot and completeness_issue:
+        raise SpotSnapshotUnavailable(completeness_issue)
+
     fund_df, fund_err = fetch_industry_fund_flow()
     zt_df, zt_err = fetch_zt_pool()
-
-    rows = extract_market(spot) if spot is not None else []
     funds = extract_funds(fund_df)
     if not rows and not spot_err:
         spot_err = "现货行情返回数据缺少有效A股样本"
@@ -763,7 +887,7 @@ def build_report() -> str:
 
 def main():
     try:
-        text = build_report()
+        text = build_report(require_complete_spot=True)
         if text:
             from a_share_grok_summary import apply_grok_to_a_share_report
             from niuone_dashboard_archive import archive_market_report
@@ -772,6 +896,9 @@ def main():
             print(text)
         else:
             print("")
+    except SpotSnapshotUnavailable as e:
+        print(f"牛牛大王，A股{TITLE}现货行情缺失或不完整，本轮不归档，等待调度器重试：{e}")
+        sys.exit(1)
     except Exception as e:
         print(f"牛牛大王，A股{TITLE}今天没有成功生成：{type(e).__name__}: {e}\n建议先手动看交易软件，稍后我可以帮你补一版。")
         sys.exit(1)
