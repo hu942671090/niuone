@@ -758,7 +758,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('data-market-region="a_share"', dashboard.INDEX_HTML)
         self.assertIn('data-market-region="us"', dashboard.INDEX_HTML)
         self.assertIn("const activeTitleHtml = activePanel === 'index'", dashboard.INDEX_HTML)
-        self.assertIn('${activeTitleHtml}${marketRegionSwitchHtml}', dashboard.INDEX_HTML)
+        self.assertIn('${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}', dashboard.INDEX_HTML)
         self.assertNotIn('<h2 class="indices-part-title">${activeTitle}</h2>', dashboard.INDEX_HTML)
         self.assertNotIn('indicesMarketRegionOverride,\n      savedAt', dashboard.INDEX_HTML)
         self.assertIn('function renderUsSectorMarketBlock()', dashboard.INDEX_HTML)
@@ -774,6 +774,23 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn("s.a_share_mapping.slice(0, 3).join('、')", dashboard.INDEX_HTML)
         self.assertNotIn("`A股映射 ${s.a_share_mapping.slice(0, 3).join('、')}`", dashboard.INDEX_HTML)
         self.assertNotIn('const US_MARKET_QUOTE_SYMBOLS', dashboard.INDEX_HTML)
+
+    def test_indices_panel_can_put_a_share_or_us_indices_first(self):
+        self.assertIn("const INDICES_INDEX_PRIORITY_STATE_KEY = 'niuniu-dashboard-index-priority-v1';", dashboard.INDEX_HTML)
+        self.assertIn("let indicesIndexPriorityOverride = '';", dashboard.INDEX_HTML)
+        self.assertIn('function setIndicesIndexPriority(mode)', dashboard.INDEX_HTML)
+        self.assertIn('function resolvedIndicesIndexPriority(aIndexItems = [])', dashboard.INDEX_HTML)
+        self.assertIn("sessionStorage.setItem(INDICES_INDEX_PRIORITY_STATE_KEY, mode)", dashboard.INDEX_HTML)
+        self.assertIn("const indexSections = indexPriority === 'a_share' ? [", dashboard.INDEX_HTML)
+        self.assertIn("['A股指数', aIndexItems],\n      ['美股指数', usIndexItems],", dashboard.INDEX_HTML)
+        self.assertIn("['美股指数', usIndexItems],\n      ['A股指数', aIndexItems],", dashboard.INDEX_HTML)
+        self.assertIn('return [...indexSections, ...supportingSections]', dashboard.INDEX_HTML)
+        self.assertIn('aria-label="指数排序切换"', dashboard.INDEX_HTML)
+        self.assertIn('data-index-priority="a_share"', dashboard.INDEX_HTML)
+        self.assertIn('data-index-priority="us"', dashboard.INDEX_HTML)
+        self.assertIn('A股在上', dashboard.INDEX_HTML)
+        self.assertIn('美股在上', dashboard.INDEX_HTML)
+        self.assertIn('${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}', dashboard.INDEX_HTML)
 
     def test_index_template_github_button_links_to_repo_with_icon(self):
         self.assertIn(

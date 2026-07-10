@@ -3013,6 +3013,7 @@ INDEX_HTML = r"""<!doctype html>
     .indices-part-title { margin:0; color:#f8fafc; font-size:18px; line-height:1.2; font-weight:900; letter-spacing:0; }
     .indices-part-meta { color:#7b8aa0; font-size:12px; font-weight:750; font-variant-numeric:tabular-nums; white-space:nowrap; }
     .market-region-switch { width:126px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:2px; padding:2px; border:1px solid rgba(148,163,184,.15); border-radius:10px; background:rgba(2,6,23,.52); box-shadow:inset 0 1px 0 rgba(255,255,255,.03); }
+    .index-priority-switch { width:184px; }
     .market-region-btn { appearance:none; min-width:0; margin:0; padding:6px 9px; border:0; border-radius:7px; color:#8290a5; background:transparent; font-size:12px; line-height:1; font-weight:850; white-space:nowrap; }
     .market-region-btn.active { color:#eff6ff; background:rgba(96,165,250,.22); box-shadow:inset 0 0 0 1px rgba(125,211,252,.24); }
     .market-region-btn:focus-visible { outline:2px solid rgba(125,211,252,.82); outline-offset:1px; }
@@ -3593,6 +3594,7 @@ INDEX_HTML = r"""<!doctype html>
       .indices-part-title-row { gap:8px; }
       .indices-part-title { font-size:16px; }
       .market-region-switch { width:116px; }
+      .index-priority-switch { width:164px; }
       .market-region-btn { min-width:0; padding:6px 7px; font-size:11.5px; }
       .index-card { border-radius:13px; padding:8px 9px; min-width:0; box-shadow:none; }
       .index-name { font-size:11px; }
@@ -3727,6 +3729,12 @@ let activeCategory = initialParams.get('category') || 'b1_screen';
 const US_FEATURES_ENABLED = __US_FEATURES_ENABLED__;
 let indicesViewMode = initialParams.get('panel') === 'market' ? 'market' : 'index';
 let indicesMarketRegionOverride = '';
+const INDICES_INDEX_PRIORITY_STATE_KEY = 'niuniu-dashboard-index-priority-v1';
+let indicesIndexPriorityOverride = '';
+try {
+  const savedIndexPriority = sessionStorage.getItem(INDICES_INDEX_PRIORITY_STATE_KEY);
+  if (['a_share', 'us'].includes(savedIndexPriority)) indicesIndexPriorityOverride = savedIndexPriority;
+} catch (e) {}
 const X_MONITOR_PAGE_SIZE = 10;
 let usRatingDayIndex = 0;
 let ratingExpandedRowId = '';
@@ -5920,6 +5928,18 @@ function setIndicesMarketRegion(mode) {
   if (activeCategory === 'indices' && indicesViewMode === 'market') render();
 }
 
+function setIndicesIndexPriority(mode) {
+  if (!['a_share', 'us'].includes(mode)) return;
+  indicesIndexPriorityOverride = mode;
+  try { sessionStorage.setItem(INDICES_INDEX_PRIORITY_STATE_KEY, mode); } catch (e) {}
+  if (activeCategory === 'indices' && indicesViewMode === 'index') render();
+}
+
+function resolvedIndicesIndexPriority(aIndexItems = []) {
+  if (indicesIndexPriorityOverride) return indicesIndexPriorityOverride;
+  return indicesSwitchSession(aIndexItems) === 'a_share' ? 'a_share' : 'us';
+}
+
 function resolvedIndicesMarketRegion(aIndexItems = []) {
   if (indicesMarketRegionOverride) return indicesMarketRegionOverride;
   return indicesSwitchSession(aIndexItems) === 'a_share' ? 'a_share' : 'us';
@@ -6006,22 +6026,23 @@ function renderIndicesPanel() {
   const usIndexItems = marketItems('us_index', 'global');
   function renderSessionMarketGroups() {
     const session = indicesSwitchSession(aIndexItems);
-    const sections = session === 'a_share' ? [
+    const indexPriority = resolvedIndicesIndexPriority(aIndexItems);
+    const indexSections = indexPriority === 'a_share' ? [
       ['A股指数', aIndexItems],
-      ['A股期货', marketItems('a_futures')],
-      ['美股期货', marketItems('us_futures')],
-      ['大宗商品', marketItems('commodity', 'commodity')],
-    ] : session === 'us_open' ? [
       ['美股指数', usIndexItems],
+    ] : [
+      ['美股指数', usIndexItems],
+      ['A股指数', aIndexItems],
+    ];
+    const supportingSections = session === 'us_open' ? [
       ['A股期货', marketItems('a_futures')],
       ['大宗商品', marketItems('commodity', 'commodity')],
     ] : [
-      ['美股指数', usIndexItems],
       ['A股期货', marketItems('a_futures')],
       ['美股期货', marketItems('us_futures')],
       ['大宗商品', marketItems('commodity', 'commodity')],
     ];
-    return sections.map(([title, list]) => renderIndexGroup(title, list)).join('');
+    return [...indexSections, ...supportingSections].map(([title, list]) => renderIndexGroup(title, list)).join('');
   }
   function renderRankBlock(title, list, mode) {
     if (!list || !list.length) return '';
@@ -6116,6 +6137,12 @@ function renderIndicesPanel() {
   const activePanel = indicesViewMode === 'market' ? 'market' : 'index';
   const activeTitleHtml = activePanel === 'index' ? '<h2 class="indices-part-title">指数</h2>' : '';
   const activeMeta = activePanel === 'market' ? `${marketModuleCount || 0} ${marketUsesUsSectors ? '项' : '组'}` : `${items.length} 项`;
+  const indexPriority = resolvedIndicesIndexPriority(aIndexItems);
+  const indexPrioritySwitchHtml = activePanel === 'index' ? `
+    <div class="market-region-switch index-priority-switch" role="group" aria-label="指数排序切换" title="${indicesIndexPriorityOverride ? '当前为手动排序' : '当前按交易时段自动排序'}">
+      <button type="button" class="market-region-btn ${indexPriority === 'a_share' ? 'active' : ''}" data-index-priority="a_share" aria-pressed="${indexPriority === 'a_share' ? 'true' : 'false'}" onclick="setIndicesIndexPriority('a_share')">A股在上</button>
+      <button type="button" class="market-region-btn ${indexPriority === 'us' ? 'active' : ''}" data-index-priority="us" aria-pressed="${indexPriority === 'us' ? 'true' : 'false'}" onclick="setIndicesIndexPriority('us')">美股在上</button>
+    </div>` : '';
   const marketRegionSwitchHtml = activePanel === 'market' ? `
     <div class="market-region-switch" role="group" aria-label="行情市场切换" title="${indicesMarketRegionOverride ? '当前为手动选择' : '当前按交易时段自动选择'}">
       <button type="button" class="market-region-btn ${marketRegion === 'a_share' ? 'active' : ''}" data-market-region="a_share" aria-pressed="${marketRegion === 'a_share' ? 'true' : 'false'}" onclick="setIndicesMarketRegion('a_share')">A股</button>
@@ -6130,7 +6157,7 @@ function renderIndicesPanel() {
       <button type="button" class="indices-switch-btn ${activePanel === 'market' ? 'active' : ''}" aria-pressed="${activePanel === 'market' ? 'true' : 'false'}" onclick="setIndicesViewMode('market')">行情</button>
     </div>
     <section class="indices-part" id="${activePanel === 'market' ? 'market-overview' : 'indices-overview'}">
-      <div class="indices-part-head"><div class="indices-part-title-row">${activeTitleHtml}${marketRegionSwitchHtml}</div><div class="indices-part-meta">${activeMeta}</div></div>
+      <div class="indices-part-head"><div class="indices-part-title-row">${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}</div><div class="indices-part-meta">${activeMeta}</div></div>
       <div class="${activePanel === 'market' ? 'indices-market-stack' : 'indices-index-stack'}">${activeHtml}</div>
     </section>
   </div>`;
