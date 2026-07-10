@@ -2974,7 +2974,7 @@ INDEX_HTML = r"""<!doctype html>
     .practice-hover-tooltip-row strong.up { color:#ff4d4f; }
     .practice-hover-tooltip-row strong.down { color:#39d98a; }
     .practice-chart-hover-layer.active .practice-hover-line, .practice-chart-hover-layer.active .practice-hover-marker, .practice-chart-hover-layer.active .practice-hover-tooltip { opacity:1; }
-    .practice-trade-marker { appearance:none; position:absolute; z-index:8; width:18px; height:18px; display:grid; place-items:center; padding:0; border-radius:999px; border:2px solid rgba(248,250,252,.92); color:#fff; font-size:9px; line-height:1; font-weight:950; font-family:inherit; cursor:help; transform:translate(-50%,-50%); box-shadow:0 4px 13px rgba(0,0,0,.40), 0 0 0 2px rgba(15,23,42,.62); }
+    .practice-trade-marker { appearance:none; position:absolute; z-index:8; width:18px; height:18px; display:grid; place-items:center; padding:0; border-radius:999px; border:2px solid rgba(248,250,252,.92); color:#fff; font-size:9px; line-height:1; font-weight:950; font-family:inherit; cursor:default; transform:translate(-50%,-50%); box-shadow:0 4px 13px rgba(0,0,0,.40), 0 0 0 2px rgba(15,23,42,.62); }
     .practice-trade-marker.buy { background:#2563eb; }
     .practice-trade-marker.sell-partial { background:#f59e0b; color:#241500; }
     .practice-trade-marker.sell-full { background:#ef4444; }
@@ -4660,7 +4660,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     rawPoints = normalizedHistory;
   }
   rawPoints = [...rawPoints].sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
-  if (rawPoints.length < 2) return '<div class="empty" style="padding:18px">收益曲线等待更多净值点…</div>';
+  if (rawPoints.length < (isDailyMode ? 2 : 1)) return '<div class="empty" style="padding:18px">收益曲线等待更多净值点…</div>';
   const latestTradingClockPoint = rawPoints.filter(p => tradingClockMinuteOfDay(p.time) != null).at(-1);
   const latestDataDay = (latestTradingClockPoint || rawPoints[rawPoints.length - 1]).time.slice(0, 10);
   const latestDay = !isDailyMode && !isNonTradingCalendarDay && targetDate ? targetDate : latestDataDay;
@@ -4715,14 +4715,14 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   } else {
     const dayPoints = rawPoints.filter(p => p.time.slice(0, 10) === latestDay);
     const sessionPoints = dayPoints.filter(p => tradingClockMinuteOfDay(p.time) != null);
-    if (sessionPoints.length >= 2) {
+    if (sessionPoints.length >= 1) {
       points = sessionPoints;
     } else if (isNonTradingCalendarDay && dayPoints.length >= 2) {
       points = dayPoints;
     } else {
       points = [];
     }
-    if (points.length < 2) {
+    if (points.length < 1) {
       const modeButtons = `<div class="practice-mode-control" aria-label="收益曲线模式">
         <button class="practice-mode-btn active" type="button" onclick="setPracticeCurveMode('intraday')">当日收益</button>
         <button class="practice-mode-btn" type="button" onclick="setPracticeCurveMode('daily')">累计收益</button>
@@ -4781,7 +4781,9 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     ];
   }
   const vals = points.map(p => p.equity);
-  const chartBase = isDailyMode ? initialCash : (Number.isFinite(Number(intradayBasePoint?.equity)) ? Number(intradayBasePoint.equity) : vals[0]);
+  const intradayBaseEquity = Number(intradayBasePoint?.equity);
+  const hasIntradayOpenBase = !isDailyMode && Number.isFinite(intradayBaseEquity) && intradayBaseEquity > 0;
+  const chartBase = isDailyMode ? initialCash : (hasIntradayOpenBase ? intradayBaseEquity : vals[0]);
   const chartPcts = vals.map(v => chartBase ? (v / chartBase - 1) * 100 : 0);
   const chartDeltas = vals.map(v => v - (chartBase || 0));
   const last = vals[vals.length - 1], prev = vals[Math.max(0, vals.length - 2)];
@@ -4789,7 +4791,9 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   const activeBenchmarks = [];
   const benchmarkSeries = activeBenchmarks.map((b, idx) => ({...b, color: b.symbol === 'sh000001' ? '#f59e0b' : b.symbol === 'sh000300' ? '#60a5fa' : b.symbol === 'sz399006' ? '#ec4899' : '#8b5cf6'}));
   
-  const yAxis = practicePctAxisBounds(chartPcts);
+  // 上一交易日净值会作为 09:30 的 0% 起点，因此纵轴也必须包含 0%。
+  const axisPcts = hasIntradayOpenBase ? [0, ...chartPcts] : chartPcts;
+  const yAxis = practicePctAxisBounds(axisPcts);
   const yMinPct = yAxis.min;
   const yMaxPct = yAxis.max;
   
@@ -4798,11 +4802,19 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   const clampPct = pct => Math.max(yMinPct, Math.min(yMaxPct, pct));
   const plottedPts = points.map((p, i) => [xFromTime(p.time), y(chartPcts[i])]);
   const pts = plottedPts.slice();
-  
-  // 增加一条：如果是从盘中途才开始有数据的（比如从14:30开始），为了不让前面全是空的，
-  // 我们往最左边（09:30，x=left）补充一个与第一点 Y 值一样的起始点，把曲线拉平过去。
-  if (!isDailyMode && pts.length > 0 && pts[0][0] > left + 1) {
-     pts.unshift([left, pts[0][1]]);
+
+  // 当存在上一交易日净值时，将它作为 09:30 的 0% 起点连接到首个真实盘中点。
+  // 没有上一交易日基准时，仍只在已有两点后沿用原来的左侧补平逻辑。
+  let hasSyntheticOpenAnchor = false;
+  if (hasIntradayOpenBase && pts.length > 0) {
+    const openAnchor = [left, y(0)];
+    const firstPoint = pts[0];
+    if (Math.abs(firstPoint[0] - openAnchor[0]) > 0.1 || Math.abs(firstPoint[1] - openAnchor[1]) > 0.1) {
+      pts.unshift(openAnchor);
+      hasSyntheticOpenAnchor = true;
+    }
+  } else if (!isDailyMode && points.length > 1 && pts.length > 0 && pts[0][0] > left + 1) {
+    pts.unshift([left, pts[0][1]]);
   }
   
   const benchmarkPaths = benchmarkSeries.map(b => {
@@ -4813,10 +4825,13 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     const lastPct = b.points.length ? Number(b.points[b.points.length - 1].pct) : null;
     return {...b, d, lastPct};
   }).filter(b => b.d);
-  const line = straightSvgPath(pts);
+  const hasCurveSegment = pts.length > 1;
+  const line = hasCurveSegment ? straightSvgPath(pts) : '';
   const zeroAxisInView = yMinPct <= 0 && yMaxPct >= 0;
   const areaBaseY = y(clampPct(0));
-  const area = `${line} L${pts[pts.length-1][0].toFixed(1)} ${areaBaseY.toFixed(1)} L${pts[0][0].toFixed(1)} ${areaBaseY.toFixed(1)} Z`;
+  const area = hasCurveSegment
+    ? `${line} L${pts[pts.length-1][0].toFixed(1)} ${areaBaseY.toFixed(1)} L${pts[0][0].toFixed(1)} ${areaBaseY.toFixed(1)} Z`
+    : '';
   const baseY = areaBaseY;
   const lastPt = pts[pts.length - 1];
   const totalPnl = last - initialCash;
@@ -4828,8 +4843,9 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
   const dayDelta = last - prev;
   const dayDeltaPct = prev ? (last / prev - 1) * 100 : 0;
   const maxDrawdown = (() => {
-    let peak = vals[0], mdd = 0;
-    for (const v of vals) { peak = Math.max(peak, v); mdd = Math.min(mdd, peak ? (v / peak - 1) * 100 : 0); }
+    const drawdownVals = hasIntradayOpenBase ? [chartBase, ...vals] : vals;
+    let peak = drawdownVals[0], mdd = 0;
+    for (const v of drawdownVals) { peak = Math.max(peak, v); mdd = Math.min(mdd, peak ? (v / peak - 1) * 100 : 0); }
     return mdd;
   })();
   const deltaCls = delta >= 0 ? 'up' : 'down';
@@ -4847,22 +4863,34 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     const cls = idx === 0 ? 'start' : (idx === timeTicks.length - 1 ? 'end' : 'mid');
     return `<span class="practice-time-label ${cls}" style="left:${((t.x / w) * 100).toFixed(2)}%">${esc(t.label)}</span>`;
   }).join('');
-  const hoverSourcePoints = points.map((p, i) => {
-    const equity = Number(p.equity);
-    const previousEquity = i > 0 ? Number(points[i - 1].equity) : Number(initialCash);
-    const dayDeltaForPoint = Number.isFinite(equity) && Number.isFinite(previousEquity) ? equity - previousEquity : 0;
-    const dayPctForPoint = previousEquity ? (equity / previousEquity - 1) * 100 : 0;
-    return {
-      time: String(p.time || ''),
-      equity,
-      x: plottedPts[i]?.[0] ?? xFromTime(p.time),
-      y: plottedPts[i]?.[1] ?? y(chartPcts[i] || 0),
-      delta: Number(chartDeltas[i] || 0),
-      pct: Number(chartPcts[i] || 0),
-      dayDelta: dayDeltaForPoint,
-      dayPct: dayPctForPoint,
-    };
-  }).filter(point => point.time && Number.isFinite(point.equity) && Number.isFinite(point.x) && Number.isFinite(point.y));
+  const hoverSourcePoints = [
+    ...(hasSyntheticOpenAnchor ? [{
+      time: `${latestDay} 09:30:00`,
+      equity: chartBase,
+      x: left,
+      y: y(0),
+      delta: 0,
+      pct: 0,
+      dayDelta: 0,
+      dayPct: 0,
+    }] : []),
+    ...points.map((p, i) => {
+      const equity = Number(p.equity);
+      const previousEquity = i > 0 ? Number(points[i - 1].equity) : Number(hasIntradayOpenBase ? chartBase : initialCash);
+      const dayDeltaForPoint = Number.isFinite(equity) && Number.isFinite(previousEquity) ? equity - previousEquity : 0;
+      const dayPctForPoint = previousEquity ? (equity / previousEquity - 1) * 100 : 0;
+      return {
+        time: String(p.time || ''),
+        equity,
+        x: plottedPts[i]?.[0] ?? xFromTime(p.time),
+        y: plottedPts[i]?.[1] ?? y(chartPcts[i] || 0),
+        delta: Number(chartDeltas[i] || 0),
+        pct: Number(chartPcts[i] || 0),
+        dayDelta: dayDeltaForPoint,
+        dayPct: dayPctForPoint,
+      };
+    }),
+  ].filter(point => point.time && Number.isFinite(point.equity) && Number.isFinite(point.x) && Number.isFinite(point.y));
   const hoverPoints = [];
   for (const point of hoverSourcePoints) {
     const lastHoverPoint = hoverPoints[hoverPoints.length - 1];
@@ -4908,7 +4936,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     : '';
   const tradeMarkerHtml = isDailyMode ? '' : renderPracticeTradeMarkers(latestDay, xFromTime, plottedPts, w, h);
   const chartTitle = isDailyMode ? '收益曲线 · 累计收益' : `今日收益曲线${isNonTradingCalendarDay && latestDay ? `（${esc(latestDay)}）` : ''}`;
-  const intradayBaseLabel = intradayBasePoint
+  const intradayBaseLabel = hasIntradayOpenBase
     ? `0轴为上一交易日净值(${esc(String(intradayBasePoint.time || '').slice(5, 16))})`
     : '0轴为今日首个净值';
   const chartSub = isDailyMode
@@ -4957,11 +4985,11 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
         ${gridYs.map(gy => `<line x1="${left}" x2="${w-right}" y1="${gy.toFixed(1)}" y2="${gy.toFixed(1)}" stroke="rgba(255,255,255,.07)" stroke-dasharray="4 6"/>`).join('')}
         ${timeTicks.map(t => `<line x1="${t.x.toFixed(1)}" x2="${t.x.toFixed(1)}" y1="${top}" y2="${h-bottom}" stroke="rgba(255,255,255,.045)"/>`).join('')}
         ${zeroAxisInView ? `<line x1="${left}" x2="${w-right}" y1="${baseY.toFixed(1)}" y2="${baseY.toFixed(1)}" stroke="rgba(226,232,240,.46)" stroke-width="1.2" stroke-dasharray="7 5"/>` : ''}
-        <path d="${area}" fill="url(#practiceFill)"/>
+        ${hasCurveSegment ? `<path d="${area}" fill="url(#practiceFill)"/>` : ''}
         ${benchmarkPaths.map(b => `<path d="${b.d}" fill="none" stroke="${b.color}" stroke-width="1.5" opacity=".58" vector-effect="non-scaling-stroke"><title>${b.name} ${Number.isFinite(b.lastPct) ? fmtNumber(b.lastPct) + '%' : ''}</title></path>`).join('')}
-        <path d="${line}" fill="none" stroke="${markerColor}" stroke-width="2.2" vector-effect="non-scaling-stroke" filter="url(#practiceGlow)"/>
+        ${hasCurveSegment ? `<path d="${line}" fill="none" stroke="${markerColor}" stroke-width="2.2" vector-effect="non-scaling-stroke" filter="url(#practiceGlow)"/>` : ''}
       </svg>
-      <span class="practice-current-line" style="left:${markerLeftPct.toFixed(2)}%"></span>
+      ${hasCurveSegment ? `<span class="practice-current-line" style="left:${markerLeftPct.toFixed(2)}%"></span>` : ''}
       <span class="practice-current-marker" style="left:${markerLeftPct.toFixed(2)}%;top:${markerTopPct.toFixed(2)}%;--marker-color:${markerColor};--marker-glow:${markerGlow}" title="当前 ${fmtAmount(last)}"></span>
       ${hoverLayerHtml}
       ${tradeMarkerHtml}

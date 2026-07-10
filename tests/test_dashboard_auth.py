@@ -535,6 +535,9 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn("const side = trade.action === 'BUY' ? '买' : '卖';", dashboard.INDEX_HTML)
         self.assertIn('function renderPracticeTradeMarkerLine', dashboard.INDEX_HTML)
         self.assertIn('practice-trade-marker-side', dashboard.INDEX_HTML)
+        self.assertIn('.practice-trade-marker { appearance:none;', dashboard.INDEX_HTML)
+        self.assertIn('font-family:inherit; cursor:default;', dashboard.INDEX_HTML)
+        self.assertNotIn('font-family:inherit; cursor:help;', dashboard.INDEX_HTML)
         self.assertIn('.practice-trade-marker-pnl.up { color:#ff6b6d; }', dashboard.INDEX_HTML)
         self.assertIn('.practice-trade-marker-pnl.down { color:#39d98a; }', dashboard.INDEX_HTML)
         self.assertIn('.practice-trade-marker.sell-partial { background:#f59e0b;', dashboard.INDEX_HTML)
@@ -602,6 +605,36 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('<h3 class="practice-panel-title"><span>牛牛实战 · 模拟账户</span><button class="practice-calendar-open-btn"', dashboard.INDEX_HTML)
         self.assertNotIn('最近交易日收益', dashboard.INDEX_HTML)
         self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', dashboard.INDEX_HTML)
+
+    def test_index_template_intraday_curve_renders_single_point_from_opening_base(self):
+        self.assertIn('if (rawPoints.length < (isDailyMode ? 2 : 1))', dashboard.INDEX_HTML)
+        self.assertIn('if (sessionPoints.length >= 1)', dashboard.INDEX_HTML)
+        self.assertIn('isNonTradingCalendarDay && dayPoints.length >= 2', dashboard.INDEX_HTML)
+        self.assertIn('if (points.length < 1)', dashboard.INDEX_HTML)
+        self.assertIn(
+            'if (points.length < 2) return \'<div class="empty" style="padding:18px">累计收益等待更多交易日净值点…</div>\';',
+            dashboard.INDEX_HTML,
+        )
+        self.assertIn(
+            'const hasIntradayOpenBase = !isDailyMode && Number.isFinite(intradayBaseEquity) && intradayBaseEquity > 0;',
+            dashboard.INDEX_HTML,
+        )
+        self.assertIn(
+            'const chartBase = isDailyMode ? initialCash : (hasIntradayOpenBase ? intradayBaseEquity : vals[0]);',
+            dashboard.INDEX_HTML,
+        )
+        self.assertIn('const axisPcts = hasIntradayOpenBase ? [0, ...chartPcts] : chartPcts;', dashboard.INDEX_HTML)
+        self.assertIn('const openAnchor = [left, y(0)];', dashboard.INDEX_HTML)
+        self.assertIn('pts.unshift(openAnchor);', dashboard.INDEX_HTML)
+        self.assertIn('hasSyntheticOpenAnchor = true;', dashboard.INDEX_HTML)
+        self.assertIn(
+            '} else if (!isDailyMode && points.length > 1 && pts.length > 0 && pts[0][0] > left + 1) {',
+            dashboard.INDEX_HTML,
+        )
+        self.assertIn('const hasCurveSegment = pts.length > 1;', dashboard.INDEX_HTML)
+        self.assertIn('const drawdownVals = hasIntradayOpenBase ? [chartBase, ...vals] : vals;', dashboard.INDEX_HTML)
+        self.assertIn('time: `${latestDay} 09:30:00`', dashboard.INDEX_HTML)
+        self.assertIn('const intradayBaseLabel = hasIntradayOpenBase', dashboard.INDEX_HTML)
 
     def test_admin_page_sends_security_headers_without_login_cookie(self):
         handler = FakeHandler(
