@@ -773,7 +773,7 @@ class SellStrategyRuleTests(unittest.TestCase):
             trader.load_today_market_monitor_reports = original_loader
 
         self.assertEqual(ctx["tone"], "offensive")
-        self.assertEqual(ctx["source_title"], "B1定时选股实时盘面")
+        self.assertEqual(ctx["source_title"], "实战定时选股实时盘面")
         self.assertEqual(ctx["source_time"], "2026-07-10 10:00:04")
         self.assertEqual(ctx["refresh_mode"], "b1_periodic")
         self.assertEqual(ctx["market_snapshot"]["up"], 2300)

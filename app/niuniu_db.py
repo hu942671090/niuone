@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""牛牛实战 · SQLite 数据库层
+"""实战页面 · SQLite 数据库层
 
 替代 JSON 文件存储，提供：
   - daily_equity 每日资金快照

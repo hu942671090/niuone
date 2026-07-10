@@ -3,7 +3,7 @@
 牛牛1号 · 多战法扫描器 — A股主板全市场综合评分。
 
 评估多战法（趋势/突破策略 + Z哥），每只票输出多战法分数
-+ 最优战法标签，供牛牛实战模型决策时参考。
++ 最优战法标签，供实战页面模型决策时参考。
 
 数据源（全部绕过Eastmoney代理封锁）：
   1. akshare.stock_info_a_code_name() — 代码池
@@ -1945,7 +1945,7 @@ def main():
             "amount": q.get("amount"),
             "amount_yi": round(q.get("amount", 0) / 1e8, 1) if q.get("amount") else None,
             "turnover": q.get("turnover"),
-            # backward compat (dashboard B1 panel expects these)
+            # backward compat (the practice candidates panel expects these)
             "score": best.get("score", 0),
             "score_total": best.get("score_total", 10),
             "verdict": best.get("verdict", ""),

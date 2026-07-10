@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""牛牛实战：A股模拟账户 + B1候选后的模型决策。
+"""实战页面：A股模拟账户 + 实战候选后的模型决策。
 
 This is a paper-trading simulator, not a real broker integration.
 Rules implemented:
@@ -2227,7 +2227,7 @@ def _periodic_market_snapshot_report(
         f"买入指引：{buy}",
         f"卖出/风控：{sell}",
     ]
-    title = "B1定时选股实时盘面" if payload.get("schedule_slot") else "B1选股实时盘面"
+    title = "实战定时选股实时盘面" if payload.get("schedule_slot") else "实战选股实时盘面"
     return {
         "title": title,
         "time": source_time,

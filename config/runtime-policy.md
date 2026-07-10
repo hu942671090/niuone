@@ -31,10 +31,10 @@
 | `.local-data/runtime/dashboard_admin_token.txt` | 未配置 `DASHBOARD_ADMIN_PASSWORD` 时使用的 bootstrap 管理密钥 |
 | `.local-data/runtime/dashboard_users.db` | 本地访问用户和认证数据 |
 | `.local-data/runtime/push_history.db` | 消息历史 |
-| `.local-data/runtime/niuniu.db` | 牛牛实战交易和账户数据 |
+| `.local-data/runtime/niuniu.db` | 实战页面交易和账户数据 |
 | `.local-data/runtime/config.yaml` | 模型服务商、模型和模型密钥配置 |
 | `.local-data/runtime/cron/state/` | 定时任务、X 监控和补跑状态 |
-| `.local-data/runtime/cron/output/` | B1、市场监控、美股评级、X 监控等任务输出 |
+| `.local-data/runtime/cron/output/` | 实战选股、市场监控、美股评级、X 监控等任务输出 |
 | `.local-data/runtime/logs/` | 服务和任务日志 |
 | `.local-data/backups/` | 部署备份，可能包含旧配置 |
 

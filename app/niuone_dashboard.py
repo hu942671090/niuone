@@ -155,9 +155,16 @@ RATE_LIMIT_BUCKETS: dict[tuple[str, str], tuple[float, int]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
 ADMIN_TOKEN_LOCK = threading.Lock()
 VISIT_STATS_LOCK = threading.RLock()
+PRACTICE_CANDIDATES_CACHE_KEY = "practice_candidates"
+PRACTICE_CANDIDATES_API_PATHS = frozenset({"/api/practice_candidates", "/api/b1_screen"})
+PRACTICE_CANDIDATES_REFRESH_API_PATHS = frozenset({"/api/practice_candidates/refresh", "/api/b1_screen/trigger"})
 API_TTLS = {
     "messages": 10,
-    "b1_screen": int(os.environ.get("DASHBOARD_B1_SCREEN_TTL_SECONDS", "15") or "15"),
+    "practice_candidates": int(
+        os.environ.get("DASHBOARD_PRACTICE_CANDIDATES_TTL_SECONDS")
+        or os.environ.get("DASHBOARD_B1_SCREEN_TTL_SECONDS")
+        or "15"
+    ),
     "niuniu_practice": int(os.environ.get("DASHBOARD_PRACTICE_TTL_SECONDS", "15") or "15"),
     "practice_benchmarks": 30,
     "indices": int(os.environ.get("DASHBOARD_INDICES_TTL_SECONDS", "60") or "60"),
@@ -190,9 +197,9 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_CONFIG", "label": "模型配置 YAML", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "config.yaml"), "effect": "restart"},
     {"name": "DASHBOARD_PUSH_HISTORY_DB", "label": "消息历史 DB", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "push_history.db"), "effect": "restart"},
     {"name": "DASHBOARD_PORTFOLIO_STATE", "label": "模拟账户状态文件", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "output" / "niuniu_practice_portfolio.json"), "effect": "restart"},
-    {"name": "DASHBOARD_NIUNIU_DB", "label": "牛牛实战 DB", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "niuniu.db"), "effect": "restart"},
-    {"name": "DASHBOARD_TRADER_SCRIPT", "label": "牛牛实战脚本", "group": "基础路径", "kind": "path", "default": str(SCRIPT_DIR / "niuniu_practice_trader.py"), "effect": "restart"},
-    {"name": "DASHBOARD_B1_SCANNER", "label": "B1 扫描脚本", "group": "基础路径", "kind": "path", "default": str(SCRIPT_DIR / "multi_strategy_screen.py"), "effect": "restart"},
+    {"name": "DASHBOARD_NIUNIU_DB", "label": "实战页面 DB", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "niuniu.db"), "effect": "restart"},
+    {"name": "DASHBOARD_TRADER_SCRIPT", "label": "实战页面脚本", "group": "基础路径", "kind": "path", "default": str(SCRIPT_DIR / "niuniu_practice_trader.py"), "effect": "restart"},
+    {"name": "DASHBOARD_B1_SCANNER", "label": "实战选股扫描脚本", "group": "基础路径", "kind": "path", "default": str(SCRIPT_DIR / "multi_strategy_screen.py"), "effect": "restart"},
     {"name": "DASHBOARD_CN_STOCK_TOOLS", "label": "A股行情工具脚本", "group": "基础路径", "kind": "path", "default": str(SCRIPT_DIR / "cn_stock_tools.py"), "effect": "restart"},
     {"name": "DASHBOARD_US_RATING_OUTPUT_DIR", "label": "美股评级归档目录", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "output" / "fd0b807138f4"), "effect": "next_run"},
     {"name": "DASHBOARD_CRON_JOBS", "label": "Cron jobs JSON", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "jobs.json"), "effect": "next_run"},
@@ -214,16 +221,16 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_MEDIA_CACHE_TTL_SECONDS", "label": "X 图片缓存 TTL 秒数", "group": "限流与缓存", "kind": "int", "default": str(7 * 24 * 3600), "effect": "restart"},
     {"name": "DASHBOARD_X_MEDIA_MAX_BYTES", "label": "X 图片代理最大字节", "group": "限流与缓存", "kind": "int", "default": str(8 * 1024 * 1024), "effect": "restart"},
 
-    {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用 B1 定时扫描", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
+    {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时选股", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股及买卖决策时间点", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
     {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "09:30", "effect": "runtime"},
     {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "14:45", "effect": "runtime"},
     {"name": STRATEGY_SOURCE_ENV, "label": "当前策略来源", "group": "选股策略", "kind": "strategy_source", "default": "builtin", "effect": "runtime"},
     {"name": PERSONA_STRATEGY_ENV, "label": "内置策略", "group": "选股策略", "kind": "strategy_single", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},
     {"name": PRESET_STRATEGY_TEXT_ENV, "label": "预设文字策略", "group": "选股策略", "kind": "preset_strategy_text", "default": "", "effect": "runtime"},
-    {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "B1 扫描超时秒数", "group": "任务调度", "kind": "int", "default": "360", "effect": "restart"},
-    {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "B1 漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
-    {"name": "DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "label": "B1 运行中陈旧秒数", "group": "任务调度", "kind": "int", "default": "900", "effect": "restart"},
+    {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "实战选股扫描超时秒数", "group": "任务调度", "kind": "int", "default": "360", "effect": "restart"},
+    {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "实战选股漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
+    {"name": "DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "label": "实战选股运行中陈旧秒数", "group": "任务调度", "kind": "int", "default": "900", "effect": "restart"},
     {"name": "DASHBOARD_CRON_MAX_ATTEMPTS", "label": "Cron 失败最大运行次数", "group": "任务调度", "kind": "int", "default": "2", "effect": "next_run"},
     {"name": "DASHBOARD_CRON_RETRY_DELAY_SECONDS", "label": "Cron 失败重试间隔秒数", "group": "任务调度", "kind": "int", "default": "300", "effect": "next_run"},
     {"name": "DASHBOARD_PENDING_DECISION_POLL_SECONDS", "label": "延迟成交检查秒数", "group": "任务调度", "kind": "int", "default": "5", "effect": "restart"},
@@ -786,7 +793,7 @@ def get_practice_payload() -> dict[str, Any]:
         try:
             refresh_b1_candidate_cache_from_current_pool()
         except Exception as refresh_exc:
-            print(f"[WARN] B1候选池复核失败: {type(refresh_exc).__name__}: {refresh_exc}", flush=True)
+            print(f"[WARN] 实战候选池复核失败: {type(refresh_exc).__name__}: {refresh_exc}", flush=True)
         return payload
     except Exception as exc:
         print(f"[WARN] practice payload error: {type(exc).__name__}: {exc}", flush=True)
@@ -1282,7 +1289,7 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
         B1_CACHE_FILE.write_text(json_text + "\n")
         MULTI_STRATEGY_CACHE_FILE.write_text(json_text + "\n")
         with API_RESPONSE_LOCK:
-            API_RESPONSE_CACHE.pop("b1_screen", None)
+            API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
         B1_CANDIDATE_REFRESH_LAST_TS = time.time()
         return output["candidate_refresh"]
     finally:
@@ -1328,7 +1335,7 @@ def record_practice_decision_event(
         if hasattr(trader, "record_decision_log_entry"):
             trader.record_decision_log_entry(log_entry, mark_b1_done=mark_b1_done)
     except Exception as exc:
-        print(f"[WARN] 写入牛牛实战决策日志失败: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[WARN] 写入实战页面决策日志失败: {type(exc).__name__}: {exc}", flush=True)
 
 
 def run_practice_decision_logged(b1_payload: dict[str, Any], *, record_start: bool = False) -> dict[str, Any]:
@@ -1388,21 +1395,31 @@ def maybe_run_practice_decision_async(b1_payload: dict[str, Any]) -> None:
         try:
             run_practice_decision_logged(payload)
         except Exception as exc:
-            print(f"[WARN] 牛牛实战决策失败: {type(exc).__name__}: {exc}", flush=True)
+            print(f"[WARN] 实战页面决策失败: {type(exc).__name__}: {exc}", flush=True)
     if len(PRACTICE_DECISION_KEYS) > 20:
         PRACTICE_DECISION_KEYS.clear()
     threading.Thread(target=_worker, name="niuniu-practice-decision", daemon=True).start()
 
-def load_b1_cache() -> dict[str, Any]:
-    try:
-        if B1_CACHE_FILE.exists():
-            raw = B1_CACHE_FILE.read_text()
-            parsed = json.loads(raw)
-            return {**parsed, "generated_at": parsed.get("generated_at", ""), 
-                    "count": parsed.get("count", len(parsed.get("items", []) or parsed.get("candidates", []))),
-                    "items": parsed.get("items") or parsed.get("candidates", [])}
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"error": str(exc), "items": [], "count": 0, "generated_at": ""}
+def load_practice_candidates_cache() -> dict[str, Any]:
+    errors: list[str] = []
+    for cache_file in (MULTI_STRATEGY_CACHE_FILE, B1_CACHE_FILE):
+        try:
+            if not cache_file.exists():
+                continue
+            parsed = json.loads(cache_file.read_text(encoding="utf-8"))
+            if not isinstance(parsed, dict):
+                raise ValueError(f"候选缓存格式无效：{cache_file}")
+            items = parsed.get("items") or parsed.get("candidates") or []
+            return {
+                **parsed,
+                "generated_at": parsed.get("generated_at", ""),
+                "count": parsed.get("count", len(items)),
+                "items": items,
+            }
+        except (OSError, ValueError) as exc:
+            errors.append(f"{cache_file.name}: {exc}")
+    if errors:
+        return {"error": "; ".join(errors), "items": [], "count": 0, "generated_at": ""}
     return {"items": [], "count": 0, "generated_at": ""}
 
 def trigger_b1_scan(
@@ -1621,7 +1638,7 @@ def run_scheduled_b1_scan(slot_key: str) -> None:
             schedule_run_kind=run_kind,
         )
         with API_RESPONSE_LOCK:
-            API_RESPONSE_CACHE.pop("b1_screen", None)
+            API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
         if cache.get("error"):
             _mark_b1_schedule_slot(slot_key, "error", error=str(cache.get("error") or "")[:500])
             print(f"[B1 schedule] {slot_key} failed: {cache.get('error')}", flush=True)
@@ -2512,7 +2529,7 @@ def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str
     if changed_names & {STRATEGY_SOURCE_ENV, PERSONA_STRATEGY_ENV, PRESET_STRATEGY_TEXT_ENV}:
         B1_CANDIDATE_REFRESH_LAST_TS = 0.0
         with API_RESPONSE_LOCK:
-            API_RESPONSE_CACHE.pop("b1_screen", None)
+            API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
         applied.append("strategy_settings")
         if PERSONA_STRATEGY_ENV in changed_names:
             applied.append("persona_strategies")
@@ -3222,7 +3239,7 @@ INDEX_HTML = r"""<!doctype html>
     .inline-value { color:#e5edf8; font-size:14px; line-height:1.5; font-weight:600; }
     .practice-calendar-open-btn { display:inline-flex; align-items:center; justify-content:center; min-width:0; padding:5px 9px; border-radius:8px; border:1px solid rgba(124,92,255,.30); background:rgba(124,92,255,.14); color:#dbeafe; font-size:11px; line-height:1; font-weight:850; white-space:nowrap; box-shadow:inset 0 1px 0 rgba(255,255,255,.045); }
     .practice-calendar-open-btn:hover { border-color:rgba(157,178,255,.56); background:rgba(124,92,255,.22); }
-    .practice-chart-card { position:relative; overflow:hidden; margin:12px 0; padding:14px 14px 10px; border-radius:18px; border:1px solid rgba(255,255,255,.08); background:radial-gradient(circle at 15% 0%, rgba(113,112,255,.16), transparent 34%), linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.018)); box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 18px 42px rgba(0,0,0,.22); }
+    .practice-chart-card { position:relative; z-index:0; isolation:isolate; overflow:hidden; margin:12px 0; padding:14px 14px 10px; border-radius:18px; border:1px solid rgba(255,255,255,.08); background:radial-gradient(circle at 15% 0%, rgba(113,112,255,.16), transparent 34%), linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.018)); box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 18px 42px rgba(0,0,0,.22); }
     .practice-chart-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:8px; }
     .practice-chart-title-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
     .practice-chart-title { color:#f7f8f8; font-size:13px; font-weight:800; letter-spacing:-.01em; }
@@ -3720,12 +3737,12 @@ let hotStocksData = {};
 let moneyFlowData = {inflow: [], outflow: []};
 let marketFlowData = {total_inflow_yi: null, total_outflow_yi: null, net_flow_yi: null};
 let usMarketSummaryData = {loading: true};
-let b1ScreenData = {items: [], count: 0};
+let practiceCandidatesData = {items: [], count: 0};
 let niuniuPracticeData = {positions: [], equity_history: [], trade_log: [], decision_log: [], cash: 1000000, total_equity: 1000000};
 let practiceBenchmarksData = {items: []};
 let benchmarkOverlay = {sh000001: true, sh000300: true, sz399006: true, sh000688: true};
 const initialParams = new URLSearchParams(location.search);
-let activeCategory = initialParams.get('category') || 'b1_screen';
+let activeCategory = initialParams.get('category') || 'practice';
 const US_FEATURES_ENABLED = __US_FEATURES_ENABLED__;
 let indicesViewMode = initialParams.get('panel') === 'market' ? 'market' : 'index';
 let indicesMarketRegionOverride = '';
@@ -4005,8 +4022,9 @@ function renderPracticeRuleNoteModal(note) {
   </div>`;
 }
 const upCls = v => v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
-const CATEGORY_ORDER = ['b1_screen', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];
-const CATEGORY_LABELS = {all:'全部', indices:'指数行情', b1_screen:'牛牛实战', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
+const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];
+const CATEGORY_LABELS = {all:'全部', indices:'指数行情', practice:'实战页面', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
+const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};
 const US_FEATURE_CATEGORIES = new Set(['x_monitor', 'us_ratings']);
 const MESSAGE_CATEGORIES = ['x_monitor', 'market_monitor', 'us_ratings'];
 function categoryAvailable(category) {
@@ -4016,10 +4034,11 @@ function visibleCategoryOrder() {
   return CATEGORY_ORDER.filter(categoryAvailable);
 }
 function normalizeActiveCategory(category) {
-  return visibleCategoryOrder().includes(category) ? category : 'b1_screen';
+  const normalized = LEGACY_CATEGORY_ALIASES[category] || category;
+  return visibleCategoryOrder().includes(normalized) ? normalized : 'practice';
 }
 activeCategory = normalizeActiveCategory(activeCategory);
-const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v4';
+const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v5';
 const DATA_CACHE_TTL_MS = 30000;
 const AUTO_REFRESH_TICK_MS = 15000;
 const US_RATINGS_AUTO_REFRESH_MS = 10 * 60 * 1000;
@@ -4031,7 +4050,7 @@ function saveViewState() {
   try {
     sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
       data, indicesData, sectorData, usSectorData, hotStocksData, moneyFlowData, marketFlowData,
-      usMarketSummaryData, b1ScreenData, niuniuPracticeData, practiceBenchmarksData, usQuotesData,
+      usMarketSummaryData, practiceCandidatesData, niuniuPracticeData, practiceBenchmarksData, usQuotesData,
       xPageOffset, xLoadedOffset, practiceCurveMode, practicePositionMode, practicePositionBriefMode, indicesViewMode,
       savedAt: Date.now()
     }));
@@ -4049,7 +4068,7 @@ function restoreViewState() {
     moneyFlowData = cached.moneyFlowData || moneyFlowData;
     marketFlowData = cached.marketFlowData || marketFlowData;
     usMarketSummaryData = cached.usMarketSummaryData || usMarketSummaryData;
-    b1ScreenData = cached.b1ScreenData || b1ScreenData;
+    practiceCandidatesData = cached.practiceCandidatesData || practiceCandidatesData;
     niuniuPracticeData = cached.niuniuPracticeData || niuniuPracticeData;
     practiceBenchmarksData = cached.practiceBenchmarksData || practiceBenchmarksData;
     usQuotesData = cached.usQuotesData || usQuotesData;
@@ -4074,7 +4093,7 @@ function restoreViewState() {
 }
 function hasWarmData(category) {
   if (category === 'indices') return Array.isArray(indicesData.items) && indicesData.items.length;
-  if (category === 'b1_screen') return (Array.isArray(b1ScreenData.items) && b1ScreenData.items.length) || Array.isArray(niuniuPracticeData.equity_history);
+  if (category === 'practice') return (Array.isArray(practiceCandidatesData.items) && practiceCandidatesData.items.length) || Array.isArray(niuniuPracticeData.equity_history);
   if (category === 'x_monitor') return xLoadedOffset === xPageOffset && (data.records || []).some(r => r.category === category);
   if (isMessageCategory(category)) return (data.records || []).some(r => r.category === category);
   return false;
@@ -4105,10 +4124,10 @@ function currentViewUrl() {
   if (activeCategory === 'indices' && indicesViewMode === 'market') {
     params.set('panel', 'market');
   }
-  if (activeCategory === 'b1_screen' && practicePositionMode === 'sold') {
+  if (activeCategory === 'practice' && practicePositionMode === 'sold') {
     params.set('holdings', 'sold');
   }
-  if (activeCategory === 'b1_screen' && practicePositionBriefMode) {
+  if (activeCategory === 'practice' && practicePositionBriefMode) {
     params.set('brief', '1');
   }
   return '/?' + params.toString();
@@ -4171,7 +4190,7 @@ async function load({background=false} = {}) {
   $('updated').textContent = data.generated_at?.slice(11) || '--';
   renderTabs();
   if (activeCategory === 'indices') { loadIndices(); }
-  if (activeCategory === 'b1_screen') { loadB1Screen(); }
+  if (activeCategory === 'practice') { loadPracticePage(); }
   if (activeCategory === 'market_monitor') { loadIndicesDataInBg(); }
   if (seq !== loadSeq) return;
   render();
@@ -4421,16 +4440,16 @@ function mergePracticePayloadSnapshots(current, incoming) {
   merged.last_error = live.last_error || '';
   return merged;
 }
-async function loadB1Screen() {
+async function loadPracticePage() {
   const seq = ++practiceLoadSeq;
   practiceFullSnapshotStatus = 'loading';
   const fetchJson = url => fetch(url).then(response => {
     if (!response.ok) throw new Error(`${url} HTTP ${response.status}`);
     return response.json();
   });
-  // Start every source together. The fast portfolio no longer waits for B1, and
-  // the full snapshot can hydrate richer data without delaying calendar curves.
-  const b1Promise = fetchJson('/api/b1_screen');
+  // Start every source together. The fast portfolio no longer waits for the
+  // candidate scan, while the full snapshot hydrates richer historical data.
+  const candidatesPromise = fetchJson('/api/practice_candidates');
   const fastPracticePromise = fetchJson('/api/niuniu_practice?fast=1&calendar_schema=1');
   if (!practiceFullRequest) {
     practiceFullRequest = fetchJson('/api/niuniu_practice?snapshot_schema=2').then(
@@ -4447,17 +4466,21 @@ async function loadB1Screen() {
   const fullPracticePromise = practiceFullRequest;
   const benchmarksPromise = fetchJson('/api/practice_benchmarks');
   const renderPracticeUpdate = () => {
-    if (activeCategory === 'b1_screen') render();
+    if (activeCategory === 'practice') render();
     saveViewState();
   };
   const tasks = [
-    b1Promise.then(b1Raw => {
+    candidatesPromise.then(candidatePayload => {
       if (seq !== practiceLoadSeq) return;
-      const b1Items = b1Raw.items || b1Raw.candidates || [];
-      b1ScreenData = {...b1Raw, items:b1Items, count:b1Raw.count || b1Items.length};
+      const candidateItems = candidatePayload.items || candidatePayload.candidates || [];
+      practiceCandidatesData = {
+        ...candidatePayload,
+        items: candidateItems,
+        count: candidatePayload.count || candidateItems.length,
+      };
       renderPracticeUpdate();
     }).catch(error => {
-      if (seq === practiceLoadSeq) console.error('b1 screen load error', error);
+      if (seq === practiceLoadSeq) console.error('practice candidates load error', error);
     }),
     fastPracticePromise.then(payload => {
       if (seq !== practiceLoadSeq || !isUsablePracticePayload(payload)) return;
@@ -4476,7 +4499,7 @@ async function loadB1Screen() {
       if (seq !== practiceLoadSeq) return;
       practiceFullSnapshotStatus = 'error';
       console.error('practice full load error', error);
-      if (activeCategory === 'b1_screen') render();
+      if (activeCategory === 'practice') render();
     }),
     benchmarksPromise.then(payload => {
       if (seq !== practiceLoadSeq) return;
@@ -4490,7 +4513,7 @@ async function loadB1Screen() {
 }
 function renderTabs() {
   $('categoryTabs').innerHTML = visibleCategoryOrder().map(key => {
-    const count = (key === 'indices' || key === 'b1_screen') ? '' : ` · ${data.categories?.[key]?.count || 0}`;
+    const count = (key === 'indices' || key === 'practice') ? '' : ` · ${data.categories?.[key]?.count || 0}`;
     return `<a class="tab ${activeCategory === key ? 'active' : ''}" data-category="${key}" href="/?category=${encodeURIComponent(key)}">${CATEGORY_LABELS[key]}${count}</a>`;
   }).join('');
   document.querySelectorAll('.tab[data-category]').forEach(tab => tab.onclick = (event) => {
@@ -4695,21 +4718,21 @@ function toggleBenchmark(symbol) {
 function setPracticeCurveMode(mode) {
   practiceCurveMode = mode === 'daily' ? 'daily' : 'intraday';
   window.practiceCurveMode = practiceCurveMode;
-  if (activeCategory === 'b1_screen') render();
+  if (activeCategory === 'practice') render();
   saveViewState();
 }
 function setPracticePositionMode(mode) {
   practicePositionMode = mode === 'sold' ? 'sold' : 'open';
   window.practicePositionMode = practicePositionMode;
   syncViewUrl();
-  if (activeCategory === 'b1_screen') render();
+  if (activeCategory === 'practice') render();
   saveViewState();
 }
 function setPracticePositionBriefMode(enabled) {
   practicePositionBriefMode = !!enabled;
   window.practicePositionBriefMode = practicePositionBriefMode;
   syncViewUrl();
-  if (activeCategory === 'b1_screen') render();
+  if (activeCategory === 'practice') render();
   saveViewState();
 }
 function renderPracticeHoverTooltip(item) {
@@ -5729,7 +5752,7 @@ function renderPracticePanel() {
     no_progress: '信号未兑现', position_adjust: '仓位调整', model_sell: '模型卖出',
     other_exit: '其他卖出'
   };
-  const dynamicStrategyMeta = (b1ScreenData && b1ScreenData.strategy_meta) || {};
+  const dynamicStrategyMeta = (practiceCandidatesData && practiceCandidatesData.strategy_meta) || {};
   for (const [key, meta] of Object.entries(dynamicStrategyMeta)) {
     BUY_NAMES[key] = meta.label || BUY_NAMES[key] || key;
   }
@@ -5887,7 +5910,7 @@ function renderPracticePanel() {
   const quoteNote = quote.quote_time ? `行情：${esc(quote.quote_time)} 更新${quote.updated ?? 0}只 ${channelText}${quote.fallback ? `，回退${quote.fallback}只` : ''}` : '';
   const ruleMeta = [`模型：${esc(p.decision_model || 'deepseek-v4-pro')}`, quoteNote].filter(Boolean).join('｜');
   return `<section class="sector-cloud" style="margin-bottom:18px">
-    <h3>牛牛实战 · 模拟账户</h3>
+    <h3>实战页面 · 模拟账户</h3>
     ${p.trading_paused ? `<div style=\"background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);border-radius:12px;padding:10px 14px;margin:10px 0;display:flex;justify-content:space-between;align-items:center\">
       <span style=\"color:#fbbf24;font-size:13px\">⏸️ 交易已暂停：${esc(p.pause_reason||'风控触发')}（${esc((p.pause_since||'').slice(11,16))}起）</span>
       <button onclick=\"actionFetch('/api/niuniu_practice/resume').then(r=>r.json()).then(d=>{if(d.resumed)location.reload()})\" style=\"background:rgba(52,211,153,.18);color:#34d399;border:1px solid rgba(52,211,153,.35);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600\">🔄 强制恢复交易</button>
@@ -6170,24 +6193,24 @@ function toggleHotStockSort(sort) {
     .then(() => render())
     .catch(() => {});
 }
-async function triggerB1Scan() {
-  const remaining = Number(b1ScreenData.cooldown_remaining_seconds || 0);
-  if (b1ScreenData.running || remaining > 0) return;
-  b1ScreenData = {...b1ScreenData, running:true, error:''};
-  renderB1Screen();
+async function refreshPracticeCandidates() {
+  const remaining = Number(practiceCandidatesData.cooldown_remaining_seconds || 0);
+  if (practiceCandidatesData.running || remaining > 0) return;
+  practiceCandidatesData = {...practiceCandidatesData, running:true, error:''};
+  renderPracticePage();
   try {
-    const res = await actionFetch('/api/b1_screen/trigger');
+    const res = await actionFetch('/api/practice_candidates/refresh');
     const d = await res.json();
-    b1ScreenData = {...b1ScreenData, ...d};
-    renderB1Screen();
+    practiceCandidatesData = {...practiceCandidatesData, ...d};
+    renderPracticePage();
     setTimeout(() => load().catch(console.error), 1200);
   } catch (err) {
-    b1ScreenData = {...b1ScreenData, running:false, error:String(err)};
-    renderB1Screen();
+    practiceCandidatesData = {...practiceCandidatesData, running:false, error:String(err)};
+    renderPracticePage();
   }
 }
-function renderB1Screen() {
-  const d = b1ScreenData;
+function renderPracticePage() {
+  const d = practiceCandidatesData;
   const items = d.items || [];
   const err = d.error || '';
   const running = !!d.running;
@@ -7267,8 +7290,8 @@ function render() {
     $('feed').innerHTML = renderIndicesPanel();
     return;
   }
-  if (activeCategory === 'b1_screen') {
-    renderB1Screen();
+  if (activeCategory === 'practice') {
+    renderPracticePage();
     renderPracticeCalendarModal();
     return;
   }
@@ -7347,13 +7370,13 @@ document.addEventListener('click', event => {
     event.stopPropagation();
     if (logAction.dataset.practiceLogAction === 'close') {
       practiceLogDetailKey = '';
-      if (activeCategory === 'b1_screen') render();
+      if (activeCategory === 'practice') render();
     }
     return;
   }
   if (practiceLogDetailKey && event.target.classList && event.target.classList.contains('practice-log-detail-backdrop')) {
     practiceLogDetailKey = '';
-    if (activeCategory === 'b1_screen') render();
+    if (activeCategory === 'practice') render();
     return;
   }
   const logTrigger = event.target.closest('[data-practice-log-key]');
@@ -7361,7 +7384,7 @@ document.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
     practiceLogDetailKey = logTrigger.dataset.practiceLogKey || '';
-    if (activeCategory === 'b1_screen') render();
+    if (activeCategory === 'practice') render();
     return;
   }
   const ruleAction = event.target.closest('[data-practice-rule-action]');
@@ -7369,12 +7392,12 @@ document.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
     practiceRuleNoteOpen = ruleAction.dataset.practiceRuleAction === 'open';
-    if (activeCategory === 'b1_screen') render();
+    if (activeCategory === 'practice') render();
     return;
   }
   if (practiceRuleNoteOpen && event.target.classList && event.target.classList.contains('practice-rule-backdrop')) {
     practiceRuleNoteOpen = false;
-    if (activeCategory === 'b1_screen') render();
+    if (activeCategory === 'practice') render();
     return;
   }
   const calendarAction = event.target.closest('[data-practice-calendar-action]');
@@ -7445,13 +7468,13 @@ document.addEventListener('keydown', event => {
   if (practiceLogDetailKey && event.key === 'Escape') {
     event.preventDefault();
     practiceLogDetailKey = '';
-    if (activeCategory === 'b1_screen') render();
+    if (activeCategory === 'practice') render();
     return;
   }
   if (practiceRuleNoteOpen && event.key === 'Escape') {
     event.preventDefault();
     practiceRuleNoteOpen = false;
-    if (activeCategory === 'b1_screen') render();
+    if (activeCategory === 'practice') render();
     return;
   }
   if (practiceCalendarOpen && event.key === 'Escape') {
@@ -7472,6 +7495,7 @@ document.addEventListener('keydown', event => {
   }
 });
 restoreViewState();
+if (initialParams.has('category') && initialParams.get('category') !== activeCategory) syncViewUrl();
 renderTabs();
 if (hasWarmData(activeCategory)) render();
 load().catch(err => { if (!err || err.name !== 'AbortError') console.error(err); });
@@ -8086,7 +8110,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
-        if parsed.path in {"/api/b1_screen/trigger", "/api/niuniu_practice/resume", "/api/self_optimize/apply"}:
+        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS | {"/api/niuniu_practice/resume", "/api/self_optimize/apply"}:
             self.send_response(405)
             self.send_header("Allow", "POST")
             self.send_header("Cache-Control", "no-store")
@@ -8172,14 +8196,15 @@ class Handler(BaseHTTPRequestHandler):
                 return merge_records_from_db(limit=limit, category=category, offset=offset)
             self.send_json_cached(cache_key, API_TTLS["messages"], produce_messages, edge_ttl=API_TTLS["messages"], browser_ttl=5)
             return
-        if parsed.path == "/api/b1_screen":
+        if parsed.path in PRACTICE_CANDIDATES_API_PATHS:
             params = parse_qs(parsed.query)
             if params.get("force", ["0"])[0].lower() in {"1", "true", "yes"}:
                 self.send_method_not_allowed("POST")
             else:
-                self.send_json_cached("b1_screen", API_TTLS["b1_screen"], load_b1_cache, edge_ttl=API_TTLS["b1_screen"], browser_ttl=10)
+                ttl = API_TTLS["practice_candidates"]
+                self.send_json_cached(PRACTICE_CANDIDATES_CACHE_KEY, ttl, load_practice_candidates_cache, edge_ttl=ttl, browser_ttl=10)
             return
-        if parsed.path == "/api/b1_screen/trigger":
+        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS:
             self.send_method_not_allowed("POST")
             return
         if parsed.path == "/api/niuniu_practice":
@@ -8277,9 +8302,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_html(render_admin_login_page("管理员凭据错误"), status=403)
             return
-        if parsed.path in {"/api/b1_screen", "/api/b1_screen/trigger"}:
+        legacy_force_path = parsed.path == "/api/b1_screen"
+        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS or legacy_force_path:
             params = parse_qs(parsed.query)
-            if parsed.path == "/api/b1_screen" and params.get("force", ["0"])[0].lower() not in {"1", "true", "yes"}:
+            if legacy_force_path and params.get("force", ["0"])[0].lower() not in {"1", "true", "yes"}:
                 self.send_response(404)
                 self.end_headers()
                 self.write_response(b"not found")
@@ -8291,7 +8317,8 @@ class Handler(BaseHTTPRequestHandler):
             if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
                 return
             cache_data = trigger_b1_scan(force=True)
-            API_RESPONSE_CACHE.pop("b1_screen", None)
+            with API_RESPONSE_LOCK:
+                API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
             self.send_json_uncached(cache_data)
             return
         if parsed.path == "/api/niuniu_practice/resume":

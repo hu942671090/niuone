@@ -154,6 +154,11 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(action.status, 405)
         self.assertEqual(action.header('Allow'), 'POST')
 
+        refresh = FakeHandler(path='/api/practice_candidates/refresh', method='HEAD')
+        refresh.do_HEAD()
+        self.assertEqual(refresh.status, 405)
+        self.assertEqual(refresh.header('Allow'), 'POST')
+
     def test_legacy_visit_stats_are_migrated_once(self):
         with closing(sqlite3.connect(dashboard.STATS_DB)) as con:
             con.execute("INSERT INTO visit_stats(key,value,updated_at) VALUES('home_views',3,10)")
@@ -849,6 +854,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn("const side = trade.action === 'BUY' ? '买' : '卖';", dashboard.INDEX_HTML)
         self.assertIn('function renderPracticeTradeMarkerLine', dashboard.INDEX_HTML)
         self.assertIn('practice-trade-marker-side', dashboard.INDEX_HTML)
+        self.assertIn('.practice-chart-card { position:relative; z-index:0; isolation:isolate; overflow:hidden;', dashboard.INDEX_HTML)
         self.assertIn('.practice-trade-marker { --marker-size:18px; --marker-radius:9px; appearance:none;', dashboard.INDEX_HTML)
         self.assertIn(
             'left:clamp(var(--marker-radius), var(--marker-x), calc(100% - var(--marker-radius)));',
@@ -935,11 +941,12 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('practiceCalendarAnchor', dashboard.INDEX_HTML)
         self.assertNotIn('practice-calendar-values empty', dashboard.INDEX_HTML)
         self.assertNotIn('<h3 class="practice-panel-title"><span>牛牛实战 · 模拟账户</span><button class="practice-calendar-open-btn"', dashboard.INDEX_HTML)
+        self.assertIn('<h3>实战页面 · 模拟账户</h3>', dashboard.INDEX_HTML)
         self.assertNotIn('最近交易日收益', dashboard.INDEX_HTML)
         self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', dashboard.INDEX_HTML)
 
     def test_index_template_loads_calendar_history_without_waiting_for_full_snapshot(self):
-        self.assertIn("const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v4';", dashboard.INDEX_HTML)
+        self.assertIn("const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v5';", dashboard.INDEX_HTML)
         self.assertIn("fetchJson('/api/niuniu_practice?fast=1&calendar_schema=1')", dashboard.INDEX_HTML)
         self.assertIn("fetchJson('/api/niuniu_practice?snapshot_schema=2')", dashboard.INDEX_HTML)
         self.assertIn('const fullPracticePromise = practiceFullRequest;', dashboard.INDEX_HTML)
@@ -957,9 +964,25 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('buildPracticeCalendarRows(practiceCalendarHistoryPoints(p)', dashboard.INDEX_HTML)
         self.assertIn('renderPracticeCurve(p.equity_history || []', dashboard.INDEX_HTML)
 
+    def test_index_template_uses_practice_as_the_canonical_page_name(self):
+        self.assertIn("let activeCategory = initialParams.get('category') || 'practice';", dashboard.INDEX_HTML)
+        self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];", dashboard.INDEX_HTML)
+        self.assertIn("practice:'实战页面'", dashboard.INDEX_HTML)
+        self.assertIn("const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};", dashboard.INDEX_HTML)
+        self.assertIn('const normalized = LEGACY_CATEGORY_ALIASES[category] || category;', dashboard.INDEX_HTML)
+        self.assertIn("fetchJson('/api/practice_candidates')", dashboard.INDEX_HTML)
+        self.assertIn("actionFetch('/api/practice_candidates/refresh')", dashboard.INDEX_HTML)
+        self.assertIn('async function loadPracticePage()', dashboard.INDEX_HTML)
+        self.assertIn('function renderPracticePage()', dashboard.INDEX_HTML)
+        self.assertIn("initialParams.get('category') !== activeCategory", dashboard.INDEX_HTML)
+        self.assertNotIn('function loadB1Screen', dashboard.INDEX_HTML)
+        self.assertNotIn('function renderB1Screen', dashboard.INDEX_HTML)
+        self.assertNotIn("fetchJson('/api/b1_screen')", dashboard.INDEX_HTML)
+        self.assertNotIn("actionFetch('/api/b1_screen/trigger')", dashboard.INDEX_HTML)
+
     def test_index_snapshot_merge_handles_business_errors_and_stale_full_responses(self):
         start = dashboard.INDEX_HTML.index('function mergePracticeTimedRows')
-        end = dashboard.INDEX_HTML.index('async function loadB1Screen', start)
+        end = dashboard.INDEX_HTML.index('async function loadPracticePage', start)
         functions = dashboard.INDEX_HTML[start:end]
         scenario = r"""
 const fast = {
@@ -1291,6 +1314,66 @@ process.stdout.write(JSON.stringify({
         self.assertLess(len(body), len(payload))
         self.assertEqual(gzip.decompress(body), payload)
 
+    def test_practice_candidates_cache_prefers_multi_strategy_and_falls_back_to_legacy(self):
+        original_multi_strategy_cache_file = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1_cache_file = dashboard.B1_CACHE_FILE
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        try:
+            dashboard.B1_CACHE_FILE.write_text(
+                json.dumps({'candidates': [{'code': 'legacy'}], 'generated_at': 'legacy'}),
+                encoding='utf-8',
+            )
+            dashboard.MULTI_STRATEGY_CACHE_FILE.write_text(
+                json.dumps({'items': [{'code': 'multi'}], 'generated_at': 'multi'}),
+                encoding='utf-8',
+            )
+
+            preferred = dashboard.load_practice_candidates_cache()
+            self.assertEqual(preferred['items'], [{'code': 'multi'}])
+            self.assertEqual(preferred['count'], 1)
+            self.assertEqual(preferred['generated_at'], 'multi')
+
+            dashboard.MULTI_STRATEGY_CACHE_FILE.unlink()
+            fallback = dashboard.load_practice_candidates_cache()
+            self.assertEqual(fallback['items'], [{'code': 'legacy'}])
+            self.assertEqual(fallback['count'], 1)
+            self.assertEqual(fallback['generated_at'], 'legacy')
+        finally:
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
+            dashboard.B1_CACHE_FILE = original_b1_cache_file
+
+    def test_practice_candidates_api_uses_canonical_cache_for_legacy_alias(self):
+        original_loader = dashboard.load_practice_candidates_cache
+        calls = []
+        expected = {'items': [{'code': '000001'}], 'count': 1, 'generated_at': '2026-07-10 10:00:00'}
+        try:
+            dashboard.load_practice_candidates_cache = lambda: calls.append(True) or expected
+
+            canonical = FakeHandler(path='/api/practice_candidates')
+            canonical.do_GET()
+            legacy = FakeHandler(path='/api/b1_screen')
+            legacy.do_GET()
+
+            self.assertEqual(canonical.status, 200)
+            self.assertEqual(legacy.status, 200)
+            self.assertEqual(json.loads(canonical.wfile.getvalue().decode('utf-8')), expected)
+            self.assertEqual(legacy.wfile.getvalue(), canonical.wfile.getvalue())
+            self.assertEqual(canonical.header('X-Dashboard-Cache'), 'MISS')
+            self.assertEqual(legacy.header('X-Dashboard-Cache'), 'HIT')
+            self.assertEqual(calls, [True])
+            self.assertIn(dashboard.PRACTICE_CANDIDATES_CACHE_KEY, dashboard.API_RESPONSE_CACHE)
+            self.assertNotIn('b1_screen', dashboard.API_RESPONSE_CACHE)
+
+            for path in ('/api/practice_candidates?force=1', '/api/b1_screen?force=1'):
+                with self.subTest(path=path):
+                    force_get = FakeHandler(path=path)
+                    force_get.do_GET()
+                    self.assertEqual(force_get.status, 405)
+                    self.assertEqual(force_get.header('Allow'), 'POST')
+        finally:
+            dashboard.load_practice_candidates_cache = original_loader
+
     def test_state_changing_api_requires_post_action_header(self):
         original_admin_limit = dashboard.RATE_LIMIT_ADMIN
         original_trigger = dashboard.trigger_b1_scan
@@ -1301,7 +1384,7 @@ process.stdout.write(JSON.stringify({
             admin_cookie = self.admin_cookie()
 
             unauthorized = FakeHandler(
-                path='/api/b1_screen/trigger',
+                path='/api/practice_candidates/refresh',
                 method='POST',
                 headers={'Content-Length': '0', dashboard.ACTION_HEADER_NAME: '1'},
             )
@@ -1313,13 +1396,13 @@ process.stdout.write(JSON.stringify({
             )
             self.assertEqual(calls, [])
 
-            get_handler = FakeHandler(path='/api/b1_screen/trigger')
+            get_handler = FakeHandler(path='/api/practice_candidates/refresh')
             get_handler.do_GET()
             self.assertEqual(get_handler.status, 405)
             self.assertEqual(get_handler.header('Allow'), 'POST')
 
             missing_header = FakeHandler(
-                path='/api/b1_screen/trigger',
+                path='/api/practice_candidates/refresh',
                 method='POST',
                 headers={'Content-Length': '0', 'Cookie': admin_cookie},
             )
@@ -1329,7 +1412,7 @@ process.stdout.write(JSON.stringify({
             self.assertEqual(calls, [])
 
             ok = FakeHandler(
-                path='/api/b1_screen/trigger',
+                path='/api/practice_candidates/refresh',
                 method='POST',
                 headers={
                     'Content-Length': '0',
@@ -1341,6 +1424,47 @@ process.stdout.write(JSON.stringify({
             self.assertEqual(ok.status, 200)
             self.assertEqual(json.loads(ok.wfile.getvalue().decode('utf-8'))['forced'], True)
             self.assertEqual(calls, [True])
+
+            legacy = FakeHandler(
+                path='/api/b1_screen/trigger',
+                method='POST',
+                headers={
+                    'Content-Length': '0',
+                    'Cookie': admin_cookie,
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+            )
+            legacy.do_POST()
+            self.assertEqual(legacy.status, 200)
+            self.assertEqual(json.loads(legacy.wfile.getvalue().decode('utf-8'))['forced'], True)
+            self.assertEqual(calls, [True, True])
+
+            legacy_force = FakeHandler(
+                path='/api/b1_screen?force=1',
+                method='POST',
+                headers={
+                    'Content-Length': '0',
+                    'Cookie': admin_cookie,
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+            )
+            legacy_force.do_POST()
+            self.assertEqual(legacy_force.status, 200)
+            self.assertEqual(json.loads(legacy_force.wfile.getvalue().decode('utf-8'))['forced'], True)
+            self.assertEqual(calls, [True, True, True])
+
+            legacy_without_force = FakeHandler(
+                path='/api/b1_screen',
+                method='POST',
+                headers={
+                    'Content-Length': '0',
+                    'Cookie': admin_cookie,
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+            )
+            legacy_without_force.do_POST()
+            self.assertEqual(legacy_without_force.status, 404)
+            self.assertEqual(calls, [True, True, True])
         finally:
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
             dashboard.trigger_b1_scan = original_trigger
