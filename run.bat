@@ -243,6 +243,10 @@ if not defined DEFAULT_DASHBOARD_PORT set "DEFAULT_DASHBOARD_PORT=8787"
     echo DASHBOARD_PUSH_HISTORY_DB=%LOCAL_DATA_DIR%\runtime\push_history.db
     echo DASHBOARD_PORTFOLIO_STATE=%LOCAL_DATA_DIR%\runtime\cron\output\niuniu_practice_portfolio.json
     echo DASHBOARD_TRADER_SCRIPT=%ROOT%\app\niuniu_practice_trader.py
+    echo.
+    echo # The dashboard stays public; settings and admin APIs always require authentication.
+    echo # Leave blank to use dashboard_admin_token.txt under DASHBOARD_HOME.
+    echo DASHBOARD_ADMIN_PASSWORD=%DASHBOARD_ADMIN_PASSWORD%
 ) > "%ENV_FILE%"
 exit /b %ERRORLEVEL%
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import hmac
 import html
 import ipaddress
 import json
@@ -73,6 +74,8 @@ B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
 STATS_DB = DASHBOARD_HOME / "dashboard_stats.db"
 LEGACY_STATS_DB = DASHBOARD_HOME / "dashboard_users.db"
 LEGACY_STATS_MIGRATION_KEY = "dashboard_users_visit_stats_v1"
+ADMIN_TOKEN_FILE = DASHBOARD_HOME / "dashboard_admin_token.txt"
+ADMIN_SESSION_COOKIE_NAME = "dashboard_admin_session"
 VISITOR_COOKIE_NAME = "niuone_visitor_id"
 ACTION_HEADER_NAME = "X-NiuOne-Action"
 ACTION_HEADER_VALUES = {"1", "true", "yes", "on"}
@@ -84,6 +87,8 @@ NIUONE_LAUNCHD_LABELS = (
     "ai.niuone.dashboard",
 )
 NIUONE_RESTART_DELAY_SECONDS = float(os.environ.get("NIUONE_RESTART_DELAY_SECONDS", "1.2") or "1.2")
+ADMIN_PASSWORD = os.environ.get("DASHBOARD_ADMIN_PASSWORD", "").strip()
+ADMIN_SESSION_TTL_SECONDS = int(os.environ.get("DASHBOARD_ADMIN_SESSION_TTL_SECONDS", "86400") or "86400")
 TRUSTED_PROXY_CIDRS = tuple(
     value.strip()
     for value in os.environ.get("DASHBOARD_TRUSTED_PROXIES", "127.0.0.1/32,::1/128").split(",")
@@ -145,8 +150,10 @@ RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("DASHBOARD_RATE_LIMIT_WINDOW_SECO
 RATE_LIMIT_ANON = int(os.environ.get("DASHBOARD_RATE_LIMIT_ANON", "240") or "240")
 RATE_LIMIT_API = int(os.environ.get("DASHBOARD_RATE_LIMIT_API", "900") or "900")
 RATE_LIMIT_ADMIN = int(os.environ.get("DASHBOARD_RATE_LIMIT_ADMIN", "90") or "90")
+RATE_LIMIT_ADMIN_LOGIN = int(os.environ.get("DASHBOARD_RATE_LIMIT_ADMIN_LOGIN", "10") or "10")
 RATE_LIMIT_BUCKETS: dict[tuple[str, str], tuple[float, int]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
+ADMIN_TOKEN_LOCK = threading.Lock()
 VISIT_STATS_LOCK = threading.RLock()
 API_TTLS = {
     "messages": 10,
@@ -192,6 +199,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_WATCHLIST_STATE", "label": "X 监控状态文件", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "state" / "x_watchlist_latest.json"), "effect": "next_run"},
     {"name": "DASHBOARD_X_WATCHLIST_ARCHIVE_DIR", "label": "X 监控归档目录", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "output" / "x_watchlist_direct"), "effect": "next_run"},
 
+    {"name": "DASHBOARD_ADMIN_PASSWORD", "label": "设置页管理员密码", "group": "访问控制", "kind": "secret", "default": "", "effect": "runtime"},
     {"name": "DASHBOARD_EDGE_CACHE_ENABLED", "label": "允许 CDN 缓存 API", "group": "访问控制", "kind": "bool", "default": "0", "effect": "restart"},
     {"name": "DASHBOARD_MAX_POST_BODY_BYTES", "label": "POST 表单最大字节", "group": "访问控制", "kind": "int", "default": str(256 * 1024), "effect": "restart"},
 
@@ -299,6 +307,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
 ]
 ENV_CONFIG_BY_NAME = {item["name"]: item for item in ENV_CONFIG_SCHEMA}
 ADMIN_VISIBLE_ENV_NAMES = [
+    "DASHBOARD_ADMIN_PASSWORD",
     "DASHBOARD_US_FEATURES_ENABLED",
     "DASHBOARD_GROK_MODEL",
     "DASHBOARD_GROK_CONTEXT_LENGTH",
@@ -418,6 +427,80 @@ def _now_ts() -> float:
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(str(token).encode('utf-8')).hexdigest()
+
+
+def get_or_create_admin_token() -> str:
+    """Return the local bootstrap credential used to protect admin sessions."""
+    with ADMIN_TOKEN_LOCK:
+        if ADMIN_TOKEN_FILE.is_symlink():
+            raise RuntimeError(f"admin token file must not be a symlink: {ADMIN_TOKEN_FILE}")
+        if ADMIN_TOKEN_FILE.exists():
+            token = ADMIN_TOKEN_FILE.read_text(encoding="utf-8").strip()
+            if token:
+                try:
+                    ADMIN_TOKEN_FILE.chmod(0o600)
+                except OSError:
+                    pass
+                return token
+        ADMIN_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        token = "na_" + secrets.token_urlsafe(36)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(ADMIN_TOKEN_FILE), flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(token + "\n")
+        try:
+            ADMIN_TOKEN_FILE.chmod(0o600)
+        except OSError:
+            pass
+        return token
+
+
+def admin_session_signing_key() -> bytes:
+    bootstrap_token = get_or_create_admin_token().encode("utf-8")
+    credential_fingerprint = hashlib.sha256(ADMIN_PASSWORD.encode("utf-8")).digest()
+    return hmac.new(
+        bootstrap_token,
+        b"niuone-admin-session-v1\0" + credential_fingerprint,
+        hashlib.sha256,
+    ).digest()
+
+
+def new_admin_session(now: float | None = None) -> str:
+    issued_at = int(time.time() if now is None else now)
+    payload = f"{issued_at}.{secrets.token_urlsafe(18)}"
+    signature = hmac.new(admin_session_signing_key(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"ad_{payload}.{signature}"
+
+
+def validate_admin_session(cookie_value: str, now: float | None = None) -> bool:
+    raw = str(cookie_value or "")
+    if not raw.startswith("ad_"):
+        return False
+    try:
+        issued_text, nonce, signature = raw[3:].split(".", 2)
+        issued_at = int(issued_text)
+    except (TypeError, ValueError):
+        return False
+    if not nonce or not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", nonce):
+        return False
+    if not re.fullmatch(r"[0-9a-f]{64}", signature):
+        return False
+    current = int(time.time() if now is None else now)
+    ttl = max(60, ADMIN_SESSION_TTL_SECONDS)
+    if issued_at > current + 60 or current - issued_at > ttl:
+        return False
+    payload = f"{issued_at}.{nonce}"
+    expected = hmac.new(admin_session_signing_key(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return secrets.compare_digest(signature, expected)
+
+
+def verify_admin_credential(value: str) -> bool:
+    expected = ADMIN_PASSWORD or get_or_create_admin_token()
+    supplied = str(value or "")
+    return bool(supplied) and secrets.compare_digest(
+        supplied.encode("utf-8"),
+        expected.encode("utf-8"),
+    )
 
 
 def check_rate_limit(scope: str, key: str, limit: int, window: int | None = None) -> tuple[bool, int]:
@@ -1884,6 +1967,15 @@ def parse_env_file(path: Path | None = None, *, include_container_overrides: boo
     return values
 
 
+# Some legacy service definitions invoke this module directly instead of using
+# run-dashboard.sh. Preserve explicit process overrides, otherwise load the
+# admin credential from the private dashboard.env file here as well.
+if "DASHBOARD_ADMIN_PASSWORD" not in os.environ:
+    ADMIN_PASSWORD = str(
+        parse_env_file(include_container_overrides=False).get("DASHBOARD_ADMIN_PASSWORD") or ""
+    ).strip()
+
+
 def us_features_enabled(env_values: dict[str, str] | None = None) -> bool:
     values = env_values if env_values is not None else parse_env_file()
     raw = values.get("DASHBOARD_US_FEATURES_ENABLED") or os.environ.get("DASHBOARD_US_FEATURES_ENABLED") or "0"
@@ -2388,7 +2480,7 @@ def validate_business_updates(updates: dict[str, str]) -> None:
 
 
 def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str] | tuple[str, ...] | None) -> dict[str, Any]:
-    global B1_CANDIDATE_REFRESH_LAST_TS, B1_SCHEDULE_TIMES, TRADER_MODULE, TRADER_MODULE_MTIME
+    global ADMIN_PASSWORD, B1_CANDIDATE_REFRESH_LAST_TS, B1_SCHEDULE_TIMES, TRADER_MODULE, TRADER_MODULE_MTIME
     if isinstance(changed, dict):
         changed_names = set(changed.keys())
     else:
@@ -2400,6 +2492,9 @@ def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str
             os.environ[name] = env_values[name]
 
     applied: list[str] = []
+    if "DASHBOARD_ADMIN_PASSWORD" in changed_names:
+        ADMIN_PASSWORD = str(env_values.get("DASHBOARD_ADMIN_PASSWORD") or "").strip()
+        applied.append("admin_password")
     if "DASHBOARD_B1_SCHEDULE_TIMES" in changed_names:
         B1_SCHEDULE_TIMES = tuple(split_hhmm_values(env_values.get("DASHBOARD_B1_SCHEDULE_TIMES", "")))
         applied.append("b1_schedule_times")
@@ -2573,6 +2668,21 @@ def build_admin_config_payload() -> dict[str, Any]:
     }
 
 INDICES_HTML = None
+
+ADMIN_LOGIN_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>牛牛1号 · 设置验证</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
+<style>
+:root{color-scheme:dark;--bg:#06070a;--panel:#10131a;--line:#252b38;--text:#f2f4f8;--muted:#99a3b3;--accent:#7c5cff;--cyan:#24c6dc;--red:#fb7185}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 20% 0%,rgba(124,92,255,.28),transparent 34rem),var(--bg);color:var(--text);padding:20px}.box{width:min(440px,100%);border:1px solid var(--line);border-radius:20px;padding:28px;background:linear-gradient(135deg,rgba(16,19,26,.96),rgba(21,26,36,.90));box-shadow:0 28px 90px rgba(0,0,0,.36)}h1{margin:0 0 8px;font-size:28px}.sub{color:var(--muted);line-height:1.6;margin-bottom:22px}label{display:block;color:#cbd5e1;font-weight:800;font-size:13px;margin:14px 0 7px}input{width:100%;border:1px solid var(--line);background:#0b0e14;color:var(--text);border-radius:12px;padding:13px 14px;font:inherit;outline:none}input:focus{border-color:rgba(124,92,255,.75);box-shadow:0 0 0 4px rgba(124,92,255,.13)}button{width:100%;margin-top:18px;border:0;border-radius:12px;padding:13px 14px;font:inherit;font-weight:900;color:white;background:linear-gradient(135deg,var(--accent),var(--cyan));cursor:pointer}.error{border:1px solid rgba(251,113,133,.35);background:rgba(127,29,29,.25);color:#fecdd3;border-radius:12px;padding:10px 12px;margin-bottom:14px}.hint{font-size:12px;color:#718096;margin-top:14px;line-height:1.6;overflow-wrap:anywhere}.toplink{display:inline-block;color:#9db2ff;text-decoration:none;margin-top:14px;font-weight:800}
+</style></head><body><form class="box" method="post" action="/admin/password" data-admin-password-form>
+<h1>设置页验证</h1><div class="sub">__SUBTITLE__</div>
+__ERROR__
+<label>__LABEL__</label><input name="admin_password" type="password" autocomplete="current-password" placeholder="__PLACEHOLDER__" required autofocus enterkeyhint="done">
+<button type="submit">进入设置</button>
+<div class="hint">__HINT__</div>
+<a class="toplink" href="/">返回首页</a>
+</form></body></html>"""
 
 ADMIN_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2768,7 +2878,7 @@ document.addEventListener('submit', function(event) {
   fetch('/api/admin/config/env', {
     method: 'POST',
     credentials: 'same-origin',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'Accept': 'application/json'},
+    headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'Accept': 'application/json', 'X-NiuOne-Action': '1'},
     body: new URLSearchParams(new FormData(form))
   }).then(function(response) {
     return response.json().catch(function() { return null; }).then(function(payload) {
@@ -2778,6 +2888,10 @@ document.addEventListener('submit', function(event) {
       return payload;
     });
   }).then(function(payload) {
+    if (payload.reauth_required) {
+      window.location.replace('/admin');
+      return;
+    }
     syncUsFeatureSettings();
     syncStrategySourceSettings();
     setEnvSaveFeedback(form, 'ok', businessSaveMessage(payload));
@@ -7665,6 +7779,29 @@ def render_yaml_config(payload: dict[str, Any]) -> str:
     )
 
 
+def render_admin_login_page(error: str = "") -> bytes:
+    if ADMIN_PASSWORD:
+        subtitle = "请输入管理员密码后进入业务配置。"
+        label = "管理员密码"
+        placeholder = "管理员密码"
+        hint = "密码来自 DASHBOARD_ADMIN_PASSWORD；通过设置页修改后会立即生效并注销旧会话。"
+    else:
+        subtitle = "设置与管理操作需要本机管理员密钥。"
+        label = "管理员密钥"
+        placeholder = "dashboard_admin_token.txt 中的密钥"
+        hint = "密钥保存在运行目录的 dashboard_admin_token.txt，文件权限仅限本机运行用户。"
+    error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
+    return (
+        ADMIN_LOGIN_HTML
+        .replace("__SUBTITLE__", html.escape(subtitle))
+        .replace("__LABEL__", html.escape(label))
+        .replace("__PLACEHOLDER__", html.escape(placeholder))
+        .replace("__HINT__", html.escape(hint))
+        .replace("__ERROR__", error_html)
+        .encode("utf-8")
+    )
+
+
 def render_admin_page(params: dict[str, list[str]] | None = None) -> bytes:
     params = params or {}
     config_payload = build_admin_config_payload()
@@ -7704,7 +7841,13 @@ class Handler(BaseHTTPRequestHandler):
             return visitor_id, False
         return "nvst_" + secrets.token_urlsafe(24), True
 
-    def current_user(self) -> dict[str, Any]:
+    def admin_session_valid(self) -> bool:
+        cookie_value = parse_request_cookies(self.headers.get("Cookie")).get(ADMIN_SESSION_COOKIE_NAME, "")
+        return validate_admin_session(cookie_value)
+
+    def current_user(self) -> dict[str, Any] | None:
+        if not self.admin_session_valid():
+            return None
         return {"role": "admin", "nickname": "local"}
 
     def send_security_headers(self) -> None:
@@ -7763,7 +7906,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_method_not_allowed(self, allow: str = "POST") -> None:
         self.send_json_error(405, "method_not_allowed", allow=allow)
 
-    def require_api_action_request(self) -> bool:
+    def require_action_request(self) -> bool:
         header_value = str(self.headers.get(ACTION_HEADER_NAME) or "").strip().lower()
         if header_value not in ACTION_HEADER_VALUES:
             self.send_json_error(403, "action_header_required")
@@ -7795,6 +7938,11 @@ class Handler(BaseHTTPRequestHandler):
         secure = "; Secure" if self.is_secure_request() else ""
         return f"Path=/; Max-Age=31536000; SameSite=Lax{secure}"
 
+    def admin_session_cookie_flags(self) -> str:
+        secure = "; Secure" if self.is_secure_request() else ""
+        max_age = max(60, ADMIN_SESSION_TTL_SECONDS)
+        return f"Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
+
     def send_html(self, payload: bytes, status: int = 200) -> None:
         content_type = "text/html; charset=utf-8"
         body, gzipped = self.maybe_gzip_payload(payload, content_type)
@@ -7805,14 +7953,42 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.write_response(body)
 
-    def redirect(self, location: str) -> None:
+    def redirect(
+        self,
+        location: str,
+        *,
+        set_admin_cookie: str | None = None,
+        clear_admin_cookie: bool = False,
+    ) -> None:
         self.send_response(303)
         self.send_header("Location", location)
         self.send_header("Cache-Control", "no-store")
+        if set_admin_cookie:
+            self.send_header(
+                "Set-Cookie",
+                f"{ADMIN_SESSION_COOKIE_NAME}={set_admin_cookie}; {self.admin_session_cookie_flags()}",
+            )
+        if clear_admin_cookie:
+            secure = "; Secure" if self.is_secure_request() else ""
+            self.send_header(
+                "Set-Cookie",
+                f"{ADMIN_SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}",
+            )
         self.end_headers()
 
-    def require_admin(self) -> dict[str, Any]:
-        return self.current_user()
+    def send_admin_password_required(self) -> bool:
+        if urlparse(self.path).path.startswith("/api/"):
+            self.send_json_error(403, "admin_password_required")
+        else:
+            self.send_html(render_admin_login_page())
+        return False
+
+    def require_admin(self) -> dict[str, Any] | None:
+        user = self.current_user()
+        if not user:
+            self.send_admin_password_required()
+            return None
+        return user
 
     def read_form(self) -> dict[str, str]:
         try:
@@ -7865,6 +8041,30 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
             return
+        if parsed.path == "/admin":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if parsed.path == "/api/admin/config":
+            authenticated = self.admin_session_valid()
+            self.send_response(200 if authenticated else 403)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if parsed.path.startswith("/api/admin/"):
+            self.send_response(404)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if parsed.path in {"/api/b1_screen/trigger", "/api/niuniu_practice/resume", "/api/self_optimize/apply"}:
+            self.send_response(405)
+            self.send_header("Allow", "POST")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
         if parsed.path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -7886,9 +8086,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
             return
         if parsed.path == "/admin":
+            if not self.require_admin():
+                return
             self.send_html(render_admin_page(parse_qs(parsed.query)))
             return
         if parsed.path == "/api/admin/config":
+            if not self.require_admin():
+                return
             self.send_json_uncached(build_admin_config_payload())
             return
         if parsed.path == "/":
@@ -8029,6 +8233,23 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
             return
+        if parsed.path == "/admin/password":
+            peer_ip = self.remote_ip()
+            client_ip = self.client_ip()
+            if not self.enforce_rate_limit("admin-login-peer", peer_ip, RATE_LIMIT_ADMIN_LOGIN):
+                return
+            if client_ip != peer_ip and not self.enforce_rate_limit("admin-login-client", client_ip, RATE_LIMIT_ADMIN_LOGIN):
+                return
+            try:
+                form = self.read_form()
+            except RequestTooLarge:
+                self.send_html(render_admin_login_page("请求过大，请重新提交"), status=413)
+                return
+            if verify_admin_credential(form.get("admin_password", "")):
+                self.redirect("/admin", set_admin_cookie=new_admin_session())
+            else:
+                self.send_html(render_admin_login_page("管理员凭据错误"), status=403)
+            return
         if parsed.path in {"/api/b1_screen", "/api/b1_screen/trigger"}:
             params = parse_qs(parsed.query)
             if parsed.path == "/api/b1_screen" and params.get("force", ["0"])[0].lower() not in {"1", "true", "yes"}:
@@ -8038,7 +8259,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not self.require_admin():
                 return
-            if not self.require_api_action_request():
+            if not self.require_action_request():
                 return
             if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
                 return
@@ -8049,7 +8270,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/niuniu_practice/resume":
             if not self.require_admin():
                 return
-            if not self.require_api_action_request():
+            if not self.require_action_request():
                 return
             if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
                 return
@@ -8061,7 +8282,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/self_optimize/apply":
             if not self.require_admin():
                 return
-            if not self.require_api_action_request():
+            if not self.require_action_request():
                 return
             if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
                 return
@@ -8071,6 +8292,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path in {"/admin/config/env", "/api/admin/config/env"}:
             if not self.require_admin():
+                return
+            if not self.require_action_request():
                 return
             if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
                 return
@@ -8086,6 +8309,7 @@ class Handler(BaseHTTPRequestHandler):
                 validate_business_updates(updates)
                 result = write_env_file_values(updates)
                 result["runtime"] = sync_business_runtime_settings(result.get("changed_names") or [])
+                result["reauth_required"] = "DASHBOARD_ADMIN_PASSWORD" in set(result.get("changed_names") or [])
                 if result.get("changed"):
                     result["restart"] = {"ok": False, "skipped": "hot_applied"}
                 else:
@@ -8104,6 +8328,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path in {"/admin/config/yaml", "/api/admin/config/yaml"}:
             if not self.require_admin():
+                return
+            if not self.require_action_request():
                 return
             if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
                 return
@@ -8269,6 +8495,7 @@ def _safe_float(v: str) -> float | None:
 
 def main() -> None:
     ensure_stats_db()
+    get_or_create_admin_token()
     parser = argparse.ArgumentParser(description="NiuOne dashboard")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
@@ -8277,7 +8504,10 @@ def main() -> None:
     start_b1_scheduler()
     start_pending_decision_executor()
     print(f"牛牛1号：http://{args.host}:{args.port}")
-    print("设置页：/admin")
+    if ADMIN_PASSWORD:
+        print("设置页：/admin（管理员密码保护已启用）")
+    else:
+        print(f"设置页：/admin（管理员密钥：{ADMIN_TOKEN_FILE}）")
     print(f"访问统计：{STATS_DB}")
     print(f"消息历史：{push_history.DB_PATH}")
     try:

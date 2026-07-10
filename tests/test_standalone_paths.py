@@ -12,6 +12,32 @@ SRC = ROOT / 'app'
 
 
 class DashboardStandalonePathTests(unittest.TestCase):
+    def test_direct_dashboard_start_loads_admin_password_from_private_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / 'dashboard.env'
+            env_file.write_text("DASHBOARD_ADMIN_PASSWORD='管理员密码'\n", encoding='utf-8')
+            env = os.environ.copy()
+            env.pop('DASHBOARD_ADMIN_PASSWORD', None)
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(env_file)
+            code = f"""
+import importlib.util, json, sys
+sys.path.insert(0, {str(SRC)!r})
+spec = importlib.util.spec_from_file_location('dashboard_direct_start_test', {str(SRC / 'niuone_dashboard.py')!r})
+d = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(d)
+print(json.dumps({{
+  'configured': bool(d.ADMIN_PASSWORD),
+  'accepted': d.verify_admin_credential('管理员密码'),
+  'wrong_rejected': not d.verify_admin_credential('错误密码'),
+}}))
+"""
+            out = subprocess.check_output([sys.executable, '-c', code], env=env, text=True)
+            data = json.loads(out)
+            self.assertTrue(data['configured'])
+            self.assertTrue(data['accepted'])
+            self.assertTrue(data['wrong_rejected'])
+
     def test_dashboard_home_env_controls_runtime_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()

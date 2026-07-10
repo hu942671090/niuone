@@ -28,7 +28,7 @@
 |---|---|
 | `.local-data/dashboard.env` | 本机环境变量、路径和可能存在的模型密钥或管理员密码 |
 | `.local-data/.venv/` | 本机 Python 虚拟环境 |
-| `.local-data/runtime/dashboard_admin_token.txt` | 本地备用管理员凭据 |
+| `.local-data/runtime/dashboard_admin_token.txt` | 未配置 `DASHBOARD_ADMIN_PASSWORD` 时使用的 bootstrap 管理密钥 |
 | `.local-data/runtime/dashboard_users.db` | 本地访问用户和认证数据 |
 | `.local-data/runtime/push_history.db` | 消息历史 |
 | `.local-data/runtime/niuniu.db` | 牛牛实战交易和账户数据 |
@@ -92,5 +92,5 @@ git status --ignored --short
 1. 立即撤销或轮换对应密钥或凭据。
 2. 从代码和文档中删除泄露内容。
 3. 检查 `git status --ignored --short` 和最近提交。
-4. 必要时重建 `.local-data/runtime/dashboard_admin_token.txt` 和相关数据库。
+4. 未配置管理员密码时，必要时重建 `.local-data/runtime/dashboard_admin_token.txt`；按需重建相关数据库。
 5. 对已经推送到远端的敏感内容，按远端平台的泄露处理流程清理历史。

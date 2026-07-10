@@ -146,6 +146,10 @@ create_default_env() {
     write_env_value DASHBOARD_PUSH_HISTORY_DB "$LOCAL_DATA_DIR/runtime/push_history.db"
     write_env_value DASHBOARD_PORTFOLIO_STATE "$LOCAL_DATA_DIR/runtime/cron/output/niuniu_practice_portfolio.json"
     write_env_value DASHBOARD_TRADER_SCRIPT "$ROOT/app/niuniu_practice_trader.py"
+    echo
+    echo "# The dashboard stays public; settings and admin APIs always require authentication."
+    echo "# Leave blank to use the bootstrap key at \$DASHBOARD_HOME/dashboard_admin_token.txt."
+    write_env_value DASHBOARD_ADMIN_PASSWORD "${DASHBOARD_ADMIN_PASSWORD:-}"
   } > "$ENV_FILE"
   umask "$old_umask"
   chmod 600 "$ENV_FILE" 2>/dev/null || true

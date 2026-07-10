@@ -61,9 +61,12 @@ class DashboardAuthTests(unittest.TestCase):
         self.original_cron_state_dir = dashboard.CRON_STATE_DIR
         self.original_stats_db = dashboard.STATS_DB
         self.original_legacy_stats_db = dashboard.LEGACY_STATS_DB
+        self.original_admin_token_file = dashboard.ADMIN_TOKEN_FILE
+        self.original_admin_password = dashboard.ADMIN_PASSWORD
         self.saved_env = {
             name: os.environ.get(name)
             for name in (
+                'DASHBOARD_ADMIN_PASSWORD',
                 'X_WATCHLIST_ACCOUNTS',
                 'DASHBOARD_X_WATCHLIST_STATE',
                 dashboard.STRATEGY_SOURCE_ENV,
@@ -75,6 +78,8 @@ class DashboardAuthTests(unittest.TestCase):
             os.environ.pop(name, None)
         dashboard.STATS_DB = self.tmp_path / 'dashboard_stats.db'
         dashboard.LEGACY_STATS_DB = self.tmp_path / 'dashboard_users.db'
+        dashboard.ADMIN_TOKEN_FILE = self.tmp_path / 'dashboard_admin_token.txt'
+        dashboard.ADMIN_PASSWORD = ''
         dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
         dashboard.CRON_STATE_DIR = self.tmp_path / 'cron' / 'state'
         dashboard.API_RESPONSE_CACHE.clear()
@@ -87,6 +92,8 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.CRON_STATE_DIR = self.original_cron_state_dir
         dashboard.STATS_DB = self.original_stats_db
         dashboard.LEGACY_STATS_DB = self.original_legacy_stats_db
+        dashboard.ADMIN_TOKEN_FILE = self.original_admin_token_file
+        dashboard.ADMIN_PASSWORD = self.original_admin_password
         for name, value in self.saved_env.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -94,7 +101,10 @@ class DashboardAuthTests(unittest.TestCase):
                 os.environ[name] = value
         self.tmp.cleanup()
 
-    def test_dashboard_routes_do_not_require_login(self):
+    def admin_cookie(self):
+        return f'{dashboard.ADMIN_SESSION_COOKIE_NAME}={dashboard.new_admin_session()}'
+
+    def test_dashboard_is_public_but_settings_require_admin(self):
         home = FakeHandler(path='/')
         home.do_GET()
         self.assertEqual(home.status, 200)
@@ -103,7 +113,46 @@ class DashboardAuthTests(unittest.TestCase):
         admin = FakeHandler(path='/admin')
         admin.do_GET()
         self.assertEqual(admin.status, 200)
-        self.assertIn('<h1>设置</h1>', admin.wfile.getvalue().decode('utf-8'))
+        admin_body = admin.wfile.getvalue().decode('utf-8')
+        self.assertIn('<h1>设置页验证</h1>', admin_body)
+        self.assertIn('name="admin_password"', admin_body)
+        self.assertNotIn('<h1>设置</h1>', admin_body)
+        self.assertNotIn("name='env__DASHBOARD_GROK_API_KEY'", admin_body)
+
+        config = FakeHandler(path='/api/admin/config')
+        config.do_GET()
+        self.assertEqual(config.status, 403)
+        self.assertEqual(
+            json.loads(config.wfile.getvalue().decode('utf-8'))['error'],
+            'admin_password_required',
+        )
+
+    def test_admin_head_routes_match_get_and_post_only_contracts(self):
+        admin = FakeHandler(path='/admin', method='HEAD')
+        admin.do_HEAD()
+        self.assertEqual(admin.status, 200)
+        self.assertEqual(admin.wfile.getvalue(), b'')
+
+        locked_config = FakeHandler(path='/api/admin/config', method='HEAD')
+        locked_config.do_HEAD()
+        self.assertEqual(locked_config.status, 403)
+
+        unlocked_config = FakeHandler(
+            path='/api/admin/config',
+            method='HEAD',
+            headers={'Cookie': self.admin_cookie()},
+        )
+        unlocked_config.do_HEAD()
+        self.assertEqual(unlocked_config.status, 200)
+
+        write_only = FakeHandler(path='/api/admin/config/env', method='HEAD')
+        write_only.do_HEAD()
+        self.assertEqual(write_only.status, 404)
+
+        action = FakeHandler(path='/api/niuniu_practice/resume', method='HEAD')
+        action.do_HEAD()
+        self.assertEqual(action.status, 405)
+        self.assertEqual(action.header('Allow'), 'POST')
 
     def test_legacy_visit_stats_are_migrated_once(self):
         with closing(sqlite3.connect(dashboard.STATS_DB)) as con:
@@ -992,7 +1041,183 @@ process.stdout.write(JSON.stringify({
         self.assertIn('time: `${latestDay} 09:30:00`', dashboard.INDEX_HTML)
         self.assertIn('const intradayBaseLabel = hasIntradayOpenBase', dashboard.INDEX_HTML)
 
-    def test_admin_page_sends_security_headers_without_login_cookie(self):
+    def test_configured_admin_password_issues_secure_session_and_unlocks_settings(self):
+        dashboard.ADMIN_PASSWORD = '管理员密码'
+
+        locked_api = FakeHandler(path='/api/admin/config')
+        locked_api.do_GET()
+        self.assertEqual(locked_api.status, 403)
+
+        wrong_body = urllib.parse.urlencode({'admin_password': '错误密码'}).encode('utf-8')
+        wrong = FakeHandler(
+            path='/admin/password',
+            method='POST',
+            headers={
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': str(len(wrong_body)),
+            },
+            body=wrong_body,
+        )
+        wrong.do_POST()
+        self.assertEqual(wrong.status, 403)
+        self.assertIn('管理员凭据错误', wrong.wfile.getvalue().decode('utf-8'))
+
+        password_body = urllib.parse.urlencode({'admin_password': '管理员密码'}).encode('utf-8')
+        login = FakeHandler(
+            path='/admin/password',
+            method='POST',
+            headers={
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': str(len(password_body)),
+                'X-Forwarded-Proto': 'https',
+                'CF-Connecting-IP': '203.0.113.11',
+            },
+            body=password_body,
+            ip='127.0.0.1',
+        )
+        login.do_POST()
+
+        self.assertEqual(login.status, 303)
+        self.assertEqual(login.header('Location'), '/admin')
+        set_cookie = login.header('Set-Cookie') or ''
+        self.assertTrue(set_cookie.startswith(f'{dashboard.ADMIN_SESSION_COOKIE_NAME}=ad_'))
+        self.assertIn('HttpOnly', set_cookie)
+        self.assertIn('SameSite=Lax', set_cookie)
+        self.assertIn('Secure', set_cookie)
+        session_cookie = set_cookie.split(';', 1)[0]
+
+        unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
+        unlocked_page.do_GET()
+        self.assertEqual(unlocked_page.status, 200)
+        self.assertIn('<h1>设置</h1>', unlocked_page.wfile.getvalue().decode('utf-8'))
+
+        unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
+        unlocked_api.do_GET()
+        self.assertEqual(unlocked_api.status, 200)
+        self.assertTrue(json.loads(unlocked_api.wfile.getvalue().decode('utf-8'))['items'])
+
+        dashboard.ADMIN_PASSWORD = 'rotated-pass'
+        expired_by_rotation = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
+        expired_by_rotation.do_GET()
+        self.assertEqual(expired_by_rotation.status, 403)
+
+    def test_admin_login_rate_limit_cannot_be_bypassed_with_spoofed_forwarded_ips(self):
+        original_limit = dashboard.RATE_LIMIT_ADMIN_LOGIN
+        dashboard.RATE_LIMIT_ADMIN_LOGIN = 1
+        dashboard.RATE_LIMIT_BUCKETS.clear()
+        body = urllib.parse.urlencode({'admin_password': 'wrong'}).encode('utf-8')
+        try:
+            first = FakeHandler(
+                path='/admin/password',
+                method='POST',
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': str(len(body)),
+                    'CF-Connecting-IP': '203.0.113.10',
+                },
+                body=body,
+                ip='127.0.0.1',
+            )
+            first.do_POST()
+            self.assertEqual(first.status, 403)
+
+            spoofed = FakeHandler(
+                path='/admin/password',
+                method='POST',
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': str(len(body)),
+                    'CF-Connecting-IP': '198.51.100.22',
+                },
+                body=body,
+                ip='127.0.0.1',
+            )
+            spoofed.do_POST()
+            self.assertEqual(spoofed.status, 429)
+        finally:
+            dashboard.RATE_LIMIT_ADMIN_LOGIN = original_limit
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+
+    def test_password_rotation_through_config_invalidates_old_session_immediately(self):
+        dashboard.ADMIN_PASSWORD = 'old-pass'
+        os.environ['DASHBOARD_ADMIN_PASSWORD'] = 'old-pass'
+        dashboard.DASHBOARD_ENV_FILE.write_text(
+            'DASHBOARD_ADMIN_PASSWORD=old-pass\n',
+            encoding='utf-8',
+        )
+        old_cookie = self.admin_cookie()
+        body = urllib.parse.urlencode({
+            'env__DASHBOARD_ADMIN_PASSWORD': 'new-pass',
+        }).encode('utf-8')
+
+        rotate = FakeHandler(
+            path='/api/admin/config/env',
+            method='POST',
+            headers={
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': str(len(body)),
+                'Cookie': old_cookie,
+                dashboard.ACTION_HEADER_NAME: '1',
+            },
+            body=body,
+        )
+        rotate.do_POST()
+
+        self.assertEqual(rotate.status, 200)
+        payload = json.loads(rotate.wfile.getvalue().decode('utf-8'))
+        self.assertTrue(payload['reauth_required'])
+        self.assertIn('admin_password', payload['runtime']['applied'])
+        self.assertEqual(dashboard.ADMIN_PASSWORD, 'new-pass')
+        self.assertEqual(
+            dashboard.parse_env_file(dashboard.DASHBOARD_ENV_FILE)['DASHBOARD_ADMIN_PASSWORD'],
+            'new-pass',
+        )
+        self.assertFalse(dashboard.verify_admin_credential('old-pass'))
+        self.assertTrue(dashboard.verify_admin_credential('new-pass'))
+        self.assertFalse(dashboard.validate_admin_session(old_cookie.split('=', 1)[1]))
+
+        rejected_old_session = FakeHandler(
+            path='/api/admin/config',
+            headers={'Cookie': old_cookie},
+        )
+        rejected_old_session.do_GET()
+        self.assertEqual(rejected_old_session.status, 403)
+
+    def test_blank_password_uses_private_bootstrap_key_and_sessions_expire(self):
+        self.assertEqual(dashboard.ADMIN_PASSWORD, '')
+        token = dashboard.get_or_create_admin_token()
+        self.assertTrue(token.startswith('na_'))
+        self.assertEqual(dashboard.ADMIN_TOKEN_FILE.stat().st_mode & 0o777, 0o600)
+        dashboard.ADMIN_TOKEN_FILE.chmod(0o644)
+        self.assertEqual(dashboard.get_or_create_admin_token(), token)
+        self.assertEqual(dashboard.ADMIN_TOKEN_FILE.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(dashboard.verify_admin_credential('错误凭据'))
+
+        body = urllib.parse.urlencode({'admin_password': token}).encode('utf-8')
+        login = FakeHandler(
+            path='/admin/password',
+            method='POST',
+            headers={
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': str(len(body)),
+            },
+            body=body,
+        )
+        login.do_POST()
+        self.assertEqual(login.status, 303)
+
+        session = dashboard.new_admin_session(now=1_000)
+        self.assertTrue(dashboard.validate_admin_session(session, now=1_001))
+        self.assertFalse(dashboard.validate_admin_session(session + 'tampered', now=1_001))
+        self.assertFalse(dashboard.validate_admin_session('ad_1000.AAAAAAAAAAAAAAAAAAAAAAAA.é', now=1_001))
+        self.assertFalse(
+            dashboard.validate_admin_session(
+                session,
+                now=1_000 + dashboard.ADMIN_SESSION_TTL_SECONDS + 1,
+            )
+        )
+
+    def test_admin_login_page_sends_security_headers_without_session_cookie(self):
         handler = FakeHandler(
             path='/admin',
             headers={'X-Forwarded-Proto': 'https', 'CF-Connecting-IP': '203.0.113.11'},
@@ -1027,9 +1252,9 @@ process.stdout.write(JSON.stringify({
         original_anon_limit = dashboard.RATE_LIMIT_ANON
         dashboard.RATE_LIMIT_ANON = 1
         try:
-            first = FakeHandler(path='/api/admin/config', headers={'CF-Connecting-IP': '203.0.113.77'})
+            first = FakeHandler(path='/', ip='203.0.113.77')
             first.do_GET()
-            second = FakeHandler(path='/api/admin/config', headers={'CF-Connecting-IP': '203.0.113.77'})
+            second = FakeHandler(path='/', ip='203.0.113.77')
             second.do_GET()
 
             self.assertEqual(first.status, 200)
@@ -1056,6 +1281,20 @@ process.stdout.write(JSON.stringify({
         try:
             dashboard.RATE_LIMIT_ADMIN = 100
             dashboard.trigger_b1_scan = lambda force=False: calls.append(force) or {'ok': True, 'forced': force}
+            admin_cookie = self.admin_cookie()
+
+            unauthorized = FakeHandler(
+                path='/api/b1_screen/trigger',
+                method='POST',
+                headers={'Content-Length': '0', dashboard.ACTION_HEADER_NAME: '1'},
+            )
+            unauthorized.do_POST()
+            self.assertEqual(unauthorized.status, 403)
+            self.assertEqual(
+                json.loads(unauthorized.wfile.getvalue().decode('utf-8'))['error'],
+                'admin_password_required',
+            )
+            self.assertEqual(calls, [])
 
             get_handler = FakeHandler(path='/api/b1_screen/trigger')
             get_handler.do_GET()
@@ -1065,7 +1304,7 @@ process.stdout.write(JSON.stringify({
             missing_header = FakeHandler(
                 path='/api/b1_screen/trigger',
                 method='POST',
-                headers={'Content-Length': '0'},
+                headers={'Content-Length': '0', 'Cookie': admin_cookie},
             )
             missing_header.do_POST()
             self.assertEqual(missing_header.status, 403)
@@ -1077,6 +1316,7 @@ process.stdout.write(JSON.stringify({
                 method='POST',
                 headers={
                     'Content-Length': '0',
+                    'Cookie': admin_cookie,
                     dashboard.ACTION_HEADER_NAME: '1',
                 },
             )
@@ -1088,8 +1328,97 @@ process.stdout.write(JSON.stringify({
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
             dashboard.trigger_b1_scan = original_trigger
 
+    def test_unauthenticated_config_writes_are_rejected_before_reading_body(self):
+        original_config_path = dashboard.CONFIG_PATH
+        dashboard.CONFIG_PATH = self.tmp_path / 'config.yaml'
+        dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_GROK_MODEL=safe\n', encoding='utf-8')
+        dashboard.CONFIG_PATH.write_text('model:\n  default: safe\n', encoding='utf-8')
+        try:
+            cases = (
+                ('/admin/config/env', b'env__DASHBOARD_GROK_MODEL=attacker'),
+                ('/api/admin/config/env', b'env__DASHBOARD_GROK_MODEL=attacker'),
+                ('/admin/config/yaml', b'config_yaml=model%3A+attacker'),
+                ('/api/admin/config/yaml', b'config_yaml=model%3A+attacker'),
+            )
+            for path, body in cases:
+                with self.subTest(path=path):
+                    handler = FakeHandler(
+                        path=path,
+                        method='POST',
+                        headers={
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Content-Length': str(len(body)),
+                            dashboard.ACTION_HEADER_NAME: '1',
+                        },
+                        body=body,
+                    )
+                    handler.do_POST()
+                    self.assertEqual(handler.rfile.tell(), 0)
+                    if path.startswith('/api/'):
+                        self.assertEqual(handler.status, 403)
+                        self.assertEqual(
+                            json.loads(handler.wfile.getvalue().decode('utf-8'))['error'],
+                            'admin_password_required',
+                        )
+                    else:
+                        self.assertEqual(handler.status, 200)
+                        self.assertIn('设置页验证', handler.wfile.getvalue().decode('utf-8'))
+                    self.assertEqual(
+                        dashboard.DASHBOARD_ENV_FILE.read_text(encoding='utf-8'),
+                        'DASHBOARD_GROK_MODEL=safe\n',
+                    )
+                    self.assertEqual(
+                        dashboard.CONFIG_PATH.read_text(encoding='utf-8'),
+                        'model:\n  default: safe\n',
+                    )
+        finally:
+            dashboard.CONFIG_PATH = original_config_path
+
+    def test_authenticated_config_writes_require_action_header(self):
+        original_config_path = dashboard.CONFIG_PATH
+        dashboard.CONFIG_PATH = self.tmp_path / 'config.yaml'
+        dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_GROK_MODEL=safe\n', encoding='utf-8')
+        dashboard.CONFIG_PATH.write_text('model:\n  default: safe\n', encoding='utf-8')
+        admin_cookie = self.admin_cookie()
+        try:
+            cases = (
+                ('/admin/config/env', b'env__DASHBOARD_GROK_MODEL=attacker'),
+                ('/api/admin/config/env', b'env__DASHBOARD_GROK_MODEL=attacker'),
+                ('/admin/config/yaml', b'config_yaml=model%3A+attacker'),
+                ('/api/admin/config/yaml', b'config_yaml=model%3A+attacker'),
+            )
+            for path, body in cases:
+                with self.subTest(path=path):
+                    handler = FakeHandler(
+                        path=path,
+                        method='POST',
+                        headers={
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Content-Length': str(len(body)),
+                            'Cookie': admin_cookie,
+                        },
+                        body=body,
+                    )
+                    handler.do_POST()
+                    self.assertEqual(handler.status, 403)
+                    self.assertEqual(handler.rfile.tell(), 0)
+                    self.assertEqual(
+                        json.loads(handler.wfile.getvalue().decode('utf-8'))['error'],
+                        'action_header_required',
+                    )
+                    self.assertEqual(
+                        dashboard.DASHBOARD_ENV_FILE.read_text(encoding='utf-8'),
+                        'DASHBOARD_GROK_MODEL=safe\n',
+                    )
+                    self.assertEqual(
+                        dashboard.CONFIG_PATH.read_text(encoding='utf-8'),
+                        'model:\n  default: safe\n',
+                    )
+        finally:
+            dashboard.CONFIG_PATH = original_config_path
+
     def test_admin_page_only_shows_business_config_content(self):
-        handler = FakeHandler(path='/admin')
+        handler = FakeHandler(path='/admin', headers={'Cookie': self.admin_cookie()})
         handler.do_GET()
         body = handler.wfile.getvalue().decode('utf-8')
 
@@ -1184,6 +1513,9 @@ process.stdout.write(JSON.stringify({
         self.assertIn("data-env-save-status role='status' aria-live='polite'", body)
         self.assertIn("data-env-save-button type='submit'", body)
         self.assertIn("fetch('/api/admin/config/env'", body)
+        self.assertIn("'X-NiuOne-Action': '1'", body)
+        self.assertIn("window.location.replace('/admin')", body)
+        self.assertIn('设置页管理员密码', body)
         self.assertIn("正在保存业务配置", body)
         self.assertIn("配置未变化，无需重新应用", body)
         self.assertIn('.save-button:active,.save-button.pressed', body)
@@ -1219,6 +1551,34 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn('新增配置项', body)
         self.assertNotIn('DASHBOARD_HOME', body)
         self.assertNotIn('LaunchAgent', body)
+
+    def test_admin_password_is_redacted_from_page_and_config_api(self):
+        secret = '绝不回显的管理员密码'
+        dashboard.ADMIN_PASSWORD = secret
+        os.environ['DASHBOARD_ADMIN_PASSWORD'] = secret
+        dashboard.DASHBOARD_ENV_FILE.write_text(
+            f"DASHBOARD_ADMIN_PASSWORD='{secret}'\n",
+            encoding='utf-8',
+        )
+        admin_cookie = self.admin_cookie()
+
+        page = FakeHandler(path='/admin', headers={'Cookie': admin_cookie})
+        page.do_GET()
+        self.assertEqual(page.status, 200)
+        self.assertNotIn(secret, page.wfile.getvalue().decode('utf-8'))
+
+        config = FakeHandler(path='/api/admin/config', headers={'Cookie': admin_cookie})
+        config.do_GET()
+        self.assertEqual(config.status, 200)
+        config_text = config.wfile.getvalue().decode('utf-8')
+        self.assertNotIn(secret, config_text)
+        password_item = next(
+            item
+            for item in json.loads(config_text)['items']
+            if item['name'] == 'DASHBOARD_ADMIN_PASSWORD'
+        )
+        self.assertTrue(password_item['secret'])
+        self.assertEqual(password_item['file_value'], '')
 
     def test_home_page_uses_us_feature_flag_for_tabs_without_deleting_data(self):
         dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
@@ -1569,6 +1929,8 @@ process.stdout.write(JSON.stringify({
                 headers={
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
                 },
                 body=body,
             )
@@ -1646,6 +2008,8 @@ process.stdout.write(JSON.stringify({
                 headers={
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
                 },
                 body=body,
             )

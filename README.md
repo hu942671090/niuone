@@ -97,6 +97,8 @@ Windows：
 run.bat --port 8877 --no-browser
 ```
 
+看板首页和展示数据保持公开访问；设置页与管理 API 始终需要管理员认证。首次启动时，请使用服务自动生成的 bootstrap 管理密钥进入设置页；本地路径为 `$DASHBOARD_HOME/dashboard_admin_token.txt`，默认即 `.local-data/runtime/dashboard_admin_token.txt`。登录后可在“访问控制”中设置管理员密码，新密码会立即生效并注销旧会话。也可在启动前直接编辑权限为 `0600` 的 `.local-data/dashboard.env`，设置 `DASHBOARD_ADMIN_PASSWORD`；不要通过命令行参数传递密码，以免进入 shell 历史或进程列表。
+
 如需将运行数据保存在其他位置，可设置：
 
 ```bash
@@ -135,17 +137,17 @@ docker compose up -d --no-build
 NIUONE_BIND_ADDRESS=0.0.0.0 NIUONE_PORT=8877 docker compose up -d
 ```
 
-> 当前管理入口不提供独立登录保护，不要直接暴露到公网。运行配置与密钥保存在 volume 的 `/data/dashboard.env` 和 `/data/runtime/` 中，不会打入镜像。
+> 看板首页保持公开访问，设置页与管理 API 始终需要管理员认证。容器使用 `/data/dashboard.env` 中配置的 `DASHBOARD_ADMIN_PASSWORD`；未配置时，请执行 `docker compose exec dashboard cat /data/runtime/dashboard_admin_token.txt` 读取 bootstrap 管理密钥。运行配置与密钥保存在 volume 中，不会打入镜像。
 
 ## 首次配置
 
 基础页面无需模型密钥即可启动。信息检索、智能摘要和部分自动化流程需要额外配置外部服务。
 
-启动后通过页面中的设置入口完成配置；配置会写入本地 `.local-data/`，无需修改源码。建议首次使用时依次完成：
+启动后通过页面中的设置入口完成配置；先使用配置的管理员密码或本地 bootstrap 管理密钥完成认证。配置会写入本地 `.local-data/`，无需修改源码。建议首次使用时依次完成：
 
 1. 设置需要启用的数据源与自动化任务；
 2. 按需配置兼容的模型服务地址、模型名称和 API Key；
-3. 如需限制管理入口访问，在设置页启用管理员保护；
+3. 妥善保存或轮换管理员凭据；
 4. 重启服务，使所有需要重启的配置生效。
 
 默认服务只监听 `127.0.0.1`。如需通过局域网或公网访问，请先配置反向代理、HTTPS 和独立的访问控制，不要直接暴露本地管理入口。
@@ -160,6 +162,7 @@ NIUONE_BIND_ADDRESS=0.0.0.0 NIUONE_PORT=8877 docker compose up -d
 ├── .venv/                 # Python 虚拟环境
 ├── runtime/
 │   ├── config.yaml        # 服务与模型配置
+│   ├── dashboard_admin_token.txt # 未配置密码时的 bootstrap 管理密钥
 │   ├── *.db               # 本地数据库
 │   ├── cron/              # 定时任务状态与输出
 │   └── logs/              # 运行日志
