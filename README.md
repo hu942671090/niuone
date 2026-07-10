@@ -147,8 +147,107 @@ NIUONE_BIND_ADDRESS=0.0.0.0 NIUONE_PORT=8877 docker compose up -d
 
 1. 设置需要启用的数据源与自动化任务；
 2. 按需配置兼容的模型服务地址、模型名称和 API Key；
-3. 妥善保存或轮换管理员凭据；
-4. 重启服务，使所有需要重启的配置生效。
+3. 如需成交提醒，在“交易通知”中开启总开关，再从下拉框添加所需渠道并填写对应配置；Telegram 需填写 Bot Token 与 Chat ID；
+4. 妥善保存或轮换管理员凭据；
+5. 重启服务，使所有需要重启的配置生效。
+
+### 交易通知配置
+
+NiuOne 支持将模拟买入和卖出成交推送到飞书、钉钉、企业微信和 Telegram。通知只在成交状态成功落盘后发送；同一轮的多笔成交会合并为一条消息，并明确标注“模拟成交，非实盘”。单个渠道发送失败不会回滚成交，也不会影响其他渠道。
+
+#### 在设置页添加渠道
+
+1. 进入“设置 → 交易通知”，将“启用模拟成交通知”设为“启用”。
+2. “单次推送超时秒数”默认是 `5` 秒，可设置为 `1`–`30` 秒。
+3. 在“通知渠道”下拉框中选择渠道，点击“添加渠道”。
+4. 填写该渠道卡片中的必填字段，按需填写签名密钥，点击卡片底部的“发送测试通知”验证配置。
+5. 测试成功后保存业务配置，再按需添加其他渠道；保存后通知配置会热生效，无需为通知配置单独重启服务。
+
+点击渠道卡片右上角的“移除”会先停用并收起该渠道；点击“保存业务配置”后，NiuOne 会删除该渠道已经保存的 Webhook、Bot Token、Chat ID 和签名密钥，再次添加时状态为“未设置”。如果在保存前重新添加渠道，原配置不会被删除。对于仍处于添加状态的渠道，敏感字段留空保存表示保留旧值。
+
+“发送测试通知”只向当前卡片对应的一个渠道发送，不受通知总开关或渠道开关影响，也不会保存或修改配置。测试会优先使用卡片中尚未保存的输入；敏感字段留空时会回退到已经保存的 Webhook、Bot Token 或签名密钥，Telegram Chat ID 和超时则按当前输入验证。测试消息包含“模拟成交，非实盘”，但不会创建成交记录、修改资金或持仓。
+
+| 渠道 | 必填配置 | 可选配置 | NiuOne 接受的目标 |
+|---|---|---|---|
+| 飞书 | 机器人 Webhook | 签名密钥 | `https://open.feishu.cn/open-apis/bot/v2/hook/...` 或 `https://open.larksuite.com/open-apis/bot/v2/hook/...` |
+| 钉钉 | 机器人 Webhook | 签名密钥 | `https://oapi.dingtalk.com/robot/send?access_token=...` |
+| 企业微信 | 机器人 Webhook | 无 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...` |
+| Telegram | Bot Token、Chat ID | 无 | NiuOne 根据 Token 调用官方 `api.telegram.org` Bot API |
+
+#### 飞书
+
+1. 打开目标群聊，进入“设置 → 群机器人 → 添加机器人 → 自定义机器人”。不同客户端版本的入口名称可能略有差异。
+2. 创建机器人后复制完整 Webhook，填入 NiuOne 的“飞书机器人 Webhook”。不要只复制路径中的 token。
+3. 如在飞书机器人安全设置中启用了“签名校验”，复制页面显示的原始密钥并填入“飞书签名密钥（可选）”；NiuOne 会自动添加秒级时间戳和签名。不要填写计算后的临时签名。字段“可选”是指飞书端未启用签名时可以留空；一旦飞书端启用签名，该字段即为必填。
+4. 如启用了“自定义关键词”，建议添加 `模拟成交`，确保成交消息能够通过关键词检查。关键词只在飞书机器人侧配置。
+5. 如启用了 IP 白名单，需要放行运行 NiuOne 机器的公网出口 IP；本机地址 `127.0.0.1` 不是出口 IP。
+
+飞书自定义机器人只属于创建它的当前群聊。官方当前限制为单租户单机器人 `100` 次/分钟、`5` 次/秒；Webhook 属于敏感凭据，泄露后他人可以向对应群聊发送消息。请勿将真实地址提交到 Git、问题单、日志或截图中。详细创建步骤、安全设置和错误码参见[飞书自定义机器人使用指南](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot?lang=zh-CN)。
+
+#### 钉钉
+
+1. 打开目标群聊的机器人管理入口，创建“自定义机器人”。
+2. 按钉钉提示设置安全方式并复制完整 Webhook，填入 NiuOne 的“钉钉机器人 Webhook”。应使用包含 `access_token` 的 `oapi.dingtalk.com/robot/send` 地址；应用机器人或其他 OpenAPI 地址不能直接填入此处。
+3. 如选择“加签”安全方式，将钉钉安全设置中显示的原始 `SEC...` 密钥填入“钉钉签名密钥（可选）”；NiuOne 会自动生成毫秒级时间戳和 URL 编码后的签名参数。不要粘贴带 `timestamp`、`sign` 的临时 URL，也不要填写计算后的签名。字段“可选”是指钉钉端未启用加签时可以留空。
+4. 如同时使用关键词安全方式，建议把 `模拟成交` 配置为关键词。关键词只在钉钉机器人侧配置。
+5. 如使用 IP 地址段安全方式，需要放行 NiuOne 运行机器的公网出口 IPv4 或 CIDR 网段。
+
+签名密钥必须与当前机器人完全匹配；机器人重置安全设置后，也要在 NiuOne 中同步替换。钉钉官方当前限制每个机器人每分钟最多发送 `20` 条，超过后可能进入限流。参见[创建自定义机器人](https://open.dingtalk.com/document/dingstart/custom-bot-creation-and-installation)、[安全设置](https://open.dingtalk.com/document/dingstart/customize-robot-security-settings)、[获取 Webhook](https://open.dingtalk.com/document/dingstart/obtain-the-webhook-address-of-a-custom-robot)和[发送群消息与错误码](https://open.dingtalk.com/document/development/custom-robots-send-group-messages)。
+
+#### 企业微信
+
+1. 在企业微信中为目标群聊创建“消息推送（原群机器人）”。不同客户端版本的入口可能不同，请以官方“消息推送”页面为准。
+2. 在“创建消息推送”“创建完成”或消息推送详情页复制该推送独有的完整 Webhook，填入 NiuOne 的“企业微信机器人 Webhook”。
+3. Webhook 必须包含唯一且非空的 `key` 参数，并且消息推送必须仍属于接收通知的目标群聊。不要只填写 `key`，也不要附加其他查询参数。
+
+企业微信渠道不需要额外签名字段，Webhook 本身即为凭据。NiuOne 会把通知正文限制在 `1900` 字节以内，低于企业微信文本消息的 `2048` 字节上限；如果短时间内频繁成交，还需留意平台的消息频率限制。若删除消息推送或重新生成 Webhook，需要在 NiuOne 中替换旧地址。接口格式参见[企业微信“消息推送配置说明”](https://developer.work.weixin.qq.com/document/path/91770)。
+
+#### Telegram
+
+1. 在 Telegram 中打开官方 [@BotFather](https://t.me/BotFather)，执行 `/newbot`，按提示创建机器人并保存 Bot Token。
+2. 私聊接收：先打开新机器人并发送 `/start`，因为机器人不能主动与尚未开始会话的用户建立私聊。
+3. 群组接收：将机器人加入目标群组，并在群中发送 `/start@机器人用户名` 等明确发给机器人的命令；默认 Privacy Mode 下，普通群消息可能不会进入机器人的更新列表。频道接收时需要把机器人设为可发消息的管理员。
+4. 可先调用官方 `getMe` 方法确认 Token 有效。
+5. 获取 Chat ID：向目标会话发送一条新消息后，调用官方 `getUpdates` 方法。私聊和群组通常读取 `result[].message.chat.id`，频道读取 `result[].channel_post.chat.id`，成员状态更新也可能位于 `result[].my_chat_member.chat.id`。群组和频道 ID 通常是负数，应完整复制，不要自行增删 `-100` 前缀。
+6. 将 BotFather 给出的 Token 填入“Telegram Bot Token”，只填写形如 `123456:ABC...` 的 Token 本身，不要添加 `bot` 前缀或整段 API URL。将数字 Chat ID 填入“Telegram Chat ID”；公开超级群或频道也可以填写 `@channel_username`，私聊用户不能用普通 `@username` 代替数字 Chat ID。
+
+如果 `getUpdates` 返回空数组，先确认目标会话在机器人加入后已经产生新消息；如果该机器人已配置接收更新的 Webhook，`getUpdates` 将不可用。NiuOne 只负责发送通知，不会配置 Telegram 的接收 Webhook。当前通知不设置 `message_thread_id`，因此不能定向发送到论坛群的某个指定 Topic。Bot Token 等同于机器人控制凭据，泄露后应立即通过 BotFather 撤销或重新生成。参见 Telegram 官方的[机器人创建说明](https://core.telegram.org/bots)、[`getMe` 文档](https://core.telegram.org/bots/api#getme)、[`getUpdates` 文档](https://core.telegram.org/bots/api#getupdates)和[`sendMessage` 文档](https://core.telegram.org/bots/api#sendmessage)。
+
+#### 配置项与环境变量
+
+设置页会把配置写入私有的 `.local-data/dashboard.env`；如需手工配置，可参考 [dashboard.env.example](dashboard.env.example)。渠道的“添加/移除”状态由对应的 `*_NOTIFICATION_ENABLED` 开关表示。
+
+| 作用 | 环境变量 | 默认值 |
+|---|---|---|
+| 通知总开关 | `DASHBOARD_NOTIFICATION_ENABLED` | `0` |
+| 单渠道请求超时 | `DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS` | `5` |
+| 飞书渠道开关 | `DASHBOARD_FEISHU_NOTIFICATION_ENABLED` | `0` |
+| 飞书 Webhook | `DASHBOARD_FEISHU_WEBHOOK_URL` | 空 |
+| 飞书签名密钥 | `DASHBOARD_FEISHU_SIGNING_SECRET` | 空 |
+| 钉钉渠道开关 | `DASHBOARD_DINGTALK_NOTIFICATION_ENABLED` | `0` |
+| 钉钉 Webhook | `DASHBOARD_DINGTALK_WEBHOOK_URL` | 空 |
+| 钉钉签名密钥 | `DASHBOARD_DINGTALK_SIGNING_SECRET` | 空 |
+| 企业微信渠道开关 | `DASHBOARD_WECOM_NOTIFICATION_ENABLED` | `0` |
+| 企业微信 Webhook | `DASHBOARD_WECOM_WEBHOOK_URL` | 空 |
+| Telegram 渠道开关 | `DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED` | `0` |
+| Telegram Bot Token | `DASHBOARD_TELEGRAM_BOT_TOKEN` | 空 |
+| Telegram Chat ID | `DASHBOARD_TELEGRAM_CHAT_ID` | 空 |
+
+#### 常见问题
+
+| 现象 | 检查项 |
+|---|---|
+| 所有渠道都没有消息 | 确认通知总开关已启用、至少添加并保存了一个渠道，并且确实产生了成功落盘的模拟成交。 |
+| 只有某个渠道失败 | 检查对应渠道卡片是否仍处于已添加状态，以及 Webhook、Token、Chat ID 是否属于同一个机器人和目标会话。 |
+| 飞书 `19024` 或钉钉提示关键词不匹配 | 在机器人安全设置中加入 `模拟成交`，或调整机器人关键词规则。 |
+| 飞书 `19021`、钉钉 `310000` 或提示签名/时间戳错误 | 重新复制平台显示的原始签名密钥，并校准运行 NiuOne 机器的系统时间。 |
+| 飞书 `19022`、钉钉 `310000` 或提示 IP 不允许 | 将 NiuOne 机器的公网出口 IP 加入机器人白名单。 |
+| 钉钉 `400101`、`400102` 或 `400106` | 检查 `access_token` 是否完整、机器人是否启用，以及机器人是否仍属于目标群。 |
+| Telegram 提示 `chat not found` 或无权发送 | 先与机器人开始会话，或将机器人加入目标群组/频道并授予发消息权限，然后重新确认 Chat ID。 |
+| 设置页拒绝 Webhook | 使用上述官方 HTTPS 地址，不要填写应用机器人 API、代理地址、带账号密码的 URL、非默认端口或带 `#fragment` 的地址。 |
+| 移除并保存后再次添加渠道 | 所有字段应显示“未设置”，需要重新填写。若凭据可能泄露，仍应同时在对应平台撤销或轮换。 |
+
+NiuOne 对每个启用渠道最多尝试发送一次，不自动重试，以避免响应丢失时产生重复成交提醒。推送错误只记录为告警，不会修改资金、持仓或成交日志。
 
 默认服务只监听 `127.0.0.1`。如需通过局域网或公网访问，请先配置反向代理、HTTPS 和独立的访问控制，不要直接暴露本地管理入口。
 

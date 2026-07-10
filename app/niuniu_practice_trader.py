@@ -130,6 +130,19 @@ def load_dashboard_env() -> None:
         "DASHBOARD_DECISION_INTELLIGENCE_ENABLED",
         "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
         "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
+        "DASHBOARD_NOTIFICATION_ENABLED",
+        "DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS",
+        "DASHBOARD_FEISHU_NOTIFICATION_ENABLED",
+        "DASHBOARD_FEISHU_WEBHOOK_URL",
+        "DASHBOARD_FEISHU_SIGNING_SECRET",
+        "DASHBOARD_DINGTALK_NOTIFICATION_ENABLED",
+        "DASHBOARD_DINGTALK_WEBHOOK_URL",
+        "DASHBOARD_DINGTALK_SIGNING_SECRET",
+        "DASHBOARD_WECOM_NOTIFICATION_ENABLED",
+        "DASHBOARD_WECOM_WEBHOOK_URL",
+        "DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED",
+        "DASHBOARD_TELEGRAM_BOT_TOKEN",
+        "DASHBOARD_TELEGRAM_CHAT_ID",
         "DASHBOARD_B3_EXIT_TIME",
         "DASHBOARD_TIME_EXIT_TIME",
         "DASHBOARD_TIME_STOP_EXIT_TIME",
@@ -305,6 +318,30 @@ EQUITY_HISTORY_LIMIT = 500
 
 def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _notify_trade_executions_safely(executed: list[dict[str, Any]]) -> None:
+    """Fan out persisted simulated fills without affecting trade execution."""
+    if not executed:
+        return
+    try:
+        from notifications import notify_trade_executions
+
+        results = notify_trade_executions(executed)
+        failed_count = sum(1 for result in (results or []) if not bool(getattr(result, "ok", False)))
+        if failed_count:
+            print(
+                f"[WARN] 交易通知有 {failed_count} 个渠道发送失败",
+                file=sys.stderr,
+                flush=True,
+            )
+    except Exception as exc:
+        try:
+            # Malformed third-party responses can echo credentials. Only log the
+            # exception class here; channel-level errors are already sanitized.
+            print(f"[WARN] 交易通知发送失败: {type(exc).__name__}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
 
 
 def today_key() -> str:
@@ -4086,6 +4123,8 @@ def run_auto_exits_once(dt: datetime | None = None) -> dict[str, Any]:
     executed = check_auto_exits(state, dt)
     record_equity(state)
     save_state(state)
+    if executed:
+        _notify_trade_executions_safely(executed)
     return {
         "ok": True,
         "checked_at": dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -5410,6 +5449,8 @@ def execute_due_pending_decisions(now: datetime | None = None) -> dict[str, Any]
             _sync_positions_to_db(state)
         record_equity(state)
         save_state(state)
+        if all_executed:
+            _notify_trade_executions_safely(all_executed)
     return {"executed": all_executed, "attempted": attempted}
 
 
@@ -5588,6 +5629,8 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
         _sync_positions_to_db(state)
     record_equity(state)
     save_state(state)
+    if executed:
+        _notify_trade_executions_safely(executed)
     return {"decision": decision, "executed": executed, "portfolio": enrich_portfolio(state)}
 
 

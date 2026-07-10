@@ -1521,6 +1521,152 @@ process.stdout.write(JSON.stringify({
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
             dashboard.trigger_b1_scan = original_trigger
 
+    def test_notification_test_api_requires_admin_action_and_whitelists_target_fields(self):
+        original_sender = dashboard.send_notification_test
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        original_test_limit = dashboard.RATE_LIMIT_NOTIFICATION_TEST
+        calls = []
+        body = urllib.parse.urlencode({
+            'channel': 'telegram',
+            'env__DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS': '4',
+            'env__DASHBOARD_TELEGRAM_BOT_TOKEN': 'temporary-token',
+            'env__DASHBOARD_TELEGRAM_CHAT_ID': '-1001234567890',
+            'env__DASHBOARD_FEISHU_WEBHOOK_URL': 'must-be-ignored',
+            'env__DASHBOARD_NOTIFICATION_ENABLED': '1',
+            'unrelated': 'must-be-ignored',
+        }).encode('utf-8')
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.RATE_LIMIT_NOTIFICATION_TEST = 100
+            dashboard.send_notification_test = (
+                lambda channel, overrides: calls.append((channel, dict(overrides)))
+                or {'ok': True, 'channel': channel, 'message': 'Telegram 测试通知已发送'}
+            )
+
+            unauthorized = FakeHandler(
+                path='/api/admin/notifications/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            unauthorized.do_POST()
+            self.assertEqual(unauthorized.status, 403)
+            self.assertEqual(unauthorized.rfile.tell(), 0)
+
+            missing_action = FakeHandler(
+                path='/api/admin/notifications/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                },
+                body=body,
+            )
+            missing_action.do_POST()
+            self.assertEqual(missing_action.status, 403)
+            self.assertEqual(missing_action.rfile.tell(), 0)
+
+            handler = FakeHandler(
+                path='/api/admin/notifications/test',
+                method='POST',
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            handler.do_POST()
+            response = json.loads(handler.wfile.getvalue().decode('utf-8'))
+        finally:
+            dashboard.send_notification_test = original_sender
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            dashboard.RATE_LIMIT_NOTIFICATION_TEST = original_test_limit
+
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(response['ok'])
+        self.assertEqual(calls, [(
+            'telegram',
+            {
+                'DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS': '4',
+                'DASHBOARD_TELEGRAM_BOT_TOKEN': 'temporary-token',
+                'DASHBOARD_TELEGRAM_CHAT_ID': '-1001234567890',
+            },
+        )])
+
+    def test_notification_test_api_has_dedicated_rate_limit_and_body_limit(self):
+        original_sender = dashboard.send_notification_test
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        original_test_limit = dashboard.RATE_LIMIT_NOTIFICATION_TEST
+        calls = []
+        body = b'channel=wecom&env__DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS=5'
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.RATE_LIMIT_NOTIFICATION_TEST = 1
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+            dashboard.send_notification_test = (
+                lambda channel, overrides: calls.append((channel, dict(overrides)))
+                or {'ok': True, 'channel': channel, 'message': 'ok'}
+            )
+            headers = {
+                'Content-Length': str(len(body)),
+                'Cookie': self.admin_cookie(),
+                dashboard.ACTION_HEADER_NAME: '1',
+            }
+            first = FakeHandler(
+                path='/api/admin/notifications/test', method='POST', headers=headers, body=body,
+            )
+            first.do_POST()
+            second = FakeHandler(
+                path='/api/admin/notifications/test', method='POST', headers=headers, body=body,
+            )
+            second.do_POST()
+
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+            dashboard.RATE_LIMIT_NOTIFICATION_TEST = 100
+            oversized = FakeHandler(
+                path='/api/admin/notifications/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(dashboard.MAX_POST_BODY_BYTES + 1),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=b'credential-must-not-be-read',
+            )
+            oversized.do_POST()
+        finally:
+            dashboard.send_notification_test = original_sender
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            dashboard.RATE_LIMIT_NOTIFICATION_TEST = original_test_limit
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+
+        self.assertEqual(first.status, 200)
+        self.assertEqual(second.status, 429)
+        self.assertEqual(second.rfile.tell(), 0)
+        self.assertEqual(calls, [('wecom', {'DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS': '5'})])
+        self.assertEqual(oversized.status, 413)
+        self.assertEqual(oversized.rfile.tell(), 0)
+        self.assertEqual(
+            json.loads(oversized.wfile.getvalue().decode('utf-8'))['error'],
+            'request_too_large',
+        )
+
+    def test_notification_test_api_get_and_head_are_method_not_allowed(self):
+        get_handler = FakeHandler(path='/api/admin/notifications/test')
+        get_handler.do_GET()
+        head_handler = FakeHandler(path='/api/admin/notifications/test', method='HEAD')
+        head_handler.do_HEAD()
+
+        self.assertEqual(get_handler.status, 405)
+        self.assertEqual(get_handler.header('Allow'), 'POST')
+        self.assertEqual(head_handler.status, 405)
+        self.assertEqual(head_handler.header('Allow'), 'POST')
+
     def test_unauthenticated_config_writes_are_rejected_before_reading_body(self):
         original_config_path = dashboard.CONFIG_PATH
         dashboard.CONFIG_PATH = self.tmp_path / 'config.yaml'
@@ -1717,6 +1863,33 @@ process.stdout.write(JSON.stringify({
         self.assertIn('function envFormSnapshot(form)', body)
         self.assertIn('function resetEnvSaveIfDirty(form)', body)
         self.assertIn('markEnvFormSaved(form);', body)
+        self.assertIn("<div class='setting-state-label'>当前状态</div>", body)
+        self.assertNotIn("<div class='setting-state-label'>当前</div>", body)
+        self.assertIn("data-env-current='DASHBOARD_GROK_MODEL'", body)
+        self.assertIn("当前状态：<span data-env-current='DASHBOARD_NOTIFICATION_ENABLED'>", body)
+        self.assertIn('function applyEnvConfigState(form, config)', body)
+        self.assertIn('var submittedSnapshot = requestBody.toString();', body)
+        self.assertIn('var formUnchanged = envFormSnapshot(form) === submittedSnapshot;', body)
+        self.assertIn("保存期间有新的修改，请再次保存", body)
+        apply_function_start = body.index('function applyEnvConfigState(form, config)')
+        apply_function_end = body.index('function setNotificationTestFeedback', apply_function_start)
+        apply_function = body[apply_function_start:apply_function_end]
+        self.assertIn("currentNode.textContent = state || '未设置';", apply_function)
+        self.assertIn("secretInput.value = '';", apply_function)
+        save_feedback_function_start = body.index('function setEnvSaveFeedback(form, state, message)')
+        save_feedback_function_end = body.index(
+            "document.addEventListener('input'",
+            save_feedback_function_start,
+        )
+        save_feedback_function = body[save_feedback_function_start:save_feedback_function_end]
+        self.assertIn("state === 'ok'", save_feedback_function)
+        self.assertIn('markEnvFormSaved(form);', save_feedback_function)
+        apply_state_index = body.index('applyEnvConfigState(form, payload.config);')
+        save_feedback_index = body.index(
+            "setEnvSaveFeedback(form, 'ok', businessSaveMessage(payload));",
+            apply_state_index,
+        )
+        self.assertLess(apply_state_index, save_feedback_index)
         self.assertIn('有未保存修改', body)
         self.assertNotIn("setEnvSaveFeedback(form, '', ''); }, 3800", body)
         self.assertNotIn('<table class=', body)
@@ -2087,6 +2260,7 @@ process.stdout.write(JSON.stringify({
         original_trader_module = dashboard.TRADER_MODULE
         original_trader_mtime = dashboard.TRADER_MODULE_MTIME
         original_env_values = {name: dashboard.os.environ.get(name) for name in dashboard.ADMIN_VISIBLE_ENV_NAMES}
+        telegram_chat_id = '-1001234567890'
         restart_calls = []
         try:
             dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
@@ -2114,6 +2288,8 @@ process.stdout.write(JSON.stringify({
                 'env__DASHBOARD_ENABLED_PERSONA_STRATEGIES': ['', 'li_daxiao_bottom'],
                 'env__DASHBOARD_PRESET_STRATEGY_TEXT': '只做主线强趋势回踩\n跌破5日线离场',
                 'env__DASHBOARD_TRADE_DISCIPLINE_TEXT': '纪律一\n纪律二',
+                'env__DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED': '1',
+                'env__DASHBOARD_TELEGRAM_CHAT_ID': telegram_chat_id,
                 'env__DASHBOARD_HOME': '/tmp/should-not-be-written',
             }, doseq=True).encode('utf-8')
             handler = FakeHandler(
@@ -2129,7 +2305,8 @@ process.stdout.write(JSON.stringify({
             )
             handler.do_POST()
             parsed = dashboard.parse_env_file(dashboard.DASHBOARD_ENV_FILE)
-            response = json.loads(handler.wfile.getvalue().decode('utf-8'))
+            response_text = handler.wfile.getvalue().decode('utf-8')
+            response = json.loads(response_text)
             runtime_b1_times = dashboard.B1_SCHEDULE_TIMES
             runtime_indices_ttl = dashboard.API_TTLS['indices']
         finally:
@@ -2151,6 +2328,14 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(restart_calls, [])
         self.assertTrue(response['changed'])
         self.assertGreater(response['changed_count'], 0)
+        self.assertIn('config', response)
+        self.assertNotIn('news-secret', response_text)
+        config_by_name = {item['name']: item for item in response['config']['items']}
+        self.assertEqual(config_by_name['DASHBOARD_NEWS_API_KEY']['current_state'], '已设置')
+        self.assertEqual(config_by_name['DASHBOARD_NEWS_API_KEY']['file_value'], '')
+        self.assertEqual(config_by_name['DASHBOARD_GROK_CONTEXT_LENGTH']['current_state'], '1000000')
+        self.assertEqual(config_by_name['DASHBOARD_TELEGRAM_CHAT_ID']['current_state'], '已设置')
+        self.assertNotEqual(config_by_name['DASHBOARD_TELEGRAM_CHAT_ID']['current_state'], telegram_chat_id)
         self.assertEqual(response['restart']['skipped'], 'hot_applied')
         self.assertTrue(response['runtime']['ok'])
         self.assertIn('b1_schedule_times', response['runtime']['applied'])
@@ -2176,6 +2361,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(parsed['DASHBOARD_ENABLED_PERSONA_STRATEGIES'], 'li_daxiao_bottom')
         self.assertEqual(parsed['DASHBOARD_PRESET_STRATEGY_TEXT'], '只做主线强趋势回踩\\n跌破5日线离场')
         self.assertEqual(parsed['DASHBOARD_TRADE_DISCIPLINE_TEXT'], '纪律一\\n纪律二')
+        self.assertEqual(parsed['DASHBOARD_TELEGRAM_CHAT_ID'], telegram_chat_id)
         self.assertEqual(runtime_b1_times, ('09:25', '10:00', '14:50'))
         self.assertEqual(runtime_indices_ttl, 20)
         self.assertNotIn('DASHBOARD_HOME', parsed)
@@ -2184,16 +2370,22 @@ process.stdout.write(JSON.stringify({
         original_env_file = dashboard.DASHBOARD_ENV_FILE
         original_admin_limit = dashboard.RATE_LIMIT_ADMIN
         original_restart = dashboard.schedule_niuone_services_restart
+        original_env_values = {name: dashboard.os.environ.get(name) for name in dashboard.ADMIN_VISIBLE_ENV_NAMES}
         restart_calls = []
         try:
             dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
-            dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_GROK_MODEL=grok-test\n', encoding='utf-8')
+            dashboard.DASHBOARD_ENV_FILE.write_text(
+                'DASHBOARD_GROK_CONTEXT_LENGTH=1000000\n'
+                'DASHBOARD_NEWS_API_KEY=news-secret\n',
+                encoding='utf-8',
+            )
             dashboard.RATE_LIMIT_ADMIN = 100
             dashboard.schedule_niuone_services_restart = (
                 lambda: restart_calls.append(True) or {'ok': True}
             )
             body = urllib.parse.urlencode({
-                'env__DASHBOARD_GROK_MODEL': 'grok-test',
+                'env__DASHBOARD_GROK_CONTEXT_LENGTH': '1M',
+                'env__DASHBOARD_NEWS_API_KEY': '',
             }).encode('utf-8')
             handler = FakeHandler(
                 path='/api/admin/config/env',
@@ -2207,16 +2399,104 @@ process.stdout.write(JSON.stringify({
                 body=body,
             )
             handler.do_POST()
-            response = json.loads(handler.wfile.getvalue().decode('utf-8'))
+            response_text = handler.wfile.getvalue().decode('utf-8')
+            response = json.loads(response_text)
         finally:
             dashboard.DASHBOARD_ENV_FILE = original_env_file
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
             dashboard.schedule_niuone_services_restart = original_restart
+            for name, value in original_env_values.items():
+                if value is None:
+                    dashboard.os.environ.pop(name, None)
+                else:
+                    dashboard.os.environ[name] = value
 
         self.assertEqual(handler.status, 200)
         self.assertEqual(restart_calls, [])
         self.assertFalse(response['changed'])
+        self.assertIn('config', response)
+        self.assertNotIn('news-secret', response_text)
+        config_by_name = {item['name']: item for item in response['config']['items']}
+        self.assertEqual(config_by_name['DASHBOARD_NEWS_API_KEY']['current_state'], '已设置')
+        self.assertEqual(config_by_name['DASHBOARD_NEWS_API_KEY']['file_value'], '')
+        self.assertEqual(config_by_name['DASHBOARD_GROK_CONTEXT_LENGTH']['current_state'], '1000000')
         self.assertEqual(response['restart']['skipped'], 'unchanged')
+
+    def test_admin_config_api_removing_notification_channel_deletes_its_config(self):
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        names = (
+            'DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED',
+            'DASHBOARD_TELEGRAM_BOT_TOKEN',
+            'DASHBOARD_TELEGRAM_CHAT_ID',
+            'DASHBOARD_FEISHU_NOTIFICATION_ENABLED',
+            'DASHBOARD_FEISHU_WEBHOOK_URL',
+        )
+        original_env_values = {name: dashboard.os.environ.get(name) for name in names}
+        telegram_token = '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghi'
+        feishu_webhook = 'https://open.feishu.cn/open-apis/bot/v2/hook/preserved-feishu-hook'
+        try:
+            for name in names:
+                dashboard.os.environ.pop(name, None)
+            dashboard.write_env_file_values({
+                'DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED': '1',
+                'DASHBOARD_TELEGRAM_BOT_TOKEN': telegram_token,
+                'DASHBOARD_TELEGRAM_CHAT_ID': '-1001234567890',
+                'DASHBOARD_FEISHU_NOTIFICATION_ENABLED': '1',
+                'DASHBOARD_FEISHU_WEBHOOK_URL': feishu_webhook,
+            })
+            dashboard.os.environ.update({
+                'DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED': '1',
+                'DASHBOARD_TELEGRAM_BOT_TOKEN': telegram_token,
+                'DASHBOARD_TELEGRAM_CHAT_ID': '-1001234567890',
+                'DASHBOARD_FEISHU_NOTIFICATION_ENABLED': '1',
+                'DASHBOARD_FEISHU_WEBHOOK_URL': feishu_webhook,
+            })
+            dashboard.RATE_LIMIT_ADMIN = 100
+            body = urllib.parse.urlencode({
+                'env__DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED': '0',
+            }).encode('utf-8')
+            handler = FakeHandler(
+                path='/api/admin/config/env',
+                method='POST',
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            handler.do_POST()
+            response_text = handler.wfile.getvalue().decode('utf-8')
+            response = json.loads(response_text)
+            stored = dashboard.parse_env_file(
+                dashboard.DASHBOARD_ENV_FILE,
+                include_container_overrides=False,
+            )
+            config_by_name = {item['name']: item for item in response['config']['items']}
+            runtime_after_removal = {name: dashboard.os.environ.get(name) for name in names}
+        finally:
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            for name, value in original_env_values.items():
+                if value is None:
+                    dashboard.os.environ.pop(name, None)
+                else:
+                    dashboard.os.environ[name] = value
+
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(response['ok'])
+        self.assertNotIn(telegram_token, response_text)
+        self.assertNotIn(feishu_webhook, response_text)
+        self.assertNotIn('DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED', stored)
+        self.assertNotIn('DASHBOARD_TELEGRAM_BOT_TOKEN', stored)
+        self.assertNotIn('DASHBOARD_TELEGRAM_CHAT_ID', stored)
+        self.assertIsNone(runtime_after_removal['DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED'])
+        self.assertIsNone(runtime_after_removal['DASHBOARD_TELEGRAM_BOT_TOKEN'])
+        self.assertIsNone(runtime_after_removal['DASHBOARD_TELEGRAM_CHAT_ID'])
+        self.assertEqual(stored['DASHBOARD_FEISHU_NOTIFICATION_ENABLED'], '1')
+        self.assertEqual(stored['DASHBOARD_FEISHU_WEBHOOK_URL'], feishu_webhook)
+        self.assertEqual(config_by_name['DASHBOARD_TELEGRAM_BOT_TOKEN']['current_state'], '未设置')
+        self.assertEqual(config_by_name['DASHBOARD_TELEGRAM_CHAT_ID']['current_state'], '未设置')
 
     def test_settings_page_omits_contest_panel_and_config(self):
         payload = dashboard.build_admin_config_payload()
