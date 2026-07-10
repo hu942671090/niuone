@@ -137,8 +137,6 @@ NIUONE_BIND_ADDRESS=0.0.0.0 NIUONE_PORT=8877 docker compose up -d
 
 > 当前管理入口不提供独立登录保护，不要直接暴露到公网。运行配置与密钥保存在 volume 的 `/data/dashboard.env` 和 `/data/runtime/` 中，不会打入镜像。
 
-推送严格 SemVer tag（例如 `v0.0.1`）会触发 GitHub Actions，验证项目并构建 `linux/amd64`、`linux/arm64` 镜像，随后推送 `kunkundi/niuone:v0.0.1`、`kunkundi/niuone:0.0.1` 和 `kunkundi/niuone:latest`。工作流使用仓库变量 `DOCKERHUB_USERNAME` 与仓库密钥 `DOCKERHUB_TOKEN` 登录 Docker Hub。
-
 ## 首次配置
 
 基础页面无需模型密钥即可启动。信息检索、智能摘要和部分自动化流程需要额外配置外部服务。
