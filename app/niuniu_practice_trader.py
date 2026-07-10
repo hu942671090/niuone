@@ -1174,8 +1174,22 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
     total_equity = cash + total_mv
     for row in rows:
         row["position_pct"] = position_pct_of_equity(row.get("market_value"), total_equity)
+    source_equity_times: list[str] = []
+    for point in state.get("equity_history", []):
+        if not isinstance(point, dict):
+            continue
+        time_text = str(point.get("time") or "")
+        try:
+            equity = float(point.get("equity"))
+        except (TypeError, ValueError):
+            continue
+        if parse_ts(time_text) is not None and math.isfinite(equity):
+            source_equity_times.append(time_text)
+    source_last_equity_time = max(source_equity_times, default="")
     return {
         "generated_at": now_ts(),
+        "source_updated_at": str(state.get("updated_at") or ""),
+        "source_last_equity_time": source_last_equity_time,
         "initial_cash": float(state.get("initial_cash") or INITIAL_CASH),
         "cash": round(cash, 2),
         "market_value": round(total_mv, 2),

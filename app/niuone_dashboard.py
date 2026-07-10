@@ -9,6 +9,7 @@ import hashlib
 import html
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -117,6 +118,7 @@ MULTI_STRATEGY_CACHE_FILE = CRON_OUTPUT_DIR / "multi_strategy_latest.json"
 TRADER_SCRIPT = Path(os.environ.get("DASHBOARD_TRADER_SCRIPT", SCRIPT_DIR / "niuniu_practice_trader.py")).expanduser()
 TRADER_MODULE = None
 TRADER_MODULE_MTIME = 0.0
+TRADER_MODULE_LOCK = threading.Lock()
 PRACTICE_DECISION_KEYS: set[str] = set()
 BENCHMARK_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 BENCHMARK_TTL_SECONDS = 20
@@ -160,6 +162,10 @@ API_TTLS = {
     "us_quotes": 30,
     "us_market_summary": int(os.environ.get("DASHBOARD_US_MARKET_SUMMARY_TTL_SECONDS", "300") or "300"),
 }
+PRACTICE_FAST_CACHE_KEY = "niuniu_practice_fast:v2"
+CALENDAR_HISTORY_SCHEMA_VERSION = 1
+CALENDAR_HISTORY_MAX_DAYS = 20
+CALENDAR_HISTORY_BUCKET_MINUTES = 10
 
 SECRET_PLACEHOLDER = "__KEEP_SECRET__"
 SECRET_KEY_RE = re.compile(
@@ -568,13 +574,16 @@ def get_trader_module():
     global TRADER_MODULE, TRADER_MODULE_MTIME
     current_mtime = TRADER_SCRIPT.stat().st_mtime if TRADER_SCRIPT.exists() else 0.0
     if TRADER_MODULE is None or current_mtime != TRADER_MODULE_MTIME:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("niuniu_practice_trader", TRADER_SCRIPT)
-        if spec and spec.loader:
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            TRADER_MODULE = module
-            TRADER_MODULE_MTIME = current_mtime
+        with TRADER_MODULE_LOCK:
+            current_mtime = TRADER_SCRIPT.stat().st_mtime if TRADER_SCRIPT.exists() else 0.0
+            if TRADER_MODULE is None or current_mtime != TRADER_MODULE_MTIME:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("niuniu_practice_trader", TRADER_SCRIPT)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    TRADER_MODULE = module
+                    TRADER_MODULE_MTIME = current_mtime
     return TRADER_MODULE
 
 def run_dashboard_helper(script_name: str, fallback: dict[str, Any], timeout: int = 90) -> dict[str, Any]:
@@ -617,6 +626,39 @@ def annotate_practice_payload_clock(payload: dict[str, Any], *, now: datetime | 
     return payload
 
 
+def latest_valid_equity_time(history: list[dict[str, Any]]) -> str:
+    candidates: list[str] = []
+    for point in history or []:
+        if not isinstance(point, dict):
+            continue
+        time_text = str(point.get("time") or "")
+        try:
+            equity = float(point.get("equity"))
+            datetime.strptime(time_text, "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(equity):
+            candidates.append(time_text)
+    return max(candidates, default="")
+
+
+def annotate_practice_snapshot(payload: dict[str, Any], *, mode: str, history_scope: str) -> dict[str, Any]:
+    last_equity_time = latest_valid_equity_time(payload.get("equity_history") or [])
+    source_updated_at = str(payload.get("source_updated_at") or "")
+    source_last_equity_time = last_equity_time
+    payload["snapshot_mode"] = mode
+    payload["equity_history_scope"] = history_scope
+    payload["source_updated_at"] = source_updated_at
+    payload["source_last_equity_time"] = source_last_equity_time
+    payload["snapshot_meta"] = {
+        "schema_version": 2,
+        "mode": mode,
+        "source_updated_at": source_updated_at,
+        "source_last_equity_time": source_last_equity_time,
+    }
+    return payload
+
+
 def produce_indices_data() -> dict[str, Any]:
     try:
         import importlib.util
@@ -656,6 +698,7 @@ def get_practice_payload() -> dict[str, Any]:
             trader.maybe_record_session_equity_heartbeat()
         payload = trader.get_dashboard_payload()
         payload["trade_markers"] = compact_trade_markers(payload.get("trade_log") or [])
+        annotate_practice_snapshot(payload, mode="full", history_scope="retained_history")
         annotate_practice_payload_clock(payload)
         try:
             refresh_b1_candidate_cache_from_current_pool()
@@ -667,6 +710,7 @@ def get_practice_payload() -> dict[str, Any]:
         payload = {"positions": [], "cash": 0, "total_equity": 0, "initial_cash": 0,
                    "total_pnl": 0, "total_pnl_pct": 0, "trade_log": [], "decision_log": [],
                    "equity_history": [], "trade_markers": [], "last_error": str(exc), "decision_model": "", "decision_provider": ""}
+        annotate_practice_snapshot(payload, mode="full", history_scope="unavailable")
         return annotate_practice_payload_clock(payload)
 
 def downsample_sequence(items: list[Any], max_points: int) -> list[Any]:
@@ -707,14 +751,19 @@ def filter_future_equity_points(
     now = now or current_cn_datetime()
     cutoff = now + timedelta(seconds=max(0, int(grace_seconds or 0)))
     filtered: list[dict[str, Any]] = []
+    trading_day_cache: dict[str, bool] = {}
     for point in history or []:
         if not isinstance(point, dict):
             continue
         dt = parse_dashboard_ts(str(point.get("time") or ""))
         if dt is not None and (dt.date() > now.date() or (dt.date() == now.date() and dt > cutoff)):
             continue
-        if dt is not None and not is_a_share_trading_day_for_dashboard(dt):
-            continue
+        if dt is not None:
+            date_key = dt.strftime("%Y-%m-%d")
+            if date_key not in trading_day_cache:
+                trading_day_cache[date_key] = is_a_share_trading_day_for_dashboard(dt)
+            if not trading_day_cache[date_key]:
+                continue
         filtered.append(point)
     return filtered
 
@@ -737,6 +786,99 @@ def compact_intraday_equity_history(
     )
     day_points = [p for p in points if str(p.get("time") or "").startswith(latest_day)] if latest_day else points
     return downsample_sequence(day_points, max_points)
+
+
+def dashboard_session_elapsed_minute(value: str) -> float | None:
+    dt = parse_dashboard_ts(value)
+    if dt is None:
+        return None
+    minute = dt.hour * 60 + dt.minute
+    second_fraction = dt.second / 60
+    if 9 * 60 + 30 <= minute <= 11 * 60 + 30:
+        elapsed = minute - (9 * 60 + 30) + second_fraction
+        return min(math.nextafter(120.0, 0.0), elapsed)
+    if 13 * 60 <= minute <= 15 * 60:
+        return minute - (9 * 60 + 30) - 90 + second_fraction
+    return None
+
+
+def build_compact_calendar_history(
+    history: list[dict[str, Any]],
+    *,
+    source_updated_at: str = "",
+    max_days: int = CALENDAR_HISTORY_MAX_DAYS,
+    bucket_minutes: int = CALENDAR_HISTORY_BUCKET_MINUTES,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build a bounded M4 (first/last/min/max) multi-day series for calendar charts."""
+    bucket_minutes = max(1, int(bucket_minutes or CALENDAR_HISTORY_BUCKET_MINUTES))
+    by_date: dict[str, dict[str, dict[str, Any]]] = {}
+    valid_points: list[dict[str, Any]] = []
+    filtered_history = filter_future_equity_points(history or [], now=now)
+    for point in filtered_history:
+        if not isinstance(point, dict):
+            continue
+        time_text = str(point.get("time") or "")
+        elapsed = dashboard_session_elapsed_minute(time_text)
+        try:
+            equity = float(point.get("equity"))
+        except (TypeError, ValueError):
+            continue
+        if elapsed is None or not math.isfinite(equity):
+            continue
+        date = time_text[:10]
+        if not date:
+            continue
+        normalized = {"time": time_text, "equity": equity}
+        by_date.setdefault(date, {})[time_text] = normalized
+        valid_points.append(normalized)
+
+    dates = sorted(by_date)
+    truncated = max_days > 0 and len(dates) > max_days
+    if max_days > 0:
+        dates = dates[-max_days:]
+    compact_days: dict[str, list[dict[str, Any]]] = {}
+    max_bucket = max(0, math.ceil(240 / bucket_minutes) - 1)
+    for date in dates:
+        points = sorted(by_date[date].values(), key=lambda point: str(point.get("time") or ""))
+        if not points:
+            continue
+        selected: dict[str, dict[str, Any]] = {}
+        buckets: dict[int, list[dict[str, Any]]] = {}
+        for point in points:
+            elapsed = dashboard_session_elapsed_minute(str(point.get("time") or ""))
+            if elapsed is None:
+                continue
+            bucket = min(max_bucket, int(min(239.999, max(0.0, elapsed)) // bucket_minutes))
+            buckets.setdefault(bucket, []).append(point)
+        for bucket_points in buckets.values():
+            first = bucket_points[0]
+            last = bucket_points[-1]
+            low = min(bucket_points, key=lambda point: float(point.get("equity") or 0))
+            high = max(bucket_points, key=lambda point: float(point.get("equity") or 0))
+            selected[str(first["time"])] = first
+            selected[str(last["time"])] = last
+            selected[str(low["time"])] = low
+            selected[str(high["time"])] = high
+        compact_days[date] = [
+            {"clock": str(point["time"])[11:], "equity": point["equity"]}
+            for point in sorted(selected.values(), key=lambda item: str(item.get("time") or ""))
+        ]
+
+    source_points = sorted(valid_points, key=lambda point: str(point.get("time") or ""))
+    return {
+        "schema_version": CALENDAR_HISTORY_SCHEMA_VERSION,
+        "timezone": "Asia/Shanghai",
+        "bucket_minutes": bucket_minutes,
+        "max_days": max_days,
+        "complete": True,
+        "truncated": truncated,
+        "coverage_start": dates[0] if dates else "",
+        "coverage_end": dates[-1] if dates else "",
+        "source_updated_at": str(source_updated_at or ""),
+        "source_last_equity_time": str(source_points[-1].get("time") or "") if source_points else "",
+        "days": compact_days,
+    }
 
 
 def compact_daily_equity_history(
@@ -863,6 +1005,13 @@ def get_practice_payload_fast() -> dict[str, Any]:
         # the full response arrives a few seconds later.
         payload["equity_history"] = compact_intraday_equity_history(equity_history, max_points=0, now=now)
         payload["daily_equity_history"] = compact_daily_equity_history([*equity_history, *daily_equity_history], now=now)
+        payload["source_updated_at"] = str(state.get("updated_at") or payload.get("source_updated_at") or "")
+        payload["source_last_equity_time"] = latest_valid_equity_time(equity_history)
+        payload["calendar_history"] = build_compact_calendar_history(
+            equity_history,
+            source_updated_at=payload["source_updated_at"],
+            now=now,
+        )
         payload["trade_markers"] = compact_trade_markers(state.get("trade_log") or [])
         payload["trade_log"] = filter_today_log_entries(payload.get("trade_log") or [], now=now)
         payload["decision_log"] = filter_today_log_entries(payload.get("decision_log") or [], now=now)
@@ -874,14 +1023,16 @@ def get_practice_payload_fast() -> dict[str, Any]:
         payload["strategy_performance"] = compact_strategy_performance(strategy_performance)
         if hasattr(trader, "build_trade_rule_note"):
             payload["trade_rule_note"] = trader.build_trade_rule_note()
-        payload["snapshot_mode"] = "fast"
+        annotate_practice_snapshot(payload, mode="fast", history_scope="latest_day")
         annotate_practice_payload_clock(payload, now=now)
         return payload
     except Exception as exc:
         print(f"[WARN] fast practice payload error: {type(exc).__name__}: {exc}", flush=True)
         payload = {"positions": [], "cash": 0, "total_equity": 0, "initial_cash": 0,
                    "total_pnl": 0, "total_pnl_pct": 0, "trade_log": [], "decision_log": [],
-                   "equity_history": [], "trade_markers": [], "last_error": str(exc), "snapshot_mode": "fast"}
+                   "equity_history": [], "trade_markers": [], "last_error": str(exc),
+                   "calendar_history": {"schema_version": CALENDAR_HISTORY_SCHEMA_VERSION, "complete": False, "days": {}}}
+        annotate_practice_snapshot(payload, mode="fast", history_scope="unavailable")
         return annotate_practice_payload_clock(payload)
 
 def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1106,7 +1257,7 @@ def run_practice_decision_logged(b1_payload: dict[str, Any], *, record_start: bo
             payload["market_decision_context"] = trader.compact_market_strategy_context(refreshed_ctx)
             with API_RESPONSE_LOCK:
                 API_RESPONSE_CACHE.pop("niuniu_practice", None)
-                API_RESPONSE_CACHE.pop("niuniu_practice_fast", None)
+                API_RESPONSE_CACHE.pop(PRACTICE_FAST_CACHE_KEY, None)
     except Exception as exc:
         print(f"[WARN] 定时选股盘面标签刷新失败: {type(exc).__name__}: {exc}", flush=True)
     item_count = len(payload.get("items") or [])
@@ -1427,6 +1578,7 @@ def pending_decision_loop() -> None:
                     )
                     with API_RESPONSE_LOCK:
                         API_RESPONSE_CACHE.pop("niuniu_practice", None)
+                        API_RESPONSE_CACHE.pop(PRACTICE_FAST_CACHE_KEY, None)
                         API_RESPONSE_CACHE.pop("practice_benchmarks", None)
         except Exception as exc:
             print(f"[WARN] 延迟成交检查失败: {type(exc).__name__}: {exc}", flush=True)
@@ -2271,11 +2423,12 @@ def sync_business_runtime_settings(changed: dict[str, str] | list[str] | set[str
             applied.append("persona_strategies")
 
     if changed_names & TRADER_RUNTIME_ENV_NAMES:
-        TRADER_MODULE = None
-        TRADER_MODULE_MTIME = 0.0
+        with TRADER_MODULE_LOCK:
+            TRADER_MODULE = None
+            TRADER_MODULE_MTIME = 0.0
         with API_RESPONSE_LOCK:
             API_RESPONSE_CACHE.pop("niuniu_practice", None)
-            API_RESPONSE_CACHE.pop("niuniu_practice_fast", None)
+            API_RESPONSE_CACHE.pop(PRACTICE_FAST_CACHE_KEY, None)
         applied.append("trader_runtime")
 
     if changed_names & set(visible_names):
@@ -3480,6 +3633,9 @@ let practiceRuleNoteOpen = false;
 let practiceCalendarOpen = false;
 let practiceCalendarMonth = '';
 let practiceCalendarSelectedDate = '';
+let practiceLoadSeq = 0;
+let practiceFullSnapshotStatus = 'idle';
+let practiceFullRequest = null;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const actionFetch = (url, options = {}) => fetch(url, {
@@ -3741,7 +3897,7 @@ function normalizeActiveCategory(category) {
   return visibleCategoryOrder().includes(category) ? category : 'b1_screen';
 }
 activeCategory = normalizeActiveCategory(activeCategory);
-const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v3';
+const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v4';
 const DATA_CACHE_TTL_MS = 30000;
 const AUTO_REFRESH_TICK_MS = 15000;
 const US_RATINGS_AUTO_REFRESH_MS = 10 * 60 * 1000;
@@ -4055,30 +4211,160 @@ async function loadIndices() {
     if (activeCategory === 'indices') render();
   }
 }
+function mergePracticeTimedRows(...sources) {
+  const byTime = new Map();
+  for (const source of sources) {
+    for (const row of (Array.isArray(source) ? source : [])) {
+      const time = String(row?.time || '');
+      if (time) byTime.set(time, row);
+    }
+  }
+  return [...byTime.values()].sort((a, b) => String(a?.time || '').localeCompare(String(b?.time || '')));
+}
+function practicePayloadModeRank(payload) {
+  const mode = String(payload?.snapshot_mode || '');
+  if (mode === 'full') return 2;
+  if (mode === 'merged') return String(payload?.equity_history_scope || '') === 'retained_history' ? 2 : 1;
+  return mode === 'fast' ? 1 : 0;
+}
+function practicePayloadFreshnessTuple(payload) {
+  const meta = payload?.snapshot_meta || {};
+  const latestEquityTime = mergePracticeTimedRows(payload?.equity_history || []).at(-1)?.time || '';
+  const newest = values => values.map(value => String(value || '')).filter(Boolean).sort().at(-1) || '';
+  const sourceUpdatedAt = newest([meta.source_updated_at, payload?.source_updated_at]);
+  const sourceLastEquity = newest([meta.source_last_equity_time, payload?.source_last_equity_time, latestEquityTime]);
+  const responseTime = newest([payload?.current_time, payload?.generated_at]);
+  return [sourceUpdatedAt || sourceLastEquity || responseTime, sourceLastEquity, practicePayloadModeRank(payload), responseTime];
+}
+function comparePracticePayloadFreshness(left, right) {
+  const a = practicePayloadFreshnessTuple(left);
+  const b = practicePayloadFreshnessTuple(right);
+  for (let idx = 0; idx < a.length; idx += 1) {
+    if (a[idx] === b[idx]) continue;
+    return a[idx] > b[idx] ? 1 : -1;
+  }
+  return 0;
+}
+function isUsablePracticePayload(payload) {
+  if (!payload || typeof payload !== 'object' || String(payload.equity_history_scope || '') === 'unavailable') return false;
+  const isLegacyErrorShell = !('equity_history_scope' in payload)
+    && Boolean(payload.last_error)
+    && (!Array.isArray(payload.positions) || payload.positions.length === 0)
+    && (!Array.isArray(payload.equity_history) || payload.equity_history.length === 0)
+    && ['cash', 'total_equity', 'initial_cash'].every(key => Number(payload[key] || 0) === 0);
+  if (isLegacyErrorShell) return false;
+  const hasFiniteField = key => payload[key] !== null && payload[key] !== '' && Number.isFinite(Number(payload[key]));
+  return Boolean(
+    hasFiniteField('total_equity')
+    || hasFiniteField('cash')
+    || (Array.isArray(payload.positions) && ('initial_cash' in payload || 'cash' in payload))
+    || (Array.isArray(payload.equity_history) && payload.equity_history.length)
+  );
+}
+function mergePracticeDailyRows(staleRows, liveRows) {
+  const byDate = new Map();
+  for (const source of [staleRows, liveRows]) {
+    for (const row of (Array.isArray(source) ? source : [])) {
+      const date = String(row?.time || '').slice(0, 10);
+      if (date) byDate.set(date, row);
+    }
+  }
+  return [...byDate.values()].sort((a, b) => String(a?.time || '').localeCompare(String(b?.time || '')));
+}
+function mergePracticeEquityRows(live, stale) {
+  const liveRows = mergePracticeTimedRows(live?.equity_history || []);
+  if (String(live?.equity_history_scope || '') === 'retained_history') return liveRows.slice(-2000);
+  if (!liveRows.length) return [];
+  const liveDate = String(liveRows.at(-1)?.time || '').slice(0, 10);
+  const compactDates = new Set(Object.keys(live?.calendar_history?.days || {}));
+  const olderRows = mergePracticeTimedRows(stale?.equity_history || []).filter(row => {
+    const date = String(row?.time || '').slice(0, 10);
+    return date && liveDate && date < liveDate && !compactDates.has(date);
+  });
+  return mergePracticeTimedRows(olderRows, liveRows).slice(-2000);
+}
+function mergePracticePayloadSnapshots(current, incoming) {
+  if (!isUsablePracticePayload(current)) return {...(incoming || {})};
+  if (!isUsablePracticePayload(incoming)) return {...(current || {})};
+  const incomingIsFresher = comparePracticePayloadFreshness(incoming, current) >= 0;
+  const live = incomingIsFresher ? incoming : current;
+  const other = incomingIsFresher ? current : incoming;
+  const merged = {...other, ...live};
+  merged.equity_history = mergePracticeEquityRows(live, other);
+  const liveDailyRows = Array.isArray(live.daily_equity_history) ? live.daily_equity_history : other.daily_equity_history;
+  merged.daily_equity_history = mergePracticeDailyRows([], liveDailyRows).slice(-500);
+  const modes = new Set([current.snapshot_mode, incoming.snapshot_mode].filter(Boolean));
+  merged.snapshot_mode = modes.size > 1 || modes.has('merged') ? 'merged' : (live.snapshot_mode || '');
+  merged.equity_history_scope = live.equity_history_scope || 'latest_day';
+  merged.last_error = live.last_error || '';
+  return merged;
+}
 async function loadB1Screen() {
-  try {
-    const b1Promise = fetch('/api/b1_screen').then(r => r.ok ? r.json() : {items:[],count:0});
-    const fastPracticePromise = fetch('/api/niuniu_practice?fast=1').then(r => r.ok ? r.json() : {positions:[],cash:1000000,total_equity:1000000});
-    const benchmarksPromise = fetch('/api/practice_benchmarks').then(r => r.ok ? r.json() : {items:[]});
-    const [b1Raw, p] = await Promise.all([b1Promise, fastPracticePromise]);
-    const b1Items = b1Raw.items || b1Raw.candidates || [];
-    const b1 = {...b1Raw, items:b1Items, count:b1Raw.count || b1Items.length};
-    niuniuPracticeData = p;
-    b1ScreenData = b1;
+  const seq = ++practiceLoadSeq;
+  practiceFullSnapshotStatus = 'loading';
+  const fetchJson = url => fetch(url).then(response => {
+    if (!response.ok) throw new Error(`${url} HTTP ${response.status}`);
+    return response.json();
+  });
+  // Start every source together. The fast portfolio no longer waits for B1, and
+  // the full snapshot can hydrate richer data without delaying calendar curves.
+  const b1Promise = fetchJson('/api/b1_screen');
+  const fastPracticePromise = fetchJson('/api/niuniu_practice?fast=1&calendar_schema=1');
+  if (!practiceFullRequest) {
+    practiceFullRequest = fetchJson('/api/niuniu_practice?snapshot_schema=2').then(
+      payload => {
+        practiceFullRequest = null;
+        return payload;
+      },
+      error => {
+        practiceFullRequest = null;
+        throw error;
+      },
+    );
+  }
+  const fullPracticePromise = practiceFullRequest;
+  const benchmarksPromise = fetchJson('/api/practice_benchmarks');
+  const renderPracticeUpdate = () => {
     if (activeCategory === 'b1_screen') render();
     saveViewState();
-    benchmarksPromise.then(bm => {
-      practiceBenchmarksData = bm || {items: []};
+  };
+  const tasks = [
+    b1Promise.then(b1Raw => {
+      if (seq !== practiceLoadSeq) return;
+      const b1Items = b1Raw.items || b1Raw.candidates || [];
+      b1ScreenData = {...b1Raw, items:b1Items, count:b1Raw.count || b1Items.length};
+      renderPracticeUpdate();
+    }).catch(error => {
+      if (seq === practiceLoadSeq) console.error('b1 screen load error', error);
+    }),
+    fastPracticePromise.then(payload => {
+      if (seq !== practiceLoadSeq || !isUsablePracticePayload(payload)) return;
+      niuniuPracticeData = mergePracticePayloadSnapshots(niuniuPracticeData, payload);
+      renderPracticeUpdate();
+    }).catch(error => {
+      if (seq === practiceLoadSeq) console.error('practice fast load error', error);
+    }),
+    fullPracticePromise.then(payload => {
+      if (seq !== practiceLoadSeq) return;
+      if (!isUsablePracticePayload(payload)) throw new Error('invalid full practice snapshot');
+      practiceFullSnapshotStatus = 'loaded';
+      niuniuPracticeData = mergePracticePayloadSnapshots(niuniuPracticeData, payload);
+      renderPracticeUpdate();
+    }).catch(error => {
+      if (seq !== practiceLoadSeq) return;
+      practiceFullSnapshotStatus = 'error';
+      console.error('practice full load error', error);
       if (activeCategory === 'b1_screen') render();
-      saveViewState();
-    }).catch(e => console.error('practice benchmarks load error', e));
-    fetch('/api/niuniu_practice').then(r => r.ok ? r.json() : null).then(full => {
-      if (!full) return;
-      niuniuPracticeData = full;
-      if (activeCategory === 'b1_screen') render();
-      saveViewState();
-    }).catch(e => console.error('practice full load error', e));
-  } catch(e) { console.error('b1 screen load error', e); }
+    }),
+    benchmarksPromise.then(payload => {
+      if (seq !== practiceLoadSeq) return;
+      practiceBenchmarksData = payload || {items: []};
+      renderPracticeUpdate();
+    }).catch(error => {
+      if (seq === practiceLoadSeq) console.error('practice benchmarks load error', error);
+    }),
+  ];
+  await Promise.allSettled(tasks);
 }
 function renderTabs() {
   $('categoryTabs').innerHTML = visibleCategoryOrder().map(key => {
@@ -4438,8 +4724,37 @@ function clampedTradingClockMinuteOfDay(timeText) {
 }
 function normalizePracticeEquityPoints(source) {
   return (source || [])
-    .map(p => ({time: p.time || '', equity: Number(p.equity), pnlPct: Number(p.pnl_pct)}))
+    .map(p => ({time: p.time || '', equity: Number(p.equity), pnlPct: Number(p.pnl_pct ?? p.pnlPct)}))
     .filter(p => Number.isFinite(p.equity) && p.time);
+}
+function compactPracticeCalendarHistoryPoints(payload) {
+  const calendar = payload?.calendar_history;
+  if (!calendar || Number(calendar.schema_version) !== 1 || !calendar.days || typeof calendar.days !== 'object') return [];
+  const points = [];
+  for (const [date, rows] of Object.entries(calendar.days)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Array.isArray(rows)) continue;
+    for (const row of rows) {
+      const clock = String(row?.clock || '');
+      if (!/^\d{2}:\d{2}(?::\d{2})?$/.test(clock)) continue;
+      points.push({time:`${date} ${clock}`, equity:Number(row?.equity)});
+    }
+  }
+  return points.filter(point => Number.isFinite(point.equity));
+}
+function practiceCalendarHistoryPoints(payload) {
+  const rawPoints = normalizePracticeEquityPoints(payload?.equity_history || []);
+  const rawDates = new Set(rawPoints.map(point => String(point.time || '').slice(0, 10)));
+  const compactPoints = compactPracticeCalendarHistoryPoints(payload)
+    .filter(point => !rawDates.has(String(point.time || '').slice(0, 10)));
+  return normalizePracticeEquityPoints(mergePracticeTimedRows(compactPoints, rawPoints));
+}
+function practiceCalendarHistoryCoversDate(payload, date) {
+  const calendar = payload?.calendar_history;
+  if (!calendar || Number(calendar.schema_version) !== 1 || calendar.complete !== true || !calendar.days || typeof calendar.days !== 'object') return false;
+  if (Object.prototype.hasOwnProperty.call(calendar.days, date)) return true;
+  const start = String(calendar.coverage_start || '');
+  const end = String(calendar.coverage_end || '');
+  return Boolean(start && end && date >= start && date <= end);
 }
 function normalizePracticeTradeMarkers(source) {
   return (source || [])
@@ -5041,8 +5356,7 @@ function renderPracticeCalendarDayCurve(date) {
   if (!date) return '';
   const p = niuniuPracticeData || {};
   const initialCash = Number(p.initial_cash || 1000000);
-  const history = normalizePracticeEquityPoints(p.equity_history || [])
-    .sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
+  const history = practiceCalendarHistoryPoints(p);
   const dailyHistory = normalizePracticeEquityPoints(p.daily_equity_history || [])
     .sort((a, b) => (new Date(a.time).getTime() || 0) - (new Date(b.time).getTime() || 0));
   const allDayHistoryPoints = history
@@ -5060,15 +5374,23 @@ function renderPracticeCalendarDayCurve(date) {
   const valueCls = finalPnl > 0 ? 'up' : finalPnl < 0 ? 'down' : 'flat';
   const signedAmount = `${finalPnl >= 0 ? '+' : ''}${fmtAmount(finalPnl)}`;
   const signedPct = `${finalPct >= 0 ? '+' : ''}${fmtNumber(finalPct)}%`;
-  let curveSourcePoints = sessionDayPoints;
   const hasSessionCurve = sessionDayPoints.length >= 2;
-  if (!hasSessionCurve && Number.isFinite(baseEquity) && baseEquity > 0 && Number.isFinite(latestEquity)) {
-    curveSourcePoints = [
-      {time: `${date} 09:30:00`, equity: baseEquity, pnlPct: 0},
-      {time: `${date} 15:00:00`, equity: latestEquity, pnlPct: finalPct},
-    ];
-  }
-  const curveSubPrefix = hasSessionCurve ? '' : '仅有收盘点 · ';
+  const isCurrentDate = date === String(p.current_date || '');
+  const hasPartialHistory = String(p.equity_history_scope || '') !== 'retained_history';
+  const needsFullHistory = isCurrentDate || (hasPartialHistory && !practiceCalendarHistoryCoversDate(p, date));
+  const historyPending = !hasSessionCurve
+    && needsFullHistory
+    && practiceFullSnapshotStatus === 'loading';
+  const historyLoadFailed = !hasSessionCurve
+    && needsFullHistory
+    && practiceFullSnapshotStatus === 'error';
+  const curveSubPrefix = hasSessionCurve
+    ? ''
+    : historyPending
+      ? '分时加载中 · '
+      : historyLoadFailed
+        ? '分时加载失败 · '
+        : '仅有收盘点 · ';
   const closeBtn = '<button type="button" class="practice-calendar-day-curve-close" data-practice-calendar-action="clear-day" title="关闭曲线" aria-label="关闭曲线">x</button>';
   const head = `<div class="practice-calendar-day-curve-head">
     <div>
@@ -5078,6 +5400,19 @@ function renderPracticeCalendarDayCurve(date) {
     <div class="practice-calendar-day-curve-value ${valueCls}">${signedAmount} / ${signedPct}</div>
     ${closeBtn}
   </div>`;
+  if (historyPending) {
+    return `<div class="practice-calendar-day-curve" data-practice-calendar-curve>${head}<div class="practice-calendar-day-curve-empty" aria-live="polite">分时曲线加载中…</div></div>`;
+  }
+  if (historyLoadFailed) {
+    return `<div class="practice-calendar-day-curve" data-practice-calendar-curve>${head}<div class="practice-calendar-day-curve-empty" role="status">分时曲线加载失败</div></div>`;
+  }
+  let curveSourcePoints = sessionDayPoints;
+  if (!hasSessionCurve && Number.isFinite(baseEquity) && baseEquity > 0 && Number.isFinite(latestEquity)) {
+    curveSourcePoints = [
+      {time: `${date} 09:30:00`, equity: baseEquity, pnlPct: 0},
+      {time: `${date} 15:00:00`, equity: latestEquity, pnlPct: finalPct},
+    ];
+  }
   if (curveSourcePoints.length < 2 || !Number.isFinite(baseEquity) || baseEquity <= 0) {
     return `<div class="practice-calendar-day-curve" data-practice-calendar-curve>${head}<div class="practice-calendar-day-curve-empty">等待当日分时点</div></div>`;
   }
@@ -5140,7 +5475,7 @@ function renderPracticeCalendarModal() {
     return;
   }
   const p = niuniuPracticeData || {};
-  const rows = buildPracticeCalendarRows(p.equity_history || [], p.daily_equity_history || [], Number(p.initial_cash || 1000000));
+  const rows = buildPracticeCalendarRows(practiceCalendarHistoryPoints(p), p.daily_equity_history || [], Number(p.initial_cash || 1000000));
   const latestMonth = monthKeyFromDate(rows.at(-1)?.date) || monthKeyFromDate(localDateKey());
   if (!practiceCalendarMonth) practiceCalendarMonth = latestMonth;
   const monthMatch = String(practiceCalendarMonth || latestMonth).match(/^(\d{4})-(\d{2})$/);
@@ -5233,7 +5568,7 @@ function renderPracticeCalendarModal() {
 function openPracticeCalendar(event) {
   if (event && event.stopPropagation) event.stopPropagation();
   const p = niuniuPracticeData || {};
-  const rows = buildPracticeCalendarRows(p.equity_history || [], p.daily_equity_history || [], Number(p.initial_cash || 1000000));
+  const rows = buildPracticeCalendarRows(practiceCalendarHistoryPoints(p), p.daily_equity_history || [], Number(p.initial_cash || 1000000));
   practiceCalendarMonth = monthKeyFromDate(rows.at(-1)?.date) || monthKeyFromDate(localDateKey());
   practiceCalendarSelectedDate = '';
   practiceCalendarOpen = true;
@@ -7620,7 +7955,7 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             fast = params.get("fast", ["0"])[0].lower() in {"1", "true", "yes"}
             if fast:
-                self.send_json_cached("niuniu_practice_fast", API_TTLS["niuniu_practice"], get_practice_payload_fast, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=10)
+                self.send_json_cached(PRACTICE_FAST_CACHE_KEY, API_TTLS["niuniu_practice"], get_practice_payload_fast, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=10)
             else:
                 self.send_json_cached("niuniu_practice", API_TTLS["niuniu_practice"], get_practice_payload, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=10)
             return
@@ -7720,6 +8055,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             result = get_trader_module().resume_trading()
             API_RESPONSE_CACHE.pop("niuniu_practice", None)
+            API_RESPONSE_CACHE.pop(PRACTICE_FAST_CACHE_KEY, None)
             self.send_json_uncached(result)
             return
         if parsed.path == "/api/self_optimize/apply":

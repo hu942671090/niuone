@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 import sys
@@ -177,6 +178,123 @@ class DashboardAuthTests(unittest.TestCase):
 
         self.assertEqual(compacted, latest_points)
 
+    def test_compact_calendar_history_keeps_multi_day_session_shape(self):
+        points = [
+            {'time': '2026-06-25 09:29:59', 'equity': 999999},
+            {'time': '2026-06-25 09:30:00', 'equity': 1000000},
+            {'time': '2026-06-25 09:31:00', 'equity': 999900},
+            {'time': '2026-06-25 09:32:00', 'equity': 1000200},
+            {'time': '2026-06-25 09:34:00', 'equity': 1000100},
+            {'time': '2026-06-25 09:35:00', 'equity': 1000150},
+            {'time': '2026-06-25 11:30:00', 'equity': 1000300},
+            {'time': '2026-06-25 12:00:00', 'equity': 1},
+            {'time': '2026-06-25 13:00:00', 'equity': 1000400},
+            {'time': '2026-06-25 15:00:00', 'equity': 1000500},
+            {'time': '2026-06-25 15:01:00', 'equity': 2},
+            {'time': '2026-06-26 09:30:00', 'equity': 1000500},
+            {'time': '2026-06-26 10:00:00', 'equity': 1000600},
+            {'time': '2026-06-26 15:00:00', 'equity': 1000700},
+            {'time': '2026-06-27 10:00:00', 'equity': 1000800},
+        ]
+
+        compacted = dashboard.build_compact_calendar_history(
+            points,
+            source_updated_at='2026-06-26 15:00:10',
+            now=datetime(2026, 6, 27, 12, 0, 0),
+        )
+
+        self.assertEqual(compacted['schema_version'], 1)
+        self.assertEqual(compacted['bucket_minutes'], 10)
+        self.assertEqual(compacted['coverage_start'], '2026-06-25')
+        self.assertEqual(compacted['coverage_end'], '2026-06-26')
+        self.assertEqual(set(compacted['days']), {'2026-06-25', '2026-06-26'})
+        first_day = compacted['days']['2026-06-25']
+        first_day_clocks = [point['clock'] for point in first_day]
+        self.assertIn('09:30:00', first_day_clocks)
+        self.assertIn('09:31:00', first_day_clocks)
+        self.assertIn('09:32:00', first_day_clocks)
+        self.assertIn('15:00:00', first_day_clocks)
+        self.assertNotIn('09:29:59', first_day_clocks)
+        self.assertNotIn('12:00:00', first_day_clocks)
+        self.assertNotIn('15:01:00', first_day_clocks)
+        self.assertLessEqual(len(first_day), 96)
+        self.assertEqual(compacted['source_updated_at'], '2026-06-26 15:00:10')
+
+    def test_compact_calendar_history_caps_coverage_to_recent_days(self):
+        points = [
+            {'time': f'2026-06-{day:02d} 10:00:00', 'equity': 1000000 + day}
+            for day in (22, 23, 24, 25, 26)
+        ]
+
+        compacted = dashboard.build_compact_calendar_history(
+            points,
+            max_days=2,
+            now=datetime(2026, 6, 26, 15, 1, 0),
+        )
+
+        self.assertTrue(compacted['truncated'])
+        self.assertEqual(list(compacted['days']), ['2026-06-25', '2026-06-26'])
+
+    def test_compact_calendar_history_uses_bounded_m4_buckets(self):
+        points = []
+        for bucket in range(24):
+            for offset, delta in ((0, 0), (1, -100), (2, 100), (9, 50)):
+                elapsed = bucket * 10 + offset
+                minute_of_day = 9 * 60 + 30 + elapsed if elapsed < 120 else 13 * 60 + elapsed - 120
+                points.append({
+                    'time': f'2026-06-26 {minute_of_day // 60:02d}:{minute_of_day % 60:02d}:00',
+                    'equity': 1000000 + bucket * 10 + delta,
+                })
+
+        compacted = dashboard.build_compact_calendar_history(
+            points,
+            now=datetime(2026, 6, 26, 15, 1, 0),
+        )
+
+        day_points = compacted['days']['2026-06-26']
+        self.assertEqual(compacted['bucket_minutes'], 10)
+        self.assertEqual(len(day_points), 96)
+        self.assertIn('13:39:00', [point['clock'] for point in day_points])
+
+    def test_compact_calendar_history_ignores_invalid_points_in_source_version(self):
+        compacted = dashboard.build_compact_calendar_history(
+            [
+                {'time': '9999-not-a-date', 'equity': 1},
+                {'time': '2026-06-26 10:00:00', 'equity': 1000000},
+                {'time': '2026-06-26 10:01:00', 'equity': 'not-a-number'},
+            ],
+            now=datetime(2026, 6, 26, 15, 1, 0),
+        )
+
+        self.assertEqual(compacted['source_last_equity_time'], '2026-06-26 10:00:00')
+
+    def test_compact_calendar_history_keeps_session_close_points_with_seconds(self):
+        compacted = dashboard.build_compact_calendar_history(
+            [
+                {'time': '2026-06-26 11:30:59', 'equity': 1000001},
+                {'time': '2026-06-26 13:00:00', 'equity': 1000002},
+                {'time': '2026-06-26 15:00:59', 'equity': 1000003},
+            ],
+            now=datetime(2026, 6, 26, 15, 1, 30),
+        )
+
+        clocks = [point['clock'] for point in compacted['days']['2026-06-26']]
+        self.assertEqual(clocks, ['11:30:59', '13:00:00', '15:00:59'])
+        self.assertEqual(compacted['source_last_equity_time'], '2026-06-26 15:00:59')
+
+    def test_snapshot_metadata_ignores_invalid_equity_points(self):
+        payload = {
+            'equity_history': [
+                {'time': '9999-not-a-date', 'equity': 2},
+                {'time': '2026-06-26 10:00:00', 'equity': 1000000},
+                {'time': '2026-06-26 10:01:00', 'equity': 'not-a-number'},
+            ],
+        }
+
+        dashboard.annotate_practice_snapshot(payload, mode='full', history_scope='retained_history')
+
+        self.assertEqual(payload['source_last_equity_time'], '2026-06-26 10:00:00')
+
     def test_compact_intraday_equity_history_filters_future_same_day_points(self):
         points = [
             {'time': '2026-06-26 09:30:00', 'equity': 1000000, 'pnl_pct': 0},
@@ -206,6 +324,28 @@ class DashboardAuthTests(unittest.TestCase):
         )
 
         self.assertEqual([p['time'] for p in compacted], ['2026-06-26 09:30:00', '2026-06-26 15:00:00'])
+
+    def test_filter_future_equity_points_caches_trading_day_lookup_per_date(self):
+        points = [
+            {'time': '2026-06-25 09:30:00', 'equity': 1000000},
+            {'time': '2026-06-25 10:00:00', 'equity': 1000100},
+            {'time': '2026-06-26 09:30:00', 'equity': 1000200},
+            {'time': '2026-06-26 10:00:00', 'equity': 1000300},
+        ]
+        checked_dates = []
+        original_is_trading_day = dashboard.is_a_share_trading_day_for_dashboard
+        try:
+            dashboard.is_a_share_trading_day_for_dashboard = lambda dt: checked_dates.append(dt.date()) or True
+
+            filtered = dashboard.filter_future_equity_points(
+                points,
+                now=datetime(2026, 6, 26, 15, 0, 0),
+            )
+        finally:
+            dashboard.is_a_share_trading_day_for_dashboard = original_is_trading_day
+
+        self.assertEqual(filtered, points)
+        self.assertEqual(len(checked_dates), 2)
 
     def test_compact_daily_equity_history_filters_future_same_day_settlement(self):
         points = [
@@ -454,6 +594,59 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(payload['trade_rule_note'], '统一风控说明')
         self.assertEqual(payload['snapshot_mode'], 'fast')
 
+    def test_fast_practice_payload_includes_compact_multi_day_calendar_history(self):
+        old_points = [
+            {'time': '2026-06-25 09:30:00', 'equity': 1000000},
+            {'time': '2026-06-25 10:00:00', 'equity': 1000200},
+            {'time': '2026-06-25 15:00:00', 'equity': 1000100},
+        ]
+        latest_points = [
+            {'time': '2026-06-26 09:30:00', 'equity': 1000100},
+            {'time': '2026-06-26 10:00:00', 'equity': 1000300},
+            {'time': '2026-06-26 15:00:00', 'equity': 1000400},
+        ]
+
+        class FakeTrader:
+            def load_state(self):
+                return {
+                    'updated_at': '2026-06-26 15:00:10',
+                    'equity_history': old_points + latest_points,
+                    'daily_equity_history': [],
+                    'trade_log': [],
+                }
+
+            def enrich_portfolio(self, state):
+                return {
+                    'generated_at': '2026-06-26 15:00:11',
+                    'positions': [],
+                    'trade_log': [],
+                    'decision_log': [],
+                    'cash': 1000400,
+                    'total_equity': 1000400,
+                }
+
+            def track_strategy_performance(self, state):
+                return {}
+
+        original_get_trader_module = dashboard.get_trader_module
+        original_current_cn_datetime = dashboard.current_cn_datetime
+        try:
+            dashboard.get_trader_module = lambda: FakeTrader()
+            dashboard.current_cn_datetime = lambda: datetime(2026, 6, 26, 15, 1, 0)
+
+            payload = dashboard.get_practice_payload_fast()
+        finally:
+            dashboard.get_trader_module = original_get_trader_module
+            dashboard.current_cn_datetime = original_current_cn_datetime
+
+        self.assertEqual(payload['equity_history'], latest_points)
+        self.assertEqual(set(payload['calendar_history']['days']), {'2026-06-25', '2026-06-26'})
+        self.assertGreaterEqual(len(payload['calendar_history']['days']['2026-06-25']), 2)
+        self.assertEqual(payload['calendar_history']['schema_version'], 1)
+        self.assertEqual(payload['snapshot_mode'], 'fast')
+        self.assertEqual(payload['equity_history_scope'], 'latest_day')
+        self.assertEqual(payload['snapshot_meta']['source_updated_at'], '2026-06-26 15:00:10')
+
     def test_index_template_has_scrollable_practice_operation_log(self):
         self.assertIn('function renderPracticeOperationLog(payload)', dashboard.INDEX_HTML)
         self.assertIn('class="practice-log-scroll"', dashboard.INDEX_HTML)
@@ -632,7 +825,15 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn("practiceCalendarSelectedDate = practiceCalendarSelectedDate === nextDate ? '' : nextDate", dashboard.INDEX_HTML)
         self.assertIn('sessionDayPoints', dashboard.INDEX_HTML)
         self.assertIn('allDayHistoryPoints.at(-1)?.equity', dashboard.INDEX_HTML)
-        self.assertIn("curveSubPrefix = hasSessionCurve ? '' : '仅有收盘点 · '", dashboard.INDEX_HTML)
+        self.assertIn("? '分时加载失败 · '", dashboard.INDEX_HTML)
+        self.assertIn('practiceCalendarHistoryPoints(p)', dashboard.INDEX_HTML)
+        self.assertIn('practiceCalendarHistoryCoversDate(p, date)', dashboard.INDEX_HTML)
+        self.assertIn(
+            'const needsFullHistory = isCurrentDate || (hasPartialHistory && !practiceCalendarHistoryCoversDate(p, date));',
+            dashboard.INDEX_HTML,
+        )
+        self.assertIn('分时曲线加载中…', dashboard.INDEX_HTML)
+        self.assertIn('分时曲线加载失败', dashboard.INDEX_HTML)
         self.assertIn("time: `${date} 15:00:00`", dashboard.INDEX_HTML)
         self.assertIn('const w = 464, h = 96', dashboard.INDEX_HTML)
         self.assertIn('0轴 ${prevPoint ? esc(String(prevPoint.time || \'\').slice(5, 16)) : \'初始资金\'}', dashboard.INDEX_HTML)
@@ -670,6 +871,96 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('<h3 class="practice-panel-title"><span>牛牛实战 · 模拟账户</span><button class="practice-calendar-open-btn"', dashboard.INDEX_HTML)
         self.assertNotIn('最近交易日收益', dashboard.INDEX_HTML)
         self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', dashboard.INDEX_HTML)
+
+    def test_index_template_loads_calendar_history_without_waiting_for_full_snapshot(self):
+        self.assertIn("const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v4';", dashboard.INDEX_HTML)
+        self.assertIn("fetchJson('/api/niuniu_practice?fast=1&calendar_schema=1')", dashboard.INDEX_HTML)
+        self.assertIn("fetchJson('/api/niuniu_practice?snapshot_schema=2')", dashboard.INDEX_HTML)
+        self.assertIn('const fullPracticePromise = practiceFullRequest;', dashboard.INDEX_HTML)
+        self.assertIn('function mergePracticePayloadSnapshots', dashboard.INDEX_HTML)
+        self.assertIn('function mergePracticeEquityRows', dashboard.INDEX_HTML)
+        self.assertIn('function comparePracticePayloadFreshness', dashboard.INDEX_HTML)
+        self.assertIn("String(payload.equity_history_scope || '') === 'unavailable'", dashboard.INDEX_HTML)
+        self.assertNotIn("typeof payload !== 'object' || payload.last_error", dashboard.INDEX_HTML)
+        self.assertIn('if (seq !== practiceLoadSeq) return;', dashboard.INDEX_HTML)
+        self.assertIn("practiceFullSnapshotStatus = 'loading';", dashboard.INDEX_HTML)
+        self.assertIn("practiceFullSnapshotStatus = 'loaded';", dashboard.INDEX_HTML)
+        self.assertIn("practiceFullSnapshotStatus = 'error';", dashboard.INDEX_HTML)
+        self.assertIn('function compactPracticeCalendarHistoryPoints', dashboard.INDEX_HTML)
+        self.assertIn('calendar.complete !== true', dashboard.INDEX_HTML)
+        self.assertIn('buildPracticeCalendarRows(practiceCalendarHistoryPoints(p)', dashboard.INDEX_HTML)
+        self.assertIn('renderPracticeCurve(p.equity_history || []', dashboard.INDEX_HTML)
+
+    def test_index_snapshot_merge_handles_business_errors_and_stale_full_responses(self):
+        start = dashboard.INDEX_HTML.index('function mergePracticeTimedRows')
+        end = dashboard.INDEX_HTML.index('async function loadB1Screen', start)
+        functions = dashboard.INDEX_HTML[start:end]
+        scenario = r"""
+const fast = {
+  snapshot_mode:'fast', equity_history_scope:'latest_day', source_updated_at:'2026-07-10 15:00:00',
+  source_last_equity_time:'2026-07-10 10:00:00', current_time:'2026-07-10 15:00:02',
+  total_equity:1001, cash:500, last_error:'模型暂时不可用',
+  equity_history:[{time:'2026-07-10 10:00:00', equity:1001}],
+  daily_equity_history:[{time:'2026-07-10 15:00:00', equity:1001}],
+};
+const full = {
+  snapshot_mode:'full', equity_history_scope:'retained_history', source_updated_at:'2026-07-10 15:00:00',
+  source_last_equity_time:'2026-07-10 10:00:00', current_time:'2026-07-10 14:59:59',
+  total_equity:999, cash:499,
+  equity_history:[
+    {time:'2026-07-09 15:00:00', equity:990},
+    {time:'2026-07-10 09:59:00', equity:998},
+    {time:'2026-07-10 10:00:00', equity:999},
+  ],
+  daily_equity_history:[{time:'2026-07-10 14:59:00', equity:999}],
+};
+const sameSource = mergePracticePayloadSnapshots(fast, full);
+const legacyErrorShell = {
+  positions:[], cash:0, total_equity:0, initial_cash:0, equity_history:[], last_error:'endpoint failed',
+};
+const newerFast = {
+  ...fast, source_updated_at:'2026-07-10 16:00:00', source_last_equity_time:'2026-07-10 11:00:00',
+  current_time:'2026-07-10 16:00:01', total_equity:1010,
+  equity_history:[{time:'2026-07-10 11:00:00', equity:1010}],
+};
+const staleFull = {
+  ...full, equity_history:[
+    {time:'2026-07-09 15:00:00', equity:990},
+    {time:'2026-07-10 09:30:00', equity:995},
+    {time:'2026-07-11 09:30:00', equity:2000},
+  ],
+};
+const newerSource = mergePracticePayloadSnapshots(newerFast, staleFull);
+const compactFast = {
+  ...newerFast,
+  calendar_history:{schema_version:1, complete:true, days:{'2026-07-09':[{clock:'15:00:00', equity:990}]}},
+};
+const compactAuthoritative = mergePracticePayloadSnapshots(compactFast, staleFull);
+const manyOld = {
+  ...staleFull,
+  equity_history:Array.from({length:2500}, (_, idx) => ({time:`2026-07-09 ${String(idx).padStart(5, '0')}`, equity:idx})),
+};
+const capped = mergePracticePayloadSnapshots(newerFast, manyOld);
+process.stdout.write(JSON.stringify({
+  businessErrorUsable:isUsablePracticePayload(fast),
+  unavailableRejected:!isUsablePracticePayload({...fast, equity_history_scope:'unavailable'}),
+  legacyErrorShellRejected:!isUsablePracticePayload(legacyErrorShell),
+  fullWinsSameSource:sameSource.total_equity === 999 && sameSource.equity_history_scope === 'retained_history',
+  staleSameDayDropped:JSON.stringify(newerSource.equity_history.map(row => row.time)) === JSON.stringify(['2026-07-09 15:00:00', '2026-07-10 11:00:00']),
+  compactDateNotRehydrated:JSON.stringify(compactAuthoritative.equity_history.map(row => row.time)) === JSON.stringify(['2026-07-10 11:00:00']),
+  newerErrorPreserved:newerSource.last_error === '模型暂时不可用',
+  historyCapped:capped.equity_history.length === 2000 && capped.equity_history.at(-1).time === '2026-07-10 11:00:00',
+}));
+"""
+        result = subprocess.run(
+            ['node', '-e', functions + scenario],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        checks = json.loads(result.stdout)
+
+        self.assertTrue(all(checks.values()), checks)
 
     def test_index_template_intraday_curve_renders_single_point_from_opening_base(self):
         self.assertIn('if (rawPoints.length < (isDailyMode ? 2 : 1))', dashboard.INDEX_HTML)
