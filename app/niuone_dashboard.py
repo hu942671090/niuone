@@ -887,6 +887,8 @@ def get_practice_payload_fast() -> dict[str, Any]:
 def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any]:
     items = b1_payload.get("trade_items") or b1_payload.get("items") or b1_payload.get("candidates") or []
     payload = {"items": items, "generated_at": b1_payload.get("generated_at", "")}
+    if isinstance(b1_payload.get("market_snapshot"), dict):
+        payload["market_snapshot"] = b1_payload.get("market_snapshot")
     for key in ("schedule_slot", "schedule_run_kind", "schedule_triggered_at"):
         if b1_payload.get(key):
             payload[key] = b1_payload.get(key)
@@ -1065,20 +1067,27 @@ def record_practice_decision_event(
     try:
         trader = get_trader_module()
         generated_at = b1_payload.get("generated_at", "")
+        market_ctx = b1_payload.get("market_decision_context")
+        market_ctx = dict(market_ctx) if isinstance(market_ctx, dict) else {}
+        decision_payload = {
+            "summary": summary,
+            "actions": [],
+            "model": "SYSTEM_SCHEDULE",
+            "provider": "dashboard",
+            "error": error,
+        }
+        if market_ctx:
+            decision_payload["market_guidance"] = market_ctx
         log_entry = {
             "time": trader.now_ts() if hasattr(trader, "now_ts") else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "b1_generated_at": generated_at,
             "trade_allowed": trade_allowed,
             "trade_reason": trade_reason,
-            "decision": {
-                "summary": summary,
-                "actions": [],
-                "model": "SYSTEM_SCHEDULE",
-                "provider": "dashboard",
-                "error": error,
-            },
+            "decision": decision_payload,
             "executed": [],
         }
+        if market_ctx:
+            log_entry["market_decision_context"] = market_ctx
         for key in ("schedule_slot", "schedule_run_kind", "schedule_triggered_at"):
             if b1_payload.get(key):
                 log_entry[key] = b1_payload.get(key)
@@ -1090,6 +1099,16 @@ def record_practice_decision_event(
 
 def run_practice_decision_logged(b1_payload: dict[str, Any], *, record_start: bool = False) -> dict[str, Any]:
     payload = normalize_b1_payload_for_trader(b1_payload)
+    try:
+        trader = get_trader_module()
+        if hasattr(trader, "refresh_market_strategy_context_for_b1"):
+            refreshed_ctx = trader.refresh_market_strategy_context_for_b1(payload)
+            payload["market_decision_context"] = trader.compact_market_strategy_context(refreshed_ctx)
+            with API_RESPONSE_LOCK:
+                API_RESPONSE_CACHE.pop("niuniu_practice", None)
+                API_RESPONSE_CACHE.pop("niuniu_practice_fast", None)
+    except Exception as exc:
+        print(f"[WARN] 定时选股盘面标签刷新失败: {type(exc).__name__}: {exc}", flush=True)
     item_count = len(payload.get("items") or [])
     slot_note = ""
     if payload.get("schedule_slot"):

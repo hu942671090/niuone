@@ -450,8 +450,66 @@ def tencent_batch_quote(codes):
             "high": safe_float(parts[33]),
             "low": safe_float(parts[34]),
             "turnover": safe_float(parts[38]),
+            "quote_time": parts[30] if len(parts) > 30 else "",
         }
     return results
+
+
+def build_market_snapshot(
+    quotes: dict[str, dict[str, Any]],
+    captured_at: str = "",
+    pool_count: int = 0,
+) -> dict[str, Any]:
+    """Summarize the full quote batch already fetched by the B1 scan.
+
+    This lets every periodic scan refresh the decision label without issuing a
+    second all-market request. The universe is explicitly main-board, non-ST A
+    shares so downstream consumers do not treat it as a whole-market statistic.
+    """
+    rows: list[dict[str, float]] = []
+    quote_times: list[str] = []
+    for quote in (quotes or {}).values():
+        if not isinstance(quote, dict):
+            continue
+        price = safe_float(quote.get("price"))
+        prev_close = safe_float(quote.get("prev_close"))
+        change_pct = safe_float(quote.get("change_pct"))
+        if price is None or price <= 0 or prev_close is None or prev_close <= 0 or change_pct is None:
+            continue
+        rows.append({
+            "change_pct": change_pct,
+            "amount": max(0.0, safe_float(quote.get("amount")) or 0.0),
+        })
+        raw_quote_time = re.sub(r"\D", "", str(quote.get("quote_time") or ""))
+        if len(raw_quote_time) >= 14:
+            quote_times.append(
+                f"{raw_quote_time[:4]}-{raw_quote_time[4:6]}-{raw_quote_time[6:8]} "
+                f"{raw_quote_time[8:10]}:{raw_quote_time[10:12]}:{raw_quote_time[12:14]}"
+            )
+
+    changes = [row["change_pct"] for row in rows]
+    pool_count = max(int(pool_count or 0), len(quotes or {}), len(changes))
+    up = sum(1 for pct in changes if pct > 0)
+    down = sum(1 for pct in changes if pct < 0)
+    flat = max(0, len(changes) - up - down)
+    return {
+        "source": "b1_mainboard_quotes",
+        "universe": "mainboard_non_st",
+        "captured_at": captured_at or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "quote_time": max(quote_times) if quote_times else "",
+        "pool_count": pool_count,
+        "sample_count": len(changes),
+        "coverage": round(len(changes) / pool_count, 4) if pool_count else 0.0,
+        "up": up,
+        "down": down,
+        "flat": flat,
+        "limit_up": sum(1 for pct in changes if pct >= 9.8),
+        "limit_down": sum(1 for pct in changes if pct <= -9.8),
+        "average_change_pct": round(statistics.mean(changes), 3) if changes else None,
+        "median_change_pct": round(statistics.median(changes), 3) if changes else None,
+        "total_amount": round(sum(row["amount"] for row in rows), 2),
+    }
+
 
 def tencent_klines(symbol, count=120):
     url = f"{TENCENT_KLINE}?param={symbol},day,,,{count},qfq"
@@ -1850,6 +1908,7 @@ def main():
         q = tencent_batch_quote(batch)
         quotes.update(q)
         time.sleep(0.05)
+    market_snapshot = build_market_snapshot(quotes, pool_count=len(all_keys))
 
     # Filter by liquidity
     liquid = []
@@ -1965,6 +2024,7 @@ def main():
         "strategy_distribution": dict(strat_counts),
         "strategy_meta": active_strategy_meta(),
         "strategy_score_profiles": active_strategy_score_profiles(),
+        "market_snapshot": market_snapshot,
     }
     json_str = json.dumps(output, ensure_ascii=False, indent=2)
     print(json_str)

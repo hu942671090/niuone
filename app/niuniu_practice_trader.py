@@ -1669,6 +1669,10 @@ MORNING_MAX_OPEN_POSITIONS = env_int("DASHBOARD_MORNING_MAX_OPEN_POSITIONS", min
 MORNING_MAX_OPEN_POSITIONS = max(1, min(MAX_OPEN_POSITIONS, MORNING_MAX_OPEN_POSITIONS))
 MARKET_REPORT_LOOKBACK = 12
 OVERNIGHT_US_MARKET_TITLE = "隔夜美股盘面总结"
+PERIODIC_MARKET_MIN_SAMPLE = 1000
+PERIODIC_MARKET_MIN_COVERAGE = 0.80
+PERIODIC_MARKET_MIN_ACTIVE_RATIO = 0.20
+PERIODIC_MARKET_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
 DECISION_INTELLIGENCE_ENABLED = env_bool("DASHBOARD_DECISION_INTELLIGENCE_ENABLED", True)
 DECISION_INTELLIGENCE_TTL_SECONDS = max(15, env_int("DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", 75))
 DECISION_INTELLIGENCE_MAX_ITEMS = max(1, min(8, env_int("DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS", 5)))
@@ -2132,6 +2136,155 @@ def derive_market_strategy_context(reports: list[dict[str, Any]] | None, now: da
     return ctx
 
 
+def _periodic_market_snapshot_report(
+    b1_payload: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Build a synthetic market report from the quote batch embedded in a B1 run."""
+    payload = b1_payload if isinstance(b1_payload, dict) else {}
+    snapshot = payload.get("market_snapshot") if isinstance(payload.get("market_snapshot"), dict) else {}
+    if not snapshot:
+        return None
+
+    now = now or datetime.now()
+    sample_count = max(0, int(_safe_float(snapshot.get("sample_count"), 0.0)))
+    pool_count = max(sample_count, int(_safe_float(snapshot.get("pool_count"), sample_count)))
+    coverage = _safe_float(snapshot.get("coverage"), sample_count / pool_count if pool_count else 0.0)
+    up = max(0, int(_safe_float(snapshot.get("up"), 0.0)))
+    down = max(0, int(_safe_float(snapshot.get("down"), 0.0)))
+    flat = max(0, int(_safe_float(snapshot.get("flat"), max(sample_count - up - down, 0))))
+    limit_up = max(0, int(_safe_float(snapshot.get("limit_up"), 0.0)))
+    limit_down = max(0, int(_safe_float(snapshot.get("limit_down"), 0.0)))
+    if sample_count < PERIODIC_MARKET_MIN_SAMPLE or coverage < PERIODIC_MARKET_MIN_COVERAGE:
+        return None
+    counted = up + down + flat
+    if abs(counted - sample_count) > max(5, int(sample_count * 0.02)):
+        return None
+    if up + down < max(100, int(sample_count * PERIODIC_MARKET_MIN_ACTIVE_RATIO)):
+        return None
+
+    source_time = str(snapshot.get("quote_time") or snapshot.get("captured_at") or payload.get("generated_at") or "")
+    source_dt = parse_ts(source_time)
+    if source_dt is None or source_dt.date() != now.date():
+        return None
+    if source_dt.time() < dtime(9, 30) or source_dt.time() > dtime(15, 0):
+        return None
+    age_seconds = (now - source_dt).total_seconds()
+    if age_seconds < -60 or age_seconds > PERIODIC_MARKET_SNAPSHOT_MAX_AGE_SECONDS:
+        return None
+
+    if up > down * 1.4 and limit_up >= max(limit_down * 2, 5):
+        tone = "offensive"
+    elif down > up * 1.3 and limit_down >= max(limit_up, 3):
+        tone = "defensive"
+    elif up > down:
+        tone = "balanced"
+    else:
+        tone = "cautious"
+
+    label = _market_tone_label(tone)
+    if tone == "offensive":
+        pace = "主板广度和涨停端共振，可围绕确认后的主线分批试错；单轮新仓不超过2笔"
+        buy = "只做板块联动、回踩承接或右侧突破确认，不因标签转强直接追高"
+        sell = "强势持仓可跟随，放量滞涨或跌回关键均线时执行移动止盈"
+    elif tone == "balanced":
+        pace = "结构性偏强，先试错1笔，再根据板块承接决定是否扩仓"
+        buy = "优先选择资金与板块共振的候选，弱分支和独立冲高不买"
+        sell = "持仓强弱分层，弱于指数或板块的低效仓位优先处理"
+    elif tone == "cautious":
+        pace = "涨跌广度偏弱或分化，本轮新仓不超过1笔并保留现金"
+        buy = "只看贴近BBI/均线且有板块承接的高确定性候选，不追高"
+        sell = "弱于板块、破位或冲高回落的持仓优先降风险"
+    else:
+        pace = "只卖不买；先处理破位、亏损扩大和高位退潮信号"
+        buy = "候选股即使技术达标也先观察，等待风险端和下跌广度收缩"
+        sell = "弱于板块、跌破BBI/白线或放量回落的持仓优先减仓或退出"
+
+    average_pct = _safe_float(snapshot.get("average_change_pct"), 0.0)
+    median_pct = _safe_float(snapshot.get("median_change_pct"), 0.0)
+    breadth_line = (
+        f"定时重评：主板非ST样本{sample_count}只，上涨{up}、下跌{down}、平盘{flat}，"
+        f"涨停{limit_up}、跌停{limit_down}，均值{average_pct:+.2f}%、中位数{median_pct:+.2f}%"
+    )
+    guidance = [
+        f"风险级别：{label}",
+        breadth_line,
+        f"开仓节奏：{pace}",
+        f"买入指引：{buy}",
+        f"卖出/风控：{sell}",
+    ]
+    title = "B1定时选股实时盘面" if payload.get("schedule_slot") else "B1选股实时盘面"
+    return {
+        "title": title,
+        "time": source_time,
+        "content": "🎯 **今日买卖指引**\n" + "\n".join(f"· {line}" for line in guidance),
+        "metadata": {
+            "decision_guidance": guidance,
+            "refresh_mode": "b1_periodic",
+            "market_snapshot": {
+                "source": snapshot.get("source") or "b1_mainboard_quotes",
+                "universe": snapshot.get("universe") or "mainboard_non_st",
+                "quote_time": source_time,
+                "pool_count": pool_count,
+                "sample_count": sample_count,
+                "coverage": round(coverage, 4),
+                "up": up,
+                "down": down,
+                "flat": flat,
+                "limit_up": limit_up,
+                "limit_down": limit_down,
+                "average_change_pct": round(average_pct, 3),
+                "median_change_pct": round(median_pct, 3),
+            },
+        },
+    }
+
+
+def market_strategy_context_for_b1(
+    b1_payload: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Use the current B1 breadth snapshot first, with archived reports as fallback."""
+    live_report = _periodic_market_snapshot_report(b1_payload, now)
+    if not live_report:
+        return current_market_strategy_context(now)
+    reports = load_today_market_monitor_reports(now)
+    live_dt = parse_ts(str(live_report.get("time") or ""))
+    newest_report_dt = max(
+        (
+            parsed
+            for report in reports
+            if not _is_overnight_us_market_report(report)
+            for parsed in [parse_ts(str(report.get("time") or ""))]
+            if parsed is not None
+        ),
+        default=None,
+    )
+    if newest_report_dt is not None and live_dt is not None and newest_report_dt > live_dt:
+        return derive_market_strategy_context(reports, now)
+    reports = [live_report, *reports]
+    ctx = derive_market_strategy_context(reports, now)
+    metadata = live_report.get("metadata") if isinstance(live_report.get("metadata"), dict) else {}
+    ctx["context_kind"] = "current"
+    ctx["context_as_of"] = live_report.get("time") or ""
+    ctx["refresh_mode"] = "b1_periodic"
+    ctx["market_snapshot"] = metadata.get("market_snapshot") or {}
+    return ctx
+
+
+def refresh_market_strategy_context_for_b1(
+    b1_payload: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Persist the latest periodic context even when a B1 scan has no candidates."""
+    ctx = market_strategy_context_for_b1(b1_payload, now)
+    compact = compact_market_strategy_context(ctx)
+    state = load_state()
+    state["market_decision_context"] = compact
+    save_state(state)
+    return ctx
+
+
 def current_market_strategy_context(now: datetime | None = None) -> dict[str, Any]:
     return derive_market_strategy_context(load_today_market_monitor_reports(now), now)
 
@@ -2141,7 +2294,8 @@ def compact_market_strategy_context(ctx: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "enabled", "available", "tone", "tone_label", "phase", "max_open_positions",
         "max_new_buys_per_decision", "allow_new_buys", "source_title", "source_time",
-        "session_note", "guidance_lines", "overnight_us",
+        "session_note", "guidance_lines", "overnight_us", "context_kind", "context_as_of",
+        "refresh_mode", "market_snapshot",
     ):
         value = ctx.get(key)
         if key == "overnight_us" and not (isinstance(value, dict) and value.get("available")):
@@ -2149,6 +2303,26 @@ def compact_market_strategy_context(ctx: dict[str, Any]) -> dict[str, Any]:
         if value not in (None, "", []):
             out[key] = value
     return out
+
+
+def select_current_market_strategy_context(
+    state: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return the newest current context from reports or the last B1 refresh."""
+    report_ctx = compact_market_strategy_context(current_market_strategy_context(now))
+    saved = (state or {}).get("market_decision_context")
+    saved_ctx = dict(saved) if isinstance(saved, dict) else {}
+    report_dt = parse_ts(str(report_ctx.get("source_time") or ""))
+    saved_dt = parse_ts(str(saved_ctx.get("source_time") or ""))
+    if saved_ctx and saved_dt and (report_dt is None or saved_dt > report_dt):
+        selected = saved_ctx
+    else:
+        selected = report_ctx or saved_ctx
+    if selected:
+        selected["context_kind"] = "current"
+        selected["context_as_of"] = selected.get("source_time") or selected.get("context_as_of") or ""
+    return selected
 
 
 def format_market_strategy_context_for_prompt(ctx: dict[str, Any]) -> str:
@@ -5233,7 +5407,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     schedule_triggered_at = b1_payload.get("schedule_triggered_at") or ""
     if not force and state.get("last_b1_generated_at") == generated_at:
         return {"skipped": True, "reason": "already_decided_for_this_b1", "state": enrich_portfolio(state)}
-    market_strategy_ctx = current_market_strategy_context()
+    market_strategy_ctx = market_strategy_context_for_b1(b1_payload)
     compact_market_ctx = compact_market_strategy_context(market_strategy_ctx)
     state["market_decision_context"] = compact_market_ctx
     
@@ -5448,6 +5622,9 @@ def get_dashboard_payload() -> dict[str, Any]:
     if not rebuild_intraday_equity_curve(state, now=now) and is_a_share_session_clock(now):
         record_equity(state)
     _sync_positions_to_db(state)
+    current_market_ctx = select_current_market_strategy_context(state, now)
+    if current_market_ctx:
+        state["market_decision_context"] = current_market_ctx
     save_state(state)
     
     payload = enrich_portfolio(state)
@@ -5463,7 +5640,7 @@ def get_dashboard_payload() -> dict[str, Any]:
     except Exception: pass
     payload["market_environment"] = check_market_environment()
     payload["market_sentiment"] = check_market_sentiment()
-    payload["market_decision_context"] = compact_market_strategy_context(current_market_strategy_context())
+    payload["market_decision_context"] = current_market_ctx
     payload["trading_paused"] = state.get("trading_paused", False)
     payload["pause_reason"] = state.get("pause_reason", "")
     payload["pause_since"] = state.get("pause_since", "")

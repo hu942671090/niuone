@@ -22,6 +22,23 @@ class MultiStrategyRuleTests(unittest.TestCase):
         else:
             os.environ[screen.STRATEGY_SOURCE_ENV] = self._saved_strategy_source
 
+    def test_build_market_snapshot_reuses_full_quote_batch(self):
+        snapshot = screen.build_market_snapshot({
+            "sh600001": {"price": 11.0, "prev_close": 10.0, "change_pct": 10.0, "amount": 2e8, "quote_time": "20260710100001"},
+            "sh600002": {"price": 9.0, "prev_close": 10.0, "change_pct": -10.0, "amount": 1e8, "quote_time": "20260710100002"},
+            "sz000001": {"price": 10.1, "prev_close": 10.0, "change_pct": 1.0, "amount": 3e8, "quote_time": "20260710100003"},
+            "sz000002": {"price": 10.0, "prev_close": 10.0, "change_pct": 0.0, "amount": 4e8, "quote_time": "20260710100004"},
+        }, captured_at="2026-07-10 10:00:05", pool_count=5)
+
+        self.assertEqual(snapshot["universe"], "mainboard_non_st")
+        self.assertEqual(snapshot["sample_count"], 4)
+        self.assertEqual(snapshot["pool_count"], 5)
+        self.assertEqual(snapshot["coverage"], 0.8)
+        self.assertEqual((snapshot["up"], snapshot["down"], snapshot["flat"]), (2, 1, 1))
+        self.assertEqual((snapshot["limit_up"], snapshot["limit_down"]), (1, 1))
+        self.assertEqual(snapshot["quote_time"], "2026-07-10 10:00:04")
+        self.assertEqual(snapshot["total_amount"], 1e9)
+
     def test_recent_b1_indices_require_core_negative_j(self):
         rows = [{"j": None, "open": 10.0, "close": 10.0} for _ in range(10)]
         rows[4]["j"] = -9.5

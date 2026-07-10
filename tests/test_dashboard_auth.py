@@ -242,6 +242,61 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual([marker['is_full_exit'] for marker in sells], [False, True, False, True])
         self.assertEqual([marker['time'] for marker in markers], sorted(marker['time'] for marker in markers))
 
+    def test_b1_payload_preserves_market_snapshot(self):
+        snapshot = {'source': 'b1_mainboard_quotes', 'sample_count': 3000, 'up': 2000, 'down': 900}
+
+        payload = dashboard.normalize_b1_payload_for_trader({
+            'generated_at': '2026-07-10 10:00:05',
+            'items': [],
+            'market_snapshot': snapshot,
+            'schedule_slot': '2026-07-10 10:00',
+        })
+
+        self.assertEqual(payload['market_snapshot'], snapshot)
+        self.assertEqual(payload['schedule_slot'], '2026-07-10 10:00')
+
+    def test_no_candidate_b1_still_refreshes_and_logs_market_context(self):
+        calls = {'refresh_payload': None, 'entries': []}
+        refreshed = {
+            'tone': 'balanced',
+            'tone_label': '平衡',
+            'source_title': 'B1定时选股实时盘面',
+            'source_time': '2026-07-10 10:00:04',
+        }
+
+        class TraderStub:
+            def refresh_market_strategy_context_for_b1(self, payload):
+                calls['refresh_payload'] = payload
+                return dict(refreshed)
+
+            def compact_market_strategy_context(self, ctx):
+                return dict(ctx)
+
+            def now_ts(self):
+                return '2026-07-10 10:00:06'
+
+            def record_decision_log_entry(self, entry, mark_b1_done=False):
+                calls['entries'].append((entry, mark_b1_done))
+
+        original_get_trader = dashboard.get_trader_module
+        try:
+            dashboard.get_trader_module = lambda: TraderStub()
+            result = dashboard.run_practice_decision_logged({
+                'generated_at': '2026-07-10 10:00:05',
+                'items': [],
+                'market_snapshot': {'source': 'b1_mainboard_quotes', 'sample_count': 3000},
+                'schedule_slot': '2026-07-10 10:00',
+            })
+        finally:
+            dashboard.get_trader_module = original_get_trader
+
+        self.assertEqual(result['reason'], 'no_candidates')
+        self.assertEqual(calls['refresh_payload']['market_snapshot']['sample_count'], 3000)
+        entry, mark_done = calls['entries'][0]
+        self.assertTrue(mark_done)
+        self.assertEqual(entry['market_decision_context']['tone'], 'balanced')
+        self.assertEqual(entry['decision']['market_guidance']['source_title'], 'B1定时选股实时盘面')
+
     def test_fast_practice_payload_derives_daily_calendar_points_from_intraday_history(self):
         class TraderStub:
             def load_state(self):

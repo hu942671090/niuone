@@ -739,6 +739,132 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(ctx["min_cash_reserve_pct"], 60.0)
         self.assertEqual(ctx["buy_budget_multiplier"], 0.35)
 
+    def test_periodic_b1_snapshot_overrides_stale_report_tone(self):
+        original_loader = trader.load_today_market_monitor_reports
+        try:
+            trader.load_today_market_monitor_reports = lambda now=None, limit=3: [{
+                "title": "A股竞价盘前总结",
+                "time": "2026-07-10 09:25:06",
+                "content": "🎯 **今日买卖指引**\n· 风险级别：防守\n· 开仓节奏：上午只观察",
+            }]
+            payload = {
+                "generated_at": "2026-07-10 10:05:00",
+                "schedule_slot": "2026-07-10 10:00",
+                "market_snapshot": {
+                    "source": "b1_mainboard_quotes",
+                    "universe": "mainboard_non_st",
+                    "captured_at": "2026-07-10 10:00:05",
+                    "quote_time": "2026-07-10 10:00:04",
+                    "pool_count": 3100,
+                    "sample_count": 3000,
+                    "coverage": 0.9677,
+                    "up": 2300,
+                    "down": 600,
+                    "flat": 100,
+                    "limit_up": 80,
+                    "limit_down": 2,
+                    "average_change_pct": 1.23,
+                    "median_change_pct": 0.88,
+                },
+            }
+
+            ctx = trader.market_strategy_context_for_b1(payload, datetime(2026, 7, 10, 10, 5, 0))
+        finally:
+            trader.load_today_market_monitor_reports = original_loader
+
+        self.assertEqual(ctx["tone"], "offensive")
+        self.assertEqual(ctx["source_title"], "B1定时选股实时盘面")
+        self.assertEqual(ctx["source_time"], "2026-07-10 10:00:04")
+        self.assertEqual(ctx["refresh_mode"], "b1_periodic")
+        self.assertEqual(ctx["market_snapshot"]["up"], 2300)
+        self.assertEqual(ctx["max_open_positions"], min(trader.MAX_OPEN_POSITIONS, trader.MORNING_MAX_OPEN_POSITIONS))
+        self.assertEqual(ctx["max_new_buys_per_decision"], min(trader.MAX_NEW_BUYS_PER_DECISION, 2))
+
+    def test_periodic_b1_snapshot_with_low_coverage_falls_back(self):
+        original_current = trader.current_market_strategy_context
+        calls = {"current": 0}
+        try:
+            def fake_current(now=None):
+                calls["current"] += 1
+                return {"tone": "cautious", "tone_label": "谨慎", "source_time": "2026-07-10 09:25:06"}
+
+            trader.current_market_strategy_context = fake_current
+            ctx = trader.market_strategy_context_for_b1({
+                "market_snapshot": {
+                    "quote_time": "2026-07-10 10:00:00",
+                    "pool_count": 3000,
+                    "sample_count": 1200,
+                    "coverage": 0.4,
+                    "up": 900,
+                    "down": 250,
+                    "flat": 50,
+                    "limit_up": 40,
+                    "limit_down": 1,
+                }
+            }, datetime(2026, 7, 10, 10, 2, 0))
+        finally:
+            trader.current_market_strategy_context = original_current
+
+        self.assertEqual(calls["current"], 1)
+        self.assertEqual(ctx["tone"], "cautious")
+
+    def test_periodic_b1_defensive_snapshot_hard_blocks_new_buys(self):
+        original_loader = trader.load_today_market_monitor_reports
+        try:
+            trader.load_today_market_monitor_reports = lambda now=None, limit=3: []
+            ctx = trader.market_strategy_context_for_b1({
+                "schedule_slot": "2026-07-10 10:30",
+                "market_snapshot": {
+                    "quote_time": "2026-07-10 10:30:03",
+                    "pool_count": 3000,
+                    "sample_count": 3000,
+                    "coverage": 1.0,
+                    "up": 600,
+                    "down": 2300,
+                    "flat": 100,
+                    "limit_up": 2,
+                    "limit_down": 20,
+                },
+            }, datetime(2026, 7, 10, 10, 31, 0))
+        finally:
+            trader.load_today_market_monitor_reports = original_loader
+
+        self.assertEqual(ctx["tone"], "defensive")
+        self.assertFalse(ctx["allow_new_buys"])
+        self.assertEqual(ctx["max_new_buys_per_decision"], 0)
+
+    def test_current_market_context_prefers_newer_b1_or_report_source(self):
+        original_current = trader.current_market_strategy_context
+        try:
+            trader.current_market_strategy_context = lambda now=None: {
+                "tone": "cautious",
+                "tone_label": "谨慎",
+                "source_title": "A股午盘总结",
+                "source_time": "2026-07-10 11:40:04",
+            }
+            newer_b1 = trader.select_current_market_strategy_context({
+                "market_decision_context": {
+                    "tone": "offensive",
+                    "tone_label": "进攻",
+                    "source_title": "B1定时选股实时盘面",
+                    "source_time": "2026-07-10 13:00:05",
+                }
+            }, datetime(2026, 7, 10, 13, 1, 0))
+            older_b1 = trader.select_current_market_strategy_context({
+                "market_decision_context": {
+                    "tone": "defensive",
+                    "tone_label": "防守",
+                    "source_title": "B1定时选股实时盘面",
+                    "source_time": "2026-07-10 11:20:05",
+                }
+            }, datetime(2026, 7, 10, 11, 50, 0))
+        finally:
+            trader.current_market_strategy_context = original_current
+
+        self.assertEqual(newer_b1["tone"], "offensive")
+        self.assertEqual(older_b1["tone"], "cautious")
+        self.assertEqual(newer_b1["context_kind"], "current")
+
     def test_offensive_market_guidance_uses_qualitative_position_bias(self):
         reports = [{
             "title": "A股午盘总结",
