@@ -95,6 +95,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.API_RESPONSE_CACHE.clear()
         dashboard.API_CACHE_KEY_LOCKS.clear()
         dashboard.API_CACHE_KEY_GENERATIONS.clear()
+        dashboard.FRONTEND_FILE_CACHE.clear()
         dashboard.RATE_LIMIT_BUCKETS.clear()
         dashboard.ensure_stats_db()
 
@@ -125,7 +126,7 @@ class DashboardAuthTests(unittest.TestCase):
         admin.do_GET()
         self.assertEqual(admin.status, 200)
         admin_body = admin.wfile.getvalue().decode('utf-8')
-        self.assertIn('<script src="/static/admin.js" defer></script>', admin_body)
+        self.assertIn('<script src="/static/admin.js?v=2" defer></script>', admin_body)
         self.assertNotIn('name="admin_password"', admin_body)
         self.assertNotIn("name='env__DASHBOARD_GROK_API_KEY'", admin_body)
         self.assertIn("fetch('/api/admin/config'", ADMIN_FRONTEND)
@@ -148,19 +149,92 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard_js.do_GET()
         admin_js = FakeHandler(path='/static/admin.js')
         admin_js.do_GET()
+        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=2')
+        versioned_dashboard_js.do_GET()
 
         self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
         self.assertEqual(admin.wfile.getvalue(), (FRONTEND / 'admin.html').read_bytes())
         self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
+        self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
-        self.assertIn('max-age=300', dashboard_js.header('Cache-Control'))
+        self.assertIn('max-age=31536000', dashboard_js.header('Cache-Control'))
+        self.assertIn('immutable', dashboard_js.header('Cache-Control'))
         self.assertTrue(dashboard_js.header('ETag'))
 
         backend_source = MODULE_PATH.read_text(encoding='utf-8')
         self.assertNotIn('INDEX_HTML', backend_source)
         self.assertNotIn('ADMIN_HTML', backend_source)
         self.assertNotIn('<!doctype html>', backend_source)
+
+    def test_static_assets_reuse_compressed_payload_and_support_conditional_get(self):
+        original_compress = dashboard.gzip.compress
+        compress_calls = []
+
+        def tracked_compress(payload, *args, **kwargs):
+            compress_calls.append(len(payload))
+            return original_compress(payload, *args, **kwargs)
+
+        dashboard.gzip.compress = tracked_compress
+        try:
+            first = FakeHandler(path='/static/dashboard.js', headers={'Accept-Encoding': 'gzip'})
+            first.do_GET()
+            second = FakeHandler(path='/static/dashboard.js', headers={'Accept-Encoding': 'gzip'})
+            second.do_GET()
+
+            self.assertEqual(first.status, 200)
+            self.assertEqual(second.status, 200)
+            self.assertEqual(first.header('Content-Encoding'), 'gzip')
+            self.assertEqual(second.wfile.getvalue(), first.wfile.getvalue())
+            self.assertEqual(len(compress_calls), 1)
+
+            conditional = FakeHandler(
+                path='/static/dashboard.js',
+                headers={'If-None-Match': first.header('ETag'), 'Accept-Encoding': 'gzip'},
+            )
+            conditional.do_GET()
+            self.assertEqual(conditional.status, 304)
+            self.assertEqual(conditional.wfile.getvalue(), b'')
+            self.assertEqual(len(compress_calls), 1)
+        finally:
+            dashboard.gzip.compress = original_compress
+
+    def test_dashboard_categories_have_independent_page_routes(self):
+        expected_paths = {
+            '/',
+            '/practice',
+            '/indices',
+            '/market-monitor',
+            '/x-monitor',
+            '/us-ratings',
+        }
+        self.assertEqual(dashboard.DASHBOARD_PAGE_PATHS, expected_paths)
+        expected_page = (FRONTEND / 'index.html').read_bytes()
+        for path in sorted(expected_paths):
+            with self.subTest(path=path):
+                page = FakeHandler(path=path)
+                page.do_GET()
+                self.assertEqual(page.status, 200)
+                self.assertEqual(page.wfile.getvalue(), expected_page)
+                head = FakeHandler(path=path, method='HEAD')
+                head.do_HEAD()
+                self.assertEqual(head.status, 200)
+                self.assertEqual(head.wfile.getvalue(), b'')
+
+        missing = FakeHandler(path='/not-a-dashboard-page')
+        missing.do_GET()
+        self.assertEqual(missing.status, 404)
+        for category, path in (
+            ('practice', '/practice'),
+            ('indices', '/indices'),
+            ('market_monitor', '/market-monitor'),
+            ('x_monitor', '/x-monitor'),
+            ('us_ratings', '/us-ratings'),
+        ):
+            self.assertIn(f"{category}: '{path}'", DASHBOARD_FRONTEND)
+        self.assertIn("syncViewUrl({push:true})", DASHBOARD_FRONTEND)
+        self.assertIn("window.addEventListener('popstate'", DASHBOARD_FRONTEND)
+        self.assertIn("params.set('curve', 'daily')", DASHBOARD_FRONTEND)
 
     def test_dashboard_bootstrap_owns_visit_count_and_visitor_cookie(self):
         home = FakeHandler(path='/')
@@ -1026,17 +1100,20 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('buildPracticeCalendarRows(practiceCalendarHistoryPoints(p)', DASHBOARD_FRONTEND)
         self.assertIn('renderPracticeCurve(p.equity_history || []', DASHBOARD_FRONTEND)
 
-    def test_index_template_uses_practice_as_the_canonical_page_name(self):
-        self.assertIn("let activeCategory = initialParams.get('category') || 'practice';", DASHBOARD_FRONTEND)
+    def test_index_template_uses_independent_category_routes(self):
+        self.assertIn("let activeCategory = categoryFromLocation(initialParams);", DASHBOARD_FRONTEND)
         self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];", DASHBOARD_FRONTEND)
         self.assertIn("practice:'实战页面'", DASHBOARD_FRONTEND)
+        self.assertIn("practice: '/practice'", DASHBOARD_FRONTEND)
+        self.assertIn("indices: '/indices'", DASHBOARD_FRONTEND)
         self.assertIn("const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};", DASHBOARD_FRONTEND)
         self.assertIn('const normalized = LEGACY_CATEGORY_ALIASES[category] || category;', DASHBOARD_FRONTEND)
         self.assertIn("fetchJson('/api/practice_candidates')", DASHBOARD_FRONTEND)
         self.assertIn("actionFetch('/api/practice_candidates/refresh')", DASHBOARD_FRONTEND)
         self.assertIn('async function loadPracticePage()', DASHBOARD_FRONTEND)
         self.assertIn('function renderPracticePage()', DASHBOARD_FRONTEND)
-        self.assertIn("initialParams.get('category') !== activeCategory", DASHBOARD_FRONTEND)
+        self.assertIn("location.pathname + location.search !== currentViewUrl()", DASHBOARD_FRONTEND)
+        self.assertNotIn('href="/?category=', DASHBOARD_FRONTEND)
         self.assertNotIn('function loadB1Screen', DASHBOARD_FRONTEND)
         self.assertNotIn('function renderB1Screen', DASHBOARD_FRONTEND)
         self.assertNotIn("fetchJson('/api/b1_screen')", DASHBOARD_FRONTEND)
@@ -1159,6 +1236,77 @@ process.stdout.write(JSON.stringify({
         self.assertFalse(hit)
         self.assertEqual(json.loads(payload)['decision_model'], 'gpt-regression-test')
 
+    def test_expired_api_cache_returns_stale_while_only_one_refresh_runs(self):
+        cache_key = 'slow-market-data'
+        stale_payload = json.dumps({'version': 'stale'}).encode('utf-8')
+        dashboard.API_RESPONSE_CACHE[cache_key] = {
+            'ts': dashboard.time.time() - 11,
+            'payload': stale_payload,
+        }
+        producer_started = dashboard.threading.Event()
+        release_producer = dashboard.threading.Event()
+        producer_calls = []
+
+        def producer():
+            producer_calls.append(True)
+            producer_started.set()
+            self.assertTrue(release_producer.wait(timeout=2))
+            return {'version': 'fresh'}
+
+        payload, hit = dashboard.cache_get_json(cache_key, 10, producer)
+        self.assertTrue(hit)
+        self.assertEqual(payload, stale_payload)
+        self.assertTrue(producer_started.wait(timeout=2))
+
+        second_payload, second_hit = dashboard.cache_get_json(cache_key, 10, producer)
+        self.assertTrue(second_hit)
+        self.assertEqual(second_payload, stale_payload)
+        self.assertEqual(len(producer_calls), 1)
+
+        release_producer.set()
+        deadline = dashboard.time.time() + 2
+        while dashboard.time.time() < deadline:
+            with dashboard.API_RESPONSE_LOCK:
+                cached = dashboard.API_RESPONSE_CACHE.get(cache_key, {})
+                if cached.get('payload') != stale_payload:
+                    break
+            dashboard.time.sleep(0.01)
+        with dashboard.API_RESPONSE_LOCK:
+            refreshed = dashboard.API_RESPONSE_CACHE[cache_key]['payload']
+        self.assertEqual(json.loads(refreshed), {'version': 'fresh'})
+
+    def test_api_cache_older_than_stale_window_refreshes_synchronously(self):
+        cache_key = 'too-old-market-data'
+        original_window = dashboard.API_STALE_WHILE_REFRESH_SECONDS
+        dashboard.API_STALE_WHILE_REFRESH_SECONDS = 1
+        dashboard.API_RESPONSE_CACHE[cache_key] = {
+            'ts': dashboard.time.time() - 3,
+            'payload': json.dumps({'version': 'too-old'}).encode('utf-8'),
+        }
+        try:
+            payload, hit = dashboard.cache_get_json(cache_key, 1, lambda: {'version': 'fresh'})
+            self.assertFalse(hit)
+            self.assertEqual(json.loads(payload), {'version': 'fresh'})
+        finally:
+            dashboard.API_STALE_WHILE_REFRESH_SECONDS = original_window
+
+    def test_cold_api_cache_is_seeded_from_durable_snapshot_as_stale(self):
+        snapshot = self.tmp_path / 'sectors.json'
+        snapshot.write_text(
+            json.dumps({'generated_at': '2026-07-11 09:30:00', 'items': [{'name': '银行'}]}),
+            encoding='utf-8',
+        )
+        before = dashboard.time.time()
+        seeded = dashboard.seed_api_cache_from_json_file('sectors', snapshot, 60)
+
+        self.assertTrue(seeded)
+        cached = dashboard.API_RESPONSE_CACHE['sectors']
+        payload = json.loads(cached['payload'])
+        self.assertTrue(payload['stale_cache'])
+        self.assertEqual(payload['items'], [{'name': '银行'}])
+        self.assertLessEqual(cached['ts'], before - 60)
+        self.assertFalse(dashboard.seed_api_cache_from_json_file('sectors', snapshot, 60))
+
     def test_index_template_intraday_curve_renders_single_point_from_opening_base(self):
         self.assertIn('if (rawPoints.length < (isDailyMode ? 2 : 1))', DASHBOARD_FRONTEND)
         self.assertIn('if (sessionPoints.length >= 1)', DASHBOARD_FRONTEND)
@@ -1237,7 +1385,7 @@ process.stdout.write(JSON.stringify({
         unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
         unlocked_page.do_GET()
         self.assertEqual(unlocked_page.status, 200)
-        self.assertIn('<script src="/static/admin.js" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=2" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
 
         unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
         unlocked_api.do_GET()
@@ -1814,7 +1962,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(handler.status, 200)
         self.assertEqual(len(payload['groups']), 10)
         self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        self.assertIn('<script src="/static/admin.js" defer></script>', index_body)
+        self.assertIn('<script src="/static/admin.js?v=2" defer></script>', index_body)
         self.assertNotIn("name='env__", index_body)
         self.assertIn('function renderSettingsIndex()', ADMIN_FRONTEND)
         self.assertIn('function renderSettingsGroup(slug)', ADMIN_FRONTEND)
@@ -1838,7 +1986,7 @@ process.stdout.write(JSON.stringify({
             route = FakeHandler(path=f'/admin/settings/{slug}')
             route.do_GET()
             self.assertEqual(route.status, 200)
-            self.assertIn('<script src="/static/admin.js" defer></script>', route.wfile.getvalue().decode('utf-8'))
+            self.assertIn('<script src="/static/admin.js?v=2" defer></script>', route.wfile.getvalue().decode('utf-8'))
 
         self.assertEqual(len(groups), 10)
         self.assertEqual(len(slugs), len(set(slugs)))
@@ -1853,7 +2001,7 @@ process.stdout.write(JSON.stringify({
         locked.do_GET()
         locked_body = locked.wfile.getvalue().decode('utf-8')
         self.assertEqual(locked.status, 200)
-        self.assertIn('<script src="/static/admin.js" defer></script>', locked_body)
+        self.assertIn('<script src="/static/admin.js?v=2" defer></script>', locked_body)
         self.assertNotIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", locked_body)
 
         cookie = self.admin_cookie()
@@ -1877,7 +2025,7 @@ process.stdout.write(JSON.stringify({
         )
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        self.assertIn('<script src="/static/admin.js" defer></script>', missing.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=2" defer></script>', missing.wfile.getvalue().decode('utf-8'))
         self.assertIn('未找到该设置分组', ADMIN_FRONTEND)
 
     def test_group_save_ignores_fields_from_other_settings_groups(self):

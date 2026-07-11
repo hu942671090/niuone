@@ -70,6 +70,14 @@ FRONTEND_ASSETS = {
     "/static/admin.css": ("admin.css", "text/css; charset=utf-8"),
     "/static/admin.js": ("admin.js", "application/javascript; charset=utf-8"),
 }
+DASHBOARD_PAGE_PATHS = frozenset({
+    "/",
+    "/practice",
+    "/indices",
+    "/market-monitor",
+    "/x-monitor",
+    "/us-ratings",
+})
 LOCAL_DATA_DIR = get_local_data_dir(PROJECT_ROOT)
 DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
 CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG") or str(DASHBOARD_HOME / "config.yaml")).expanduser()
@@ -148,6 +156,11 @@ API_RESPONSE_LOCK = threading.RLock()
 API_CACHE_KEY_LOCKS: dict[str, threading.Lock] = {}
 API_CACHE_KEY_GENERATIONS: dict[str, int] = {}
 API_CACHE_MAX_ENTRIES = int(os.environ.get("DASHBOARD_API_CACHE_MAX_ENTRIES", "256") or "256")
+API_STALE_WHILE_REFRESH_SECONDS = int(
+    os.environ.get("DASHBOARD_API_STALE_WHILE_REFRESH_SECONDS", "300") or "300"
+)
+FRONTEND_FILE_CACHE: dict[str, dict[str, Any]] = {}
+FRONTEND_FILE_CACHE_LOCK = threading.RLock()
 X_MEDIA_CACHE: dict[str, dict[str, Any]] = {}
 X_MEDIA_CACHE_LOCK = threading.RLock()
 X_MEDIA_CACHE_MAX_ENTRIES = int(os.environ.get("DASHBOARD_X_MEDIA_CACHE_MAX_ENTRIES", "96") or "96")
@@ -1830,13 +1843,61 @@ def merge_records_from_db(limit: int | None = None, category: str | None = None,
             "chats": data["chats"], "categories": categories, "records": records}
 
 
+def _store_api_cache_payload(cache_key: str, payload: bytes, generation: int) -> bool:
+    with API_RESPONSE_LOCK:
+        # A producer can still be running when a settings update invalidates
+        # its key. Do not let that obsolete result repopulate the cache.
+        if API_CACHE_KEY_GENERATIONS.get(cache_key, 0) != generation:
+            return False
+        API_RESPONSE_CACHE[cache_key] = {"ts": time.time(), "payload": payload}
+        if len(API_RESPONSE_CACHE) > API_CACHE_MAX_ENTRIES:
+            oldest = sorted(API_RESPONSE_CACHE.items(), key=lambda item: float(item[1].get("ts") or 0))
+            for old_key, _ in oldest[:max(1, len(API_RESPONSE_CACHE) - API_CACHE_MAX_ENTRIES)]:
+                API_RESPONSE_CACHE.pop(old_key, None)
+                old_lock = API_CACHE_KEY_LOCKS.get(old_key)
+                if old_lock is None or not old_lock.locked():
+                    API_CACHE_KEY_LOCKS.pop(old_key, None)
+        return True
+
+
+def _refresh_api_cache(cache_key: str, producer, generation: int, key_lock: threading.Lock) -> None:
+    try:
+        result = producer()
+        payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
+        _store_api_cache_payload(cache_key, payload, generation)
+    except Exception as exc:
+        print(f"dashboard cache refresh failed for {cache_key}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    finally:
+        key_lock.release()
+
+
 def cache_get_json(cache_key: str, ttl: int, producer) -> tuple[bytes, bool]:
     now = time.time()
     with API_RESPONSE_LOCK:
         cached = API_RESPONSE_CACHE.get(cache_key)
-        if cached and now - float(cached.get("ts") or 0) < ttl:
+        cache_age = now - float(cached.get("ts") or 0) if cached else None
+        if cached and cache_age is not None and cache_age < ttl:
             return cached["payload"], True
         key_lock = API_CACHE_KEY_LOCKS.setdefault(cache_key, threading.Lock())
+        generation = API_CACHE_KEY_GENERATIONS.get(cache_key, 0)
+
+    # Once a key has produced a usable response, serve the slightly stale value
+    # immediately and refresh it once in the background. Slow quote providers no
+    # longer hold every viewer on the TTL boundary.
+    if cached and cache_age is not None and cache_age < ttl + API_STALE_WHILE_REFRESH_SECONDS:
+        if key_lock.acquire(blocking=False):
+            try:
+                threading.Thread(
+                    target=_refresh_api_cache,
+                    args=(cache_key, producer, generation, key_lock),
+                    name=f"dashboard-cache-{cache_key[:32]}",
+                    daemon=True,
+                ).start()
+            except Exception:
+                key_lock.release()
+                raise
+        return cached["payload"], True
+
     with key_lock:
         now = time.time()
         with API_RESPONSE_LOCK:
@@ -1846,18 +1907,75 @@ def cache_get_json(cache_key: str, ttl: int, producer) -> tuple[bytes, bool]:
             generation = API_CACHE_KEY_GENERATIONS.get(cache_key, 0)
         result = producer()
         payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
-        with API_RESPONSE_LOCK:
-            # A producer can still be running when a settings update invalidates
-            # its key. Do not let that obsolete result repopulate the cache.
-            if API_CACHE_KEY_GENERATIONS.get(cache_key, 0) != generation:
-                return payload, False
-            API_RESPONSE_CACHE[cache_key] = {"ts": time.time(), "payload": payload}
-            if len(API_RESPONSE_CACHE) > API_CACHE_MAX_ENTRIES:
-                oldest = sorted(API_RESPONSE_CACHE.items(), key=lambda item: float(item[1].get("ts") or 0))
-                for old_key, _ in oldest[:max(1, len(API_RESPONSE_CACHE) - API_CACHE_MAX_ENTRIES)]:
-                    API_RESPONSE_CACHE.pop(old_key, None)
-                    API_CACHE_KEY_LOCKS.pop(old_key, None)
+        _store_api_cache_payload(cache_key, payload, generation)
         return payload, False
+
+
+def frontend_file_cache_entry(filename: str) -> dict[str, Any]:
+    path = FRONTEND_DIR / filename
+    stat_before = path.stat()
+    signature = (stat_before.st_mtime_ns, stat_before.st_size)
+    with FRONTEND_FILE_CACHE_LOCK:
+        cached = FRONTEND_FILE_CACHE.get(filename)
+        if cached and cached.get("signature") == signature:
+            return cached
+
+    payload = path.read_bytes()
+    stat_after = path.stat()
+    signature_after = (stat_after.st_mtime_ns, stat_after.st_size)
+    # If the asset was replaced while it was being read, read the new version
+    # once more and cache only that result.
+    if signature_after != signature:
+        payload = path.read_bytes()
+        stat_after = path.stat()
+        signature_after = (stat_after.st_mtime_ns, stat_after.st_size)
+    signature = signature_after
+    compressed = gzip.compress(payload, compresslevel=5) if len(payload) >= GZIP_MIN_BYTES else None
+    if compressed is not None and len(compressed) >= len(payload):
+        compressed = None
+    entry = {
+        "signature": signature,
+        "payload": payload,
+        "gzip_payload": compressed,
+        "etag": '"' + hashlib.sha256(payload).hexdigest()[:20] + '"',
+    }
+    with FRONTEND_FILE_CACHE_LOCK:
+        FRONTEND_FILE_CACHE[filename] = entry
+    return entry
+
+
+def seed_api_cache_from_json_file(cache_key: str, path: Path, ttl: int, transform=None) -> bool:
+    """Seed a cold in-memory cache from the latest durable dashboard snapshot.
+
+    The entry is deliberately marked just past its TTL: the first request gets
+    useful data immediately while ``cache_get_json`` refreshes it in the
+    background through the normal producer.
+    """
+    with API_RESPONSE_LOCK:
+        if cache_key in API_RESPONSE_CACHE:
+            return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        data = dict(data)
+        if transform is not None:
+            data = transform(data)
+        if not isinstance(data, dict):
+            return False
+        data["stale_cache"] = True
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except (OSError, ValueError, TypeError):
+        return False
+
+    with API_RESPONSE_LOCK:
+        if cache_key in API_RESPONSE_CACHE:
+            return False
+        API_RESPONSE_CACHE[cache_key] = {
+            "ts": time.time() - max(0, ttl) - 0.001,
+            "payload": payload,
+        }
+    return True
 
 
 def invalidate_api_cache(*cache_keys: str) -> None:
@@ -3238,7 +3356,7 @@ class Handler(BaseHTTPRequestHandler):
         status: int = 200,
     ) -> None:
         try:
-            payload = (FRONTEND_DIR / filename).read_bytes()
+            entry = frontend_file_cache_entry(filename)
         except OSError:
             self.send_response(500)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -3248,7 +3366,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.write_response(b"frontend asset unavailable")
             return
 
-        etag = '"' + hashlib.sha256(payload).hexdigest()[:20] + '"'
+        payload = entry["payload"]
+        etag = entry["etag"]
         if self.headers.get("If-None-Match") == etag:
             self.send_response(304)
             self.send_header("Cache-Control", cache_control)
@@ -3256,7 +3375,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        body, gzipped = self.maybe_gzip_payload(payload, content_type)
+        normalized_type = content_type.split(";", 1)[0].strip().lower()
+        gzip_payload = entry.get("gzip_payload")
+        gzipped = bool(
+            gzip_payload is not None
+            and self.accepts_gzip()
+            and normalized_type in GZIP_CONTENT_TYPE_PREFIXES
+        )
+        body = gzip_payload if gzipped else payload
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", cache_control)
@@ -3273,7 +3399,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_frontend_file(
             asset[0],
             asset[1],
-            cache_control="public, max-age=300, stale-while-revalidate=86400",
+            cache_control="public, max-age=31536000, immutable",
             head_only=head_only,
         )
         return True
@@ -3393,7 +3519,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
-        if parsed.path == "/":
+        if parsed.path in DASHBOARD_PAGE_PATHS:
             self.send_frontend_page("index.html", head_only=True)
             return
         if parsed.path.startswith("/api/"):
@@ -3427,7 +3553,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/admin/notifications/test":
             self.send_method_not_allowed("POST")
             return
-        if parsed.path == "/":
+        if parsed.path in DASHBOARD_PAGE_PATHS:
             self.send_frontend_page("index.html")
             return
         if parsed.path.startswith("/api/"):
@@ -3527,6 +3653,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json_cached("indices", API_TTLS["indices"], produce_indices_data, edge_ttl=API_TTLS["indices"], browser_ttl=15)
             return
         if parsed.path == "/api/sectors":
+            seed_api_cache_from_json_file(
+                "sectors",
+                CRON_OUTPUT_DIR / "sectors_dashboard_cache.json",
+                API_TTLS["sectors"],
+            )
             self.send_json_cached("sectors", API_TTLS["sectors"], lambda: run_dashboard_helper("sectors_dashboard_api.py", {"sectors": [], "items": [], "gain_top": [], "loss_top": []}, timeout=120), edge_ttl=API_TTLS["sectors"], browser_ttl=15)
             return
         if parsed.path == "/api/hot_stocks":
@@ -3543,7 +3674,14 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return apply_hot_stocks_sort(data, sort_by)
 
-            self.send_json_cached(f"hot_stocks:{sort_by}", API_TTLS["hot_stocks"], produce_hot_stocks, edge_ttl=API_TTLS["hot_stocks"], browser_ttl=15)
+            hot_stocks_cache_key = f"hot_stocks:{sort_by}"
+            seed_api_cache_from_json_file(
+                hot_stocks_cache_key,
+                CRON_OUTPUT_DIR / "hot_stocks_dashboard_cache.json",
+                API_TTLS["hot_stocks"],
+                lambda data: apply_hot_stocks_sort(data, sort_by),
+            )
+            self.send_json_cached(hot_stocks_cache_key, API_TTLS["hot_stocks"], produce_hot_stocks, edge_ttl=API_TTLS["hot_stocks"], browser_ttl=15)
             return
         if parsed.path == "/api/us_quotes":
             params = parse_qs(parsed.query)
@@ -3558,6 +3696,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json_cached("us_sectors", API_TTLS["us_sectors"], produce_us_sector_data, edge_ttl=API_TTLS["us_sectors"], browser_ttl=30)
             return
         if parsed.path == "/api/money_flow":
+            seed_api_cache_from_json_file(
+                "money_flow",
+                CRON_OUTPUT_DIR / "money_flow_dashboard_cache.json",
+                API_TTLS["money_flow"],
+            )
             self.send_json_cached("money_flow", API_TTLS["money_flow"], lambda: run_dashboard_helper("money_flow_dashboard_api.py", {"inflow": [], "outflow": []}, timeout=120), edge_ttl=API_TTLS["money_flow"], browser_ttl=15)
             return
         if parsed.path == "/api/market_flow":

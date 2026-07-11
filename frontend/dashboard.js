@@ -13,7 +13,25 @@ let niuniuPracticeData = {positions: [], equity_history: [], trade_log: [], deci
 let practiceBenchmarksData = {items: []};
 let benchmarkOverlay = {sh000001: true, sh000300: true, sz399006: true, sh000688: true};
 const initialParams = new URLSearchParams(location.search);
-let activeCategory = initialParams.get('category') || 'practice';
+const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];
+const CATEGORY_LABELS = {all:'全部', indices:'指数行情', practice:'实战页面', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
+const CATEGORY_PATHS = {
+  practice: '/practice',
+  indices: '/indices',
+  market_monitor: '/market-monitor',
+  x_monitor: '/x-monitor',
+  us_ratings: '/us-ratings'
+};
+const PATH_CATEGORIES = Object.fromEntries(Object.entries(CATEGORY_PATHS).map(([category, path]) => [path, category]));
+const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};
+const US_FEATURE_CATEGORIES = new Set(['x_monitor', 'us_ratings']);
+const MESSAGE_CATEGORIES = ['x_monitor', 'market_monitor', 'us_ratings'];
+function categoryFromLocation(params = new URLSearchParams(location.search)) {
+  const pathCategory = PATH_CATEGORIES[location.pathname];
+  const queryCategory = params.get('category') || '';
+  return pathCategory || LEGACY_CATEGORY_ALIASES[queryCategory] || queryCategory || 'practice';
+}
+let activeCategory = categoryFromLocation(initialParams);
 let US_FEATURES_ENABLED = false;
 let indicesViewMode = initialParams.get('panel') === 'market' ? 'market' : 'index';
 let indicesMarketRegionOverride = '';
@@ -293,11 +311,6 @@ function renderPracticeRuleNoteModal(note) {
   </div>`;
 }
 const upCls = v => v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
-const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];
-const CATEGORY_LABELS = {all:'全部', indices:'指数行情', practice:'实战页面', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
-const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};
-const US_FEATURE_CATEGORIES = new Set(['x_monitor', 'us_ratings']);
-const MESSAGE_CATEGORIES = ['x_monitor', 'market_monitor', 'us_ratings'];
 function categoryAvailable(category) {
   return !US_FEATURE_CATEGORIES.has(category) || US_FEATURES_ENABLED;
 }
@@ -390,7 +403,6 @@ function messagePageLimit(category = activeCategory) {
 }
 function currentViewUrl() {
   const params = new URLSearchParams();
-  params.set('category', activeCategory);
   if (activeCategory === 'x_monitor' && xPageOffset > 0) {
     params.set('page', String(Math.floor(xPageOffset / messagePageLimit('x_monitor')) + 1));
   }
@@ -403,13 +415,17 @@ function currentViewUrl() {
   if (activeCategory === 'practice' && practicePositionMode === 'sold') {
     params.set('holdings', 'sold');
   }
+  if (activeCategory === 'practice' && practiceCurveMode === 'daily') {
+    params.set('curve', 'daily');
+  }
   if (activeCategory === 'practice' && practicePositionBriefMode) {
     params.set('brief', '1');
   }
-  return '/?' + params.toString();
+  const query = params.toString();
+  return (CATEGORY_PATHS[activeCategory] || CATEGORY_PATHS.practice) + (query ? '?' + query : '');
 }
-function syncViewUrl() {
-  history.replaceState(null, '', currentViewUrl());
+function syncViewUrl({push = false} = {}) {
+  history[push ? 'pushState' : 'replaceState'](null, '', currentViewUrl());
 }
 function messageOffset(category = activeCategory) {
   return category === 'x_monitor' ? xPageOffset : 0;
@@ -447,8 +463,15 @@ async function autoRefresh() {
   if (Date.now() - lastAutoRefreshAt < autoRefreshIntervalMs()) return;
   await load({background:true});
 }
-async function load({background=false} = {}) {
+function loadActiveCategoryData(category = activeCategory) {
+  if (category === 'indices') return loadIndices();
+  if (category === 'practice') return loadPracticePage();
+  if (category === 'market_monitor') return loadIndicesDataInBg();
+  return null;
+}
+async function load({background=false, updateTabs=true} = {}) {
   const seq = ++loadSeq;
+  const categoryAtStart = activeCategory;
   if (pendingLoadController) pendingLoadController.abort();
   const controller = new AbortController();
   pendingLoadController = controller;
@@ -456,6 +479,9 @@ async function load({background=false} = {}) {
   if (!background && !hasWarmData(activeCategory)) {
     $('feed').innerHTML = '<div class="loading">加载中…</div>';
   }
+  // Category data is independent from message counts. Start it immediately so
+  // an expensive market endpoint does not sit behind the common API request.
+  loadActiveCategoryData(categoryAtStart);
   const res = await fetch(msgUrl, {signal: controller.signal});
   const nextData = await res.json();
   if (seq !== loadSeq) return;
@@ -464,10 +490,7 @@ async function load({background=false} = {}) {
     : nextData;
   if (activeCategory === 'x_monitor') xLoadedOffset = xPageOffset;
   $('updated').textContent = data.generated_at?.slice(11) || '--';
-  renderTabs();
-  if (activeCategory === 'indices') { loadIndices(); }
-  if (activeCategory === 'practice') { loadPracticePage(); }
-  if (activeCategory === 'market_monitor') { loadIndicesDataInBg(); }
+  if (updateTabs) renderTabs();
   if (seq !== loadSeq) return;
   render();
   if (activeCategory === 'us_ratings') refreshVisibleUsQuotes();
@@ -798,9 +821,10 @@ async function loadPracticePage() {
   await Promise.allSettled(tasks);
 }
 function renderTabs() {
+  document.title = `牛牛1号 · ${CATEGORY_LABELS[activeCategory] || 'Dashboard'}`;
   $('categoryTabs').innerHTML = visibleCategoryOrder().map(key => {
     const count = (key === 'indices' || key === 'practice') ? '' : ` · ${data.categories?.[key]?.count || 0}`;
-    return `<a class="tab ${activeCategory === key ? 'active' : ''}" data-category="${key}" href="/?category=${encodeURIComponent(key)}">${CATEGORY_LABELS[key]}${count}</a>`;
+    return `<a class="tab ${activeCategory === key ? 'active' : ''}" data-category="${key}" href="${CATEGORY_PATHS[key]}">${CATEGORY_LABELS[key]}${count}</a>`;
   }).join('');
   document.querySelectorAll('.tab[data-category]').forEach(tab => tab.onclick = (event) => {
     event.preventDefault();
@@ -816,7 +840,7 @@ function renderTabs() {
       xPageOffset = 0;
       xLoadedOffset = -1;
     }
-    syncViewUrl();
+    syncViewUrl({push:true});
     renderTabs();
     // Immediate optimistic switch: show cached/placeholder page in the same click frame,
     // then hydrate with fresh API data. This removes the perceived "button pressed but
@@ -829,6 +853,35 @@ function renderTabs() {
     });
   });
 }
+function applyViewStateFromLocation() {
+  const params = new URLSearchParams(location.search);
+  activeCategory = normalizeActiveCategory(categoryFromLocation(params));
+  indicesViewMode = params.get('panel') === 'market' ? 'market' : 'index';
+  marketDayIndex = Math.max(0, Number(params.get('day') || 1) - 1);
+  xPageOffset = Math.max(0, (Number(params.get('page') || 1) - 1) * X_MONITOR_PAGE_SIZE);
+  xLoadedOffset = -1;
+  practicePositionMode = params.get('holdings') === 'sold' ? 'sold' : 'open';
+  window.practicePositionMode = practicePositionMode;
+  practiceCurveMode = params.get('curve') === 'daily' ? 'daily' : 'intraday';
+  window.practiceCurveMode = practiceCurveMode;
+  practicePositionBriefMode = params.get('brief') === '1';
+  window.practicePositionBriefMode = practicePositionBriefMode;
+  usRatingDayIndex = 0;
+  ratingExpandedRowId = '';
+  xExpandedRecordKey = '';
+  marketExpandedRecordKey = '';
+}
+window.addEventListener('popstate', () => {
+  applyViewStateFromLocation();
+  if (location.pathname + location.search !== currentViewUrl()) syncViewUrl();
+  renderTabs();
+  if (hasWarmData(activeCategory)) render();
+  else $('feed').innerHTML = '<div class="loading">加载中…</div>';
+  load({background:true}).catch(err => {
+    if (err && err.name === 'AbortError') return;
+    console.error(err);
+  });
+});
 function filtered() {
   return (data.records || []).filter(r => {
     if (activeCategory !== 'all' && r.category !== activeCategory) return false;
@@ -1004,6 +1057,7 @@ function toggleBenchmark(symbol) {
 function setPracticeCurveMode(mode) {
   practiceCurveMode = mode === 'daily' ? 'daily' : 'intraday';
   window.practiceCurveMode = practiceCurveMode;
+  syncViewUrl();
   if (activeCategory === 'practice') render();
   saveViewState();
 }
@@ -3801,13 +3855,29 @@ async function loadDashboardBootstrap() {
 }
 
 async function startDashboard() {
-  await loadDashboardBootstrap();
-  activeCategory = normalizeActiveCategory(activeCategory);
   restoreViewState();
-  if (initialParams.has('category') && initialParams.get('category') !== activeCategory) syncViewUrl();
+  const needsFeatureCheck = US_FEATURE_CATEGORIES.has(activeCategory);
+  const bootstrapPromise = loadDashboardBootstrap();
+  const reportLoadError = err => { if (!err || err.name !== 'AbortError') console.error(err); };
+  let initialLoadPromise = null;
+
+  // Native dashboard pages do not depend on the feature flags returned by the
+  // bootstrap endpoint, so their data can begin loading in parallel with it.
+  if (!needsFeatureCheck) {
+    if (hasWarmData(activeCategory)) render();
+    initialLoadPromise = load({updateTabs:false});
+    initialLoadPromise.catch(reportLoadError);
+  }
+
+  await bootstrapPromise;
+  activeCategory = normalizeActiveCategory(activeCategory);
+  if (location.pathname + location.search !== currentViewUrl()) syncViewUrl();
   renderTabs();
   if (hasWarmData(activeCategory)) render();
-  load().catch(err => { if (!err || err.name !== 'AbortError') console.error(err); });
+  if (!initialLoadPromise) {
+    initialLoadPromise = load();
+    initialLoadPromise.catch(reportLoadError);
+  }
   setInterval(() => autoRefresh().catch(err => { if (!err || err.name !== 'AbortError') console.error(err); }), AUTO_REFRESH_TICK_MS);
 }
 
