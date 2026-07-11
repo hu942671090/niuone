@@ -313,6 +313,7 @@ For platform-specific status, restart, uninstall, and unattended-operation instr
 ```text
 .
 ├── app/                    # Dashboard, data adapters, and task source code
+│   └── strategies/         # Strategy registry, scoring, selection, attribution, exits, and prompts
 ├── config/                 # Runtime policies and security conventions
 ├── docs/                   # Deployment, operation, and research documentation
 ├── scripts/                # Validation, deployment, and standalone-task scripts

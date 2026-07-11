@@ -30,7 +30,7 @@ from typing import Any
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
-from strategy_registry import (
+from strategies.registry import (
     PRESET_STRATEGY_TEXT_ENV,
     PERSONA_STRATEGY_ENV,
     STRATEGY_SOURCE_ENV,
@@ -47,6 +47,32 @@ from strategy_registry import (
     known_strategy_ids,
     strategy_prompt_labels,
 )
+from strategies.attribution import (
+    EXIT_RULE_LABELS,
+    _append_strategy_mark_history,
+    apply_entry_strategy_mark,
+    apply_exit_strategy_mark,
+    build_entry_strategy_mark,
+    build_exit_strategy_mark,
+    buy_strategy_label,
+    classify_buy_strategy,
+    classify_exit_rule,
+    compact_position_strategy_mark,
+)
+from strategies.exits import evaluate_strategy_time_exit
+from strategies.performance import (
+    _add_perf_open_position,
+    _add_perf_trade,
+    _empty_perf_bucket,
+    _finalize_perf,
+    latest_buy_strategy_for_code,
+    track_strategy_performance,
+)
+from strategies.policy import (
+    candidate_buy_blockers as _strategy_candidate_buy_blockers,
+    strategy_position_limit_pct as _strategy_position_limit_pct,
+)
+from strategies.prompts import build_strategy_prompt_sections, format_preset_strategy_section
 
 try:
     import yaml  # type: ignore
@@ -1368,29 +1394,14 @@ def position_pct_of_equity(value: float | int | None, total_equity: float | int 
 
 
 def strategy_position_limit_pct(strategy: str) -> float:
-    return min(
-        MAX_SINGLE_POSITION_PCT,
-        float(STRATEGY_POSITION_LIMIT_PCT.get(strategy or "", MAX_SINGLE_POSITION_PCT)),
-    )
+    return _strategy_position_limit_pct(strategy, MAX_SINGLE_POSITION_PCT)
 
 
 def candidate_buy_blockers(candidate: dict[str, Any] | None) -> list[str]:
-    if not candidate:
-        return ["买入标的不在本轮交易候选池"]
-    blockers = [str(x) for x in (candidate.get("hard_blockers") or []) if str(x).strip()]
-    raw_score = candidate.get("best_score")
-    if raw_score is None:
-        raw_score = candidate.get("score")
-    score = _safe_float(raw_score, 0.0)
-    threshold = _safe_float(candidate.get("entry_threshold"), 8.0)
-    if score < threshold:
-        blockers.append(f"评分{score:g}<基准{threshold:g}")
-    if candidate.get("actionable") is False:
-        blockers.append("候选未通过战法硬过滤")
-    dist = candidate.get("distance_pct")
-    if dist is not None and _safe_float(dist, 99.0) > COMMON_MAX_BBI_DISTANCE_PCT:
-        blockers.append(f"距BBI>{COMMON_MAX_BBI_DISTANCE_PCT}%")
-    return blockers
+    return _strategy_candidate_buy_blockers(
+        candidate,
+        max_bbi_distance_pct=COMMON_MAX_BBI_DISTANCE_PCT,
+    )
 
 
 def candidate_is_buyable(candidate: dict[str, Any] | None) -> bool:
@@ -2915,349 +2926,6 @@ def get_volatility_adjustment(code: str) -> float:
         return 1.0
 
 
-def classify_buy_strategy(reason: str = "", candidate: dict[str, Any] | None = None) -> str:
-    """Classify the entry tactic independently from the later exit rule."""
-    if candidate:
-        raw_strategy = str(candidate.get("buy_strategy") or candidate.get("best_strategy") or candidate.get("strategy") or "").strip()
-        if raw_strategy in known_strategy_ids():
-            return raw_strategy
-        reason = " ".join([
-            reason,
-            str(candidate.get("score_basis") or ""),
-            str(candidate.get("best_strategy") or ""),
-            str(candidate.get("verdict") or ""),
-        ])
-
-    text = str(reason or "")
-    matched = classify_strategy_text(text)
-    if matched:
-        return matched
-    if "回踩" in text and "卖出" not in text:
-        return "trend_pullback"
-    return "unknown_buy"
-
-
-def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
-    """Classify why a position was closed, separate from the entry tactic."""
-    signal = str(exit_signal or "").strip()
-    if signal:
-        if signal in {"shaofu_entry_stop", "hard_stop"}:
-            return "stop_loss"
-        if signal in {"take_profit", "partial_take_profit", "luzhu_half"}:
-            return "take_profit"
-        if signal in {"profit_giveback", "atr_chandelier", "breakeven_trail", "profit_to_loss"}:
-            return "profit_protection"
-        if signal in {"s1_distribution", "s2_macd_divergence", "s3_last_escape", "chuhuo_wushi"}:
-            return "top_escape"
-        if signal in {
-            "z_dead_cross", "z_white_break", "s1_reclaim_failed", "s1_bbi_failed",
-            "bbi_breakdown", "donchian_low_break",
-        }:
-            return "technical_break"
-        if signal in {"sell_score_exit", "sell_score_reduce"}:
-            return "sell_score"
-        if signal in {"no_progress", "max_hold_days", "stale_loser", "stale_below_bbi"}:
-            return "no_progress"
-
-    text = str(reason or "")
-    if "止损" in text or "破入场止损" in text:
-        return "stop_loss"
-    if "止盈清仓" in text or "第一批止盈" in text or "卤煮止盈" in text:
-        return "take_profit"
-    if "峰值回撤" in text or "ATR吊灯" in text or "移动止损保本" in text or "盈转亏" in text:
-        return "profit_protection"
-    if "S1" in text or "S2" in text or "S3" in text or "逃顶" in text or "出货五式" in text:
-        return "top_escape"
-    if "卖出评分" in text or "防卖飞评分" in text:
-        return "sell_score"
-    if "BBI" in text or "白线" in text or "死叉" in text or "低点跌破" in text or "趋势确认失效" in text:
-        return "technical_break"
-    if "未兑现" in text or "低效持仓" in text or "持仓到期" in text or "次日不涨" in text or "未延续" in text:
-        return "no_progress"
-    if "调仓" in text or "仓位" in text or "硬约束" in text:
-        return "position_adjust"
-    if "模型卖出" in text:
-        return "model_sell"
-    return "other_exit"
-
-
-EXIT_RULE_LABELS: dict[str, str] = {
-    "stop_loss": "止损",
-    "take_profit": "止盈",
-    "profit_protection": "盈利保护",
-    "top_escape": "逃顶/出货",
-    "technical_break": "技术破位",
-    "sell_score": "卖出评分",
-    "no_progress": "信号未兑现",
-    "position_adjust": "仓位调整",
-    "model_sell": "模型卖出",
-    "other_exit": "其他卖出",
-}
-
-
-def buy_strategy_label(strategy_id: str) -> str:
-    if strategy_id == "mixed":
-        return "混合买入"
-    if strategy_id == "unknown_buy":
-        return "未识别买入"
-    return str(STRATEGY_DEFINITIONS.get(strategy_id, {}).get("label") or strategy_id or "未标记")
-
-
-def build_entry_strategy_mark(
-    strategy_id: str,
-    reason: str = "",
-    *,
-    source: str = "BUY",
-    component_strategy: str = "",
-    marked_at: str | None = None,
-) -> dict[str, Any]:
-    strategy_id = str(strategy_id or "unknown_buy").strip() or "unknown_buy"
-    mark = {
-        "strategy_id": strategy_id,
-        "label": buy_strategy_label(strategy_id),
-        "source": source,
-        "marked_at": marked_at or now_ts(),
-        "reason": _compact_text(reason, 220),
-    }
-    if component_strategy:
-        mark["component_strategy_id"] = component_strategy
-        mark["component_label"] = buy_strategy_label(component_strategy)
-    return mark
-
-
-def build_exit_strategy_mark(
-    entry_strategy: str,
-    exit_rule: str,
-    reason: str = "",
-    *,
-    source: str = "SELL",
-    marked_at: str | None = None,
-) -> dict[str, Any]:
-    exit_rule = str(exit_rule or "other_exit").strip() or "other_exit"
-    entry_strategy = str(entry_strategy or "unknown_buy").strip() or "unknown_buy"
-    return {
-        "entry_strategy_id": entry_strategy,
-        "entry_label": buy_strategy_label(entry_strategy),
-        "exit_rule": exit_rule,
-        "exit_label": EXIT_RULE_LABELS.get(exit_rule, exit_rule),
-        "source": source,
-        "marked_at": marked_at or now_ts(),
-        "reason": _compact_text(reason, 220),
-    }
-
-
-def _append_strategy_mark_history(pos: dict[str, Any], mark: dict[str, Any]) -> None:
-    history = pos.setdefault("strategy_mark_history", [])
-    if not isinstance(history, list):
-        history = []
-        pos["strategy_mark_history"] = history
-    history.append(mark)
-    del history[:-8]
-
-
-def apply_entry_strategy_mark(
-    pos: dict[str, Any],
-    strategy_id: str,
-    reason: str,
-    *,
-    source: str = "BUY",
-    component_strategy: str = "",
-) -> dict[str, Any]:
-    mark = build_entry_strategy_mark(strategy_id, reason, source=source, component_strategy=component_strategy)
-    pos["strategy_mark"] = mark
-    pos["strategy_mark_id"] = mark["strategy_id"]
-    pos["strategy_mark_label"] = mark["label"]
-    pos["strategy_mark_reason"] = mark["reason"]
-    pos["strategy_marked_at"] = mark["marked_at"]
-    _append_strategy_mark_history(pos, {"action": "BUY", **mark})
-    return mark
-
-
-def apply_exit_strategy_mark(
-    pos: dict[str, Any],
-    entry_strategy: str,
-    exit_rule: str,
-    reason: str,
-    *,
-    source: str = "SELL",
-) -> dict[str, Any]:
-    mark = build_exit_strategy_mark(entry_strategy, exit_rule, reason, source=source)
-    pos["last_exit_rule"] = mark["exit_rule"]
-    pos["last_exit_label"] = mark["exit_label"]
-    pos["last_exit_reason"] = mark["reason"]
-    pos["last_exit_marked_at"] = mark["marked_at"]
-    pos["last_exit_strategy_mark"] = mark
-    _append_strategy_mark_history(pos, {"action": "SELL", **mark})
-    return mark
-
-
-def compact_position_strategy_mark(pos: dict[str, Any], fallback_strategy: str = "") -> dict[str, Any]:
-    mark = pos.get("strategy_mark") if isinstance(pos.get("strategy_mark"), dict) else {}
-    strategy_id = str(
-        mark.get("strategy_id")
-        or pos.get("strategy_mark_id")
-        or pos.get("buy_strategy")
-        or fallback_strategy
-        or "unknown_buy"
-    ).strip() or "unknown_buy"
-    return {
-        "strategy_id": strategy_id,
-        "label": mark.get("label") or pos.get("strategy_mark_label") or buy_strategy_label(strategy_id),
-        "reason": mark.get("reason") or pos.get("strategy_mark_reason") or _compact_text(pos.get("entry_reason"), 220),
-        "marked_at": mark.get("marked_at") or pos.get("strategy_marked_at") or "",
-        "source": mark.get("source") or "STATE",
-    }
-
-
-def _empty_perf_bucket() -> dict[str, Any]:
-    return {
-        "wins": 0, "losses": 0, "flats": 0, "total_pnl": 0.0, "trades": 0,
-        "open_wins": 0, "open_losses": 0, "open_flats": 0, "open_pnl": 0.0, "open_trades": 0,
-        "items": [],
-    }
-
-
-def _add_perf_trade(perf: dict[str, dict[str, Any]], key: str, pnl: float, item: dict[str, Any] | None = None) -> None:
-    bucket = perf.setdefault(key or "unknown", _empty_perf_bucket())
-    bucket["trades"] += 1
-    if pnl > 0:
-        bucket["wins"] += 1
-    elif pnl < 0:
-        bucket["losses"] += 1
-    else:
-        bucket["flats"] += 1
-    bucket["total_pnl"] += pnl
-    if item:
-        bucket.setdefault("items", []).append(item)
-
-
-def _add_perf_open_position(perf: dict[str, dict[str, Any]], key: str, pnl: float) -> None:
-    bucket = perf.setdefault(key or "unknown", _empty_perf_bucket())
-    bucket["open_trades"] += 1
-    if pnl > 0:
-        bucket["open_wins"] += 1
-    elif pnl < 0:
-        bucket["open_losses"] += 1
-    else:
-        bucket["open_flats"] += 1
-    bucket["open_pnl"] += pnl
-
-
-def _finalize_perf(perf: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    finalized: dict[str, dict[str, Any]] = {}
-    for key, bucket in perf.items():
-        total = int(bucket.get("trades") or 0)
-        wins = int(bucket.get("wins") or 0)
-        open_total = int(bucket.get("open_trades") or 0)
-        open_wins = int(bucket.get("open_wins") or 0)
-        row = dict(bucket)
-        row["total_pnl"] = round(float(row.get("total_pnl") or 0), 2)
-        row["open_pnl"] = round(float(row.get("open_pnl") or 0), 2)
-        row["combined_pnl"] = round(float(row.get("total_pnl") or 0) + float(row.get("open_pnl") or 0), 2)
-        row["trigger_count"] = total
-        row["win_rate"] = round(wins / total * 100, 1) if total > 0 else 0
-        row["open_win_rate"] = round(open_wins / open_total * 100, 1) if open_total > 0 else 0
-        row["avg_pnl"] = round(float(row["total_pnl"]) / total, 2) if total > 0 else 0
-        row["items"] = sorted(row.get("items") or [], key=lambda item: str(item.get("time") or ""), reverse=True)
-        finalized[key] = row
-    return finalized
-
-
-def latest_buy_strategy_for_code(state: dict[str, Any], code: str) -> str:
-    code = normalize_code(code)
-    for trade in reversed(state.get("trade_log", []) or []):
-        if str(trade.get("action") or "").upper() != "BUY":
-            continue
-        if normalize_code(trade.get("code") or "") != code:
-            continue
-        return str(trade.get("buy_strategy") or classify_buy_strategy(str(trade.get("reason") or "")))
-    return ""
-
-
-def track_strategy_performance(state: dict[str, Any]) -> dict[str, Any]:
-    """Track entry tactics with open P/L, and closed exits by rule."""
-    trade_log = sorted(
-        [t for t in (state.get("trade_log", []) or []) if isinstance(t, dict)],
-        key=lambda t: str(t.get("time") or ""),
-    )
-
-    entry_perf: dict[str, dict[str, Any]] = {}
-    exit_perf: dict[str, dict[str, Any]] = {}
-    latest_entry_by_code: dict[str, str] = {}
-    total_closed = 0
-    total_pnl = 0.0
-    total_open_positions = 0
-    total_open_pnl = 0.0
-
-    for trade in trade_log:
-        action = str(trade.get("action") or "").upper()
-        code = normalize_code(trade.get("code") or "")
-        reason = str(trade.get("reason") or "")
-        if action == "BUY":
-            latest_entry_by_code[code] = str(trade.get("buy_strategy") or classify_buy_strategy(reason))
-            continue
-        if action != "SELL":
-            continue
-
-        pnl = float(trade.get("pnl") or 0)
-        entry_strategy = str(trade.get("buy_strategy") or trade.get("entry_strategy") or latest_entry_by_code.get(code) or "")
-        if not entry_strategy:
-            entry_strategy = classify_buy_strategy(reason)
-        exit_rule = str(trade.get("exit_rule") or classify_exit_rule(reason, trade.get("exit_signal")))
-        exit_item = {
-            "time": trade.get("time") or "",
-            "code": code,
-            "name": trade.get("name") or "",
-            "shares": int(trade.get("shares") or 0),
-            "price": round(float(trade.get("price") or 0), 3),
-            "pnl": round(pnl, 2),
-            "pnl_pct": trade.get("pnl_pct"),
-            "reason": reason,
-            "buy_strategy": entry_strategy,
-        }
-
-        _add_perf_trade(entry_perf, entry_strategy, pnl)
-        _add_perf_trade(exit_perf, exit_rule, pnl, exit_item)
-        total_closed += 1
-        total_pnl += pnl
-
-    for code, pos in (state.get("positions") or {}).items():
-        if not isinstance(pos, dict):
-            continue
-        qty = position_qty(pos)
-        if qty <= 0:
-            continue
-        try:
-            avg_cost = float(pos.get("avg_cost") or 0)
-            price = float(pos.get("last_price") or pos.get("close") or avg_cost or 0)
-        except Exception:
-            continue
-        if avg_cost <= 0 or price <= 0:
-            continue
-        norm_code = normalize_code(code or pos.get("code") or "")
-        entry_strategy = str(
-            pos.get("buy_strategy")
-            or latest_entry_by_code.get(norm_code)
-            or classify_buy_strategy(str(pos.get("entry_reason") or ""))
-        )
-        open_pnl = (price - avg_cost) * qty
-        _add_perf_open_position(entry_perf, entry_strategy, open_pnl)
-        total_open_positions += 1
-        total_open_pnl += open_pnl
-
-    return {
-        "buy_strategy": _finalize_perf(entry_perf),
-        "exit_rule": _finalize_perf(exit_perf),
-        "summary": {
-            "closed_trades": total_closed,
-            "total_pnl": round(total_pnl, 2),
-            "open_positions": total_open_positions,
-            "open_pnl": round(total_open_pnl, 2),
-            "combined_pnl": round(total_pnl + total_open_pnl, 2),
-        },
-    }
-
-
 def get_adaptive_params() -> dict[str, float]:
     """根据市场情绪自适应调整参数。"""
     sent = check_market_sentiment()
@@ -3752,22 +3420,21 @@ def evaluate_sell_signal(
     if max_pnl_pct > 0.8 and pnl_pct <= 0:
         return _sell_signal(f"盈转亏退出 (最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)", "profit_to_loss")
     entry_strategy = str(pos.get("buy_strategy") or "")
-    if b3_exit_allowed and entry_strategy == "b3_accelerate" and hold_days >= 1 and max_pnl_pct < 1.0 and pnl_pct <= 0:
-        return _sell_signal(
-            f"B3次日不涨离场 ({hold_days}d {B3_EXIT_HHMM}开盘检查，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
-            "b3_next_day_no_progress",
-        )
+    strategy_time_exit = evaluate_strategy_time_exit(
+        entry_strategy=entry_strategy,
+        hold_days=hold_days,
+        max_pnl_pct=max_pnl_pct,
+        pnl_pct=pnl_pct,
+        time_exit_allowed=time_exit_allowed,
+        b3_exit_allowed=bool(b3_exit_allowed),
+        b3_exit_hhmm=B3_EXIT_HHMM,
+        time_exit_hhmm=TIME_EXIT_HHMM,
+        no_progress_hold_days=NO_PROGRESS_HOLD_DAYS,
+        no_progress_max_pnl_pct=NO_PROGRESS_MAX_PNL_PCT,
+    )
+    if strategy_time_exit:
+        return strategy_time_exit
     if time_exit_allowed:
-        if entry_strategy == "b2_confirm" and hold_days >= 2 and max_pnl_pct < 2.0 and pnl_pct <= 0.5:
-            return _sell_signal(
-                f"B2确认未延续离场 ({hold_days}d {TIME_EXIT_HHMM}尾盘检查，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
-                "b2_no_follow_through",
-            )
-        if entry_strategy == "super_b1" and hold_days >= NO_PROGRESS_HOLD_DAYS and max_pnl_pct < NO_PROGRESS_MAX_PNL_PCT:
-            return _sell_signal(
-                f"超级B1只赌一次未兑现离场 ({hold_days}d {TIME_EXIT_HHMM}尾盘检查，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
-                "super_b1_no_progress",
-            )
         if hold_days >= NO_PROGRESS_HOLD_DAYS and max_pnl_pct < NO_PROGRESS_MAX_PNL_PCT and pnl_pct <= 0:
             return _sell_signal(f"买入后{hold_days}日未兑现离场 ({TIME_EXIT_HHMM}尾盘检查，最高盈利{max_pnl_pct:.1f}%，先收队)", "no_progress")
 
@@ -4561,25 +4228,6 @@ def active_strategy_ids_for_decision() -> set[str]:
     return enabled_strategy_ids(os.environ.get(PERSONA_STRATEGY_ENV), os.environ.get(STRATEGY_SOURCE_ENV))
 
 
-def format_preset_strategy_section(source: str, preset_text: str) -> str:
-    if source != STRATEGY_SOURCE_PRESET_TEXT:
-        return "预设文字策略：本轮设置页未启用。"
-    if not preset_text:
-        return (
-            "预设文字策略（当前激活）：未填写预设文字。"
-            "本轮不得新开仓，只能按既有持仓风控卖出或HOLD。"
-        )
-    return f"""预设文字策略（当前激活）：
-用户原文：
-{preset_text}
-
-执行方式：
-1. 先将用户原文分析并优化成清晰的选股条件、买入触发、卖出/止损止盈、仓位和时间纪律。
-2. 将优化后的规则作为本轮主策略，用它筛选候选股并决定买卖；内置策略偏好本轮不生效，基础策略只作为候选池。
-3. 若用户规则含糊、互相冲突或突破A股交易/账户风控硬约束，按更保守的解释执行；无法确认则HOLD。
-4. 返回JSON的summary和reason里简短体现预设文字策略的核心规则。"""
-
-
 def load_decision_model_config() -> tuple[str, str]:
     # Provider selection: most models use the configured OpenAI-compatible endpoint;
     # this legacy alias keeps the OpenCode Zen free-model path working.
@@ -4628,10 +4276,21 @@ def call_model_decision(
     # 多战法上下文：统计战法分布，给每个候选标注最优战法
     strategy_source = current_strategy_source()
     preset_strategy_text = current_preset_strategy_text()
-    preset_strategy_section = format_preset_strategy_section(strategy_source, preset_strategy_text)
-    strategy_source_label = "预设文字策略" if strategy_source == STRATEGY_SOURCE_PRESET_TEXT else "内置策略"
     active_strategy_ids = active_strategy_ids_for_decision()
-    strategy_labels = strategy_prompt_labels(active_strategy_ids)
+    strategy_prompt_sections = build_strategy_prompt_sections(
+        strategy_source,
+        preset_strategy_text,
+        active_strategy_ids,
+        b3_exit_hhmm=B3_EXIT_HHMM,
+        time_exit_hhmm=TIME_EXIT_HHMM,
+    )
+    strategy_source_label = strategy_prompt_sections["strategy_source_label"]
+    strategy_labels = strategy_prompt_sections["strategy_labels"]
+    preset_strategy_section = strategy_prompt_sections["preset_strategy_section"]
+    zettaranc_strategy_section = strategy_prompt_sections["zettaranc_strategy_section"]
+    base_strategy_section = strategy_prompt_sections["base_strategy_section"]
+    persona_strategy_section = strategy_prompt_sections["persona_strategy_section"]
+    position_limit_desc = strategy_prompt_sections["position_limit_desc"]
     portfolio_positions = [p for p in (portfolio.get("positions") or []) if isinstance(p, dict)]
     position_by_code = {
         normalize_code(pos.get("code") or ""): pos
@@ -4674,51 +4333,6 @@ def call_model_decision(
             f"风险:{','.join(c.get('risk_flags',[]) or ['无'])}"
         )
     held_candidates_section = "\n".join(held_candidate_lines) if held_candidate_lines else "（无当前持仓进入本轮候选池）"
-    position_limit_desc = "、".join(
-        f"{strategy_labels.get(strategy_id, strategy_id).split('（', 1)[0]}≤{limit:g}%"
-        for strategy_id, limit in sorted(
-            STRATEGY_POSITION_LIMIT_PCT.items(),
-            key=lambda item: int(STRATEGY_DEFINITIONS.get(item[0], {}).get("display_order", 999)),
-        )
-        if strategy_id in active_strategy_ids
-    )
-    persona_strategy_lines = []
-    for strategy_id, definition in sorted(
-        STRATEGY_DEFINITIONS.items(),
-        key=lambda item: int(item[1].get("display_order", 999)),
-    ):
-        if definition.get("family") != "persona" or definition.get("persona") == "zettaranc" or strategy_id not in active_strategy_ids:
-            continue
-        profile = definition.get("profile") or {}
-        heuristics = profile.get("decision_heuristics") or []
-        heuristic_text = "；纪律：" + "；".join(str(item) for item in heuristics) if heuristics else ""
-        persona_strategy_lines.append(
-            f"- {definition.get('label')} — {definition.get('desc')}；定位：{profile.get('score_basis', '-')}{heuristic_text}"
-        )
-    zettaranc_enabled = any(
-        STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona") == "zettaranc"
-        for strategy_id in active_strategy_ids
-    )
-    zettaranc_strategy_section = f"""Z哥评分基准（永不套牢优先）：
-1. B3中继：确定性最高但盈亏比最低，只做贴近B2、振幅小、J不过热的箭在弦上，T+1 {B3_EXIT_HHMM}开盘不涨走
-2. B2确认：必须放量长阳、一阳穿多线、J<55、B1后3日内；偏滞后或离BBI远就是追高，不买；T+2 {TIME_EXIT_HHMM}尾盘不延续走
-3. 少妇B1：交易级B1按J≤-10执行；J≤12但未到负值只观察。必须缩量、N型上移、黄线/BBI附近、上方压力不重；3天不涨走
-4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑，未兑现到窗口日{TIME_EXIT_HHMM}尾盘走
-
-Z哥卖出风控（属于Z哥体系）：
-- 买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护
-- B3仅在{B3_EXIT_HHMM}做开盘离场检查，B2/超级B1仅在{TIME_EXIT_HHMM}做尾盘离场检查""" if zettaranc_enabled else "Z哥：本轮设置页未启用，Z哥买入战法和卖出风控不作为本轮新增仓依据。"
-    base_strategy_enabled = any(
-        STRATEGY_DEFINITIONS.get(strategy_id, {}).get("family") == "local"
-        for strategy_id in active_strategy_ids
-    )
-    base_strategy_section = """基础策略：
-1. 突破确认：优先看有效突破和回踩不破，再作为确认仓处理
-2. 趋势回踩：强趋势股回踩BBI/EMA不破，按低吸仓处理""" if base_strategy_enabled else "基础策略：本轮设置页未启用。"
-    if strategy_source == STRATEGY_SOURCE_PRESET_TEXT:
-        persona_strategy_section = "- 本轮设置页未启用人格策略"
-    else:
-        persona_strategy_section = "\n".join(persona_strategy_lines) or "- 暂无启用的拟人化扩展策略"
     decision_portfolio = compact_portfolio_for_decision(portfolio)
     decision_intelligence_ctx = safe_decision_intelligence_context(
         portfolio,

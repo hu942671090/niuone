@@ -101,14 +101,25 @@ Local configuration is stored in `.local-data/dashboard.env` by default. This fi
 
 ## 6. Extending Built-in Strategies
 
-Strategy metadata is centralized in `app/strategy_registry.py`. To add a strategy:
+Strategy code is centralized under `app/strategies/`:
 
-1. Add the strategy group and its `label`, `color`, `desc`, `scorer`, `profile`, `position_limit_pct`, and `aliases` to the registry.
-2. Implement the corresponding `score_xxx(rows)` scoring function in `app/multi_strategy_screen.py`.
-3. Add automated tests for scoring boundaries, empty data, and abnormal market data.
-4. Run `./scripts/validate.sh` to complete validation.
+- `registry.py` owns metadata, groups, aliases, enablement, and settings options.
+- `scoring/` owns indicators, hard gates, individual scorers, and the multi-strategy comparison engine.
+- `selection.py` and `policy.py` own candidate eligibility, strategy-aware display selection, and position policy.
+- `attribution.py` and `performance.py` own strategy marks, attribution, and performance summaries.
+- `exits.py` and `prompts.py` own strategy-specific exit rules and model-prompt fragments.
 
-The scanner iterates over the scorers in the active strategy group and outputs `strategy_meta` to the dashboard and simulated-review module.
+`app/multi_strategy_screen.py` now keeps only market-data retrieval, full-market scan orchestration, and caching. `app/niuniu_practice_trader.py` keeps account, risk-control, and simulated-execution orchestration. The old `app/strategy_registry.py` is a compatibility import shim; new code should import from the `strategies` package.
+
+To add a built-in strategy:
+
+1. Add its `label`, `color`, `desc`, `scorer`, `profile`, `position_limit_pct`, and `aliases` in `app/strategies/registry.py`.
+2. Implement `score_xxx(rows)` in the appropriate file under `app/strategies/scoring/` and register it in the explicit map in `scoring/__init__.py`.
+3. If it has dedicated exit or decision semantics, update only `exits.py` or `prompts.py`; do not put those rules back into the scanner or trader.
+4. Add automated tests for scoring boundaries, empty data, and abnormal market data.
+5. Run `./scripts/validate.sh` to complete validation.
+
+The scanner iterates over the enabled scorers and outputs `strategy_meta` to the dashboard and simulated-review module.
 
 ## 7. Usage Boundaries
 

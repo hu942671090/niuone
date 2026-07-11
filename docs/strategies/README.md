@@ -101,14 +101,25 @@ NiuOne 将研究流程拆分为四层：
 
 ## 6. 扩展内置策略
 
-策略元数据集中在 `app/strategy_registry.py`。新增策略时：
+策略代码统一放在 `app/strategies/`：
 
-1. 在注册表中增加策略组及其 `label`、`color`、`desc`、`scorer`、`profile`、`position_limit_pct` 和 `aliases`；
-2. 在 `app/multi_strategy_screen.py` 中实现对应的 `score_xxx(rows)` 评分函数；
-3. 为评分边界、空数据和异常行情补充自动化测试；
-4. 运行 `./scripts/validate.sh` 完成验证。
+- `registry.py`：策略元数据、分组、别名、启停和设置项；
+- `scoring/`：指标、硬过滤、各策略评分器及多策略比较引擎；
+- `selection.py`、`policy.py`：候选准入、展示筛选与仓位策略；
+- `attribution.py`、`performance.py`：策略标记、归因和绩效汇总；
+- `exits.py`、`prompts.py`：策略专属退出规则和模型提示词片段。
 
-扫描器会遍历当前策略组的 scorer，并将 `strategy_meta` 输出给 dashboard 与模拟复盘模块。
+`app/multi_strategy_screen.py` 只保留行情获取、全市场扫描和缓存编排，`app/niuniu_practice_trader.py` 只保留账户、风控和模拟成交编排。旧的 `app/strategy_registry.py` 是兼容导入层，新代码应从 `strategies` 包导入。
+
+新增内置策略时：
+
+1. 在 `app/strategies/registry.py` 增加 `label`、`color`、`desc`、`scorer`、`profile`、`position_limit_pct` 和 `aliases`；
+2. 在 `app/strategies/scoring/` 的对应文件中实现 `score_xxx(rows)`，并在 `scoring/__init__.py` 的显式映射中注册；
+3. 如有专属退出或决策语义，只修改 `exits.py` 或 `prompts.py`，无需把规则写回扫描器或交易器；
+4. 为评分边界、空数据和异常行情补充自动化测试；
+5. 运行 `./scripts/validate.sh` 完成验证。
+
+扫描器会遍历当前启用策略的 scorer，并将 `strategy_meta` 输出给 dashboard 与模拟复盘模块。
 
 ## 7. 使用边界
 

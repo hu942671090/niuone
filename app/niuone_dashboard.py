@@ -37,7 +37,7 @@ import urllib.request
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
 from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
-from strategy_registry import (
+from strategies.registry import (
     PERSONA_STRATEGY_ENV,
     PRESET_STRATEGY_TEXT_ENV,
     PRESET_STRATEGY_TEXT_MAX_CHARS,
