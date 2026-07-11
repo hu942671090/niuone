@@ -149,7 +149,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard_js.do_GET()
         admin_js = FakeHandler(path='/static/admin.js')
         admin_js.do_GET()
-        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=2')
+        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=4')
         versioned_dashboard_js.do_GET()
 
         self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
@@ -157,6 +157,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
+        self.assertIn('<script src="/static/dashboard.js?v=4" defer></script>', DASHBOARD_FRONTEND)
         self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
         self.assertIn('max-age=31536000', dashboard_js.header('Cache-Control'))
         self.assertIn('immutable', dashboard_js.header('Cache-Control'))
@@ -250,6 +251,16 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('us_features_enabled', payload)
         self.assertTrue((bootstrap.header('Set-Cookie') or '').startswith(f'{dashboard.VISITOR_COOKIE_NAME}=nvst_'))
 
+    def test_visit_stats_reinitializes_database_replaced_at_same_path(self):
+        replacement = dashboard.STATS_DB.with_name('replacement_stats.db')
+        sqlite3.connect(replacement).close()
+        replacement.replace(dashboard.STATS_DB)
+
+        dashboard.ensure_stats_db()
+        stats = dashboard.increment_visit_count('replacement-visitor')
+
+        self.assertEqual(stats, {'visits': 1, 'unique': 1})
+
     def test_admin_head_routes_match_get_and_post_only_contracts(self):
         admin = FakeHandler(path='/admin', method='HEAD')
         admin.do_HEAD()
@@ -331,6 +342,41 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(views, 45)
         self.assertEqual(visitor_count, 2)
         self.assertEqual(new_seen, (5.0, 20.0))
+
+    def test_legacy_visit_stats_migration_retries_after_transient_failure(self):
+        with closing(sqlite3.connect(dashboard.LEGACY_STATS_DB)) as con:
+            con.execute("""
+                CREATE TABLE visit_stats (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            con.execute("INSERT INTO visit_stats(key,value,updated_at) VALUES('home_views',7,20)")
+            con.commit()
+
+        original_migrate = dashboard.migrate_legacy_visit_stats
+        attempts = 0
+
+        def flaky_migrate(con):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return False
+            return original_migrate(con)
+
+        dashboard.migrate_legacy_visit_stats = flaky_migrate
+        try:
+            dashboard.ensure_stats_db()
+            dashboard.ensure_stats_db()
+        finally:
+            dashboard.migrate_legacy_visit_stats = original_migrate
+
+        with closing(sqlite3.connect(dashboard.STATS_DB)) as con:
+            views = con.execute("SELECT value FROM visit_stats WHERE key='home_views'").fetchone()[0]
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(views, 7)
 
     def test_compact_intraday_equity_history_keeps_latest_day_endpoints(self):
         old_points = [
@@ -866,9 +912,31 @@ class DashboardAuthTests(unittest.TestCase):
     def test_non_message_tabs_request_message_counts_without_records(self):
         self.assertEqual(dashboard.clamp_limit('0'), 0)
         self.assertIn(
-            "isMessageCategory() ? messagePageLimit() : 0",
+            "isMessageCategory(categoryAtStart) ? limitAtStart : 0",
             DASHBOARD_FRONTEND,
         )
+
+    def test_x_monitor_loads_in_parallel_and_reuses_recent_pages(self):
+        self.assertIn('const X_PAGE_CACHE_TTL_MS = 5 * 60 * 1000;', DASHBOARD_FRONTEND)
+        self.assertIn("const X_PAGE_STATE_KEY = 'niuniu-dashboard-x-pages-v1';", DASHBOARD_FRONTEND)
+        self.assertIn('function applyCachedXPage(offset = xPageOffset)', DASHBOARD_FRONTEND)
+        self.assertIn('rememberXPage(offsetAtStart, nextData);', DASHBOARD_FRONTEND)
+        self.assertIn('prefetchAdjacentXPages(offsetAtStart, nextData);', DASHBOARD_FRONTEND)
+        self.assertIn('function cancelXMediaRequests()', DASHBOARD_FRONTEND)
+        self.assertIn("if (!img.complete) img.removeAttribute('src');", DASHBOARD_FRONTEND)
+        self.assertIn('fetchpriority="low" decoding="async"', DASHBOARD_FRONTEND)
+        self.assertIn('function xPageRevision(payload)', DASHBOARD_FRONTEND)
+        self.assertIn('if (!unchangedXPage) render();', DASHBOARD_FRONTEND)
+        self.assertIn('media.slice(0, 1)', DASHBOARD_FRONTEND)
+        self.assertIn("activeCategory === 'x_monitor' && !hasCachedPage", DASHBOARD_FRONTEND)
+        self.assertIn("if (categoryAtStart === 'x_monitor') saveXPageState();", DASHBOARD_FRONTEND)
+        self.assertIn('const bootstrapPromise = loadDashboardBootstrap();', DASHBOARD_FRONTEND)
+        self.assertIn('updateTabs: needsFeatureCheck,', DASHBOARD_FRONTEND)
+        self.assertIn('waitFor: needsFeatureCheck ? bootstrapPromise : null,', DASHBOARD_FRONTEND)
+
+    def test_http_server_absorbs_short_media_request_bursts(self):
+        self.assertTrue(dashboard.ReusableThreadingHTTPServer.daemon_threads)
+        self.assertGreaterEqual(dashboard.ReusableThreadingHTTPServer.request_queue_size, 64)
 
     def test_us_sector_api_returns_sector_snapshot(self):
         original_producer = dashboard.produce_us_sector_data

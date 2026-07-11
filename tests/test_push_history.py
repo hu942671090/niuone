@@ -157,6 +157,79 @@ class PushHistoryQueryTests(unittest.TestCase):
         self.assertIsNotNone(counting_connection)
         self.assertEqual(counting_connection.distinct_count_queries, 1)
 
+    def test_x_monitor_fast_page_keeps_preferred_legacy_duplicate(self):
+        con = push_history.connect(self.db_path)
+        try:
+            with con:
+                push_history.upsert_message(
+                    con,
+                    {
+                        "timestamp": 1002,
+                        "category": "x_monitor",
+                        "source_type": "legacy",
+                        "source_id": "lean-copy",
+                        "external_id": "tweet-duplicate",
+                        "content": "newer but lean copy",
+                        "metadata": {"post": {}},
+                    },
+                )
+                push_history.upsert_message(
+                    con,
+                    {
+                        "timestamp": 1001,
+                        "category": "x_monitor",
+                        "source_type": "legacy",
+                        "source_id": "rich-copy",
+                        "external_id": "tweet-duplicate",
+                        "content": "preferred copy with media",
+                        "metadata": {"post": {"media": [{"url": "https://example.test/image.jpg"}]}},
+                    },
+                )
+                push_history.upsert_message(
+                    con,
+                    {
+                        "timestamp": 1001.5,
+                        "category": "x_monitor",
+                        "source_type": "x",
+                        "source_id": "watchlist",
+                        "external_id": "tweet-middle",
+                        "content": "middle post",
+                        "metadata": {"post": {}},
+                    },
+                )
+        finally:
+            con.close()
+
+        data = push_history.query_messages(category="x_monitor", limit=10)
+
+        self.assertEqual(data["matched_total"], 2)
+        self.assertEqual(data["categories"]["x_monitor"], 2)
+        self.assertEqual(len(data["records"]), 2)
+        self.assertEqual(data["records"][0]["source_id"], "rich-copy")
+        self.assertEqual(data["records"][1]["external_id"], "tweet-middle")
+
+    def test_connect_reinitializes_database_replaced_at_same_path(self):
+        con = push_history.connect(self.db_path)
+        con.close()
+
+        replacement = self.db_path.with_name("replacement.db")
+        sqlite3.connect(replacement).close()
+        replacement.replace(self.db_path)
+
+        con = push_history.connect(self.db_path)
+        try:
+            indexes = {
+                row[0]
+                for row in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_dashboard_%'"
+                )
+            }
+        finally:
+            con.close()
+
+        self.assertIn("idx_dashboard_category_external", indexes)
+        self.assertEqual(push_history.query_messages(category="x_monitor", limit=10)["records"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

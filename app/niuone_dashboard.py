@@ -26,6 +26,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 128
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -182,6 +184,7 @@ RATE_LIMIT_BUCKETS: dict[tuple[str, str], tuple[float, int]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
 ADMIN_TOKEN_LOCK = threading.Lock()
 VISIT_STATS_LOCK = threading.RLock()
+VISIT_STATS_INIT_SIGNATURE: tuple[Any, ...] | None = None
 ENV_FILE_WRITE_LOCK = threading.RLock()
 PRACTICE_CANDIDATES_CACHE_KEY = "practice_candidates"
 PRACTICE_CANDIDATES_API_PATHS = frozenset({"/api/practice_candidates", "/api/b1_screen"})
@@ -585,10 +588,38 @@ def check_rate_limit(scope: str, key: str, limit: int, window: int | None = None
     return True, 0
 
 
+def visit_stats_init_signature() -> tuple[Any, ...]:
+    try:
+        stats_stat = STATS_DB.stat()
+        stats_marker: tuple[int, int] | None = (stats_stat.st_dev, stats_stat.st_ino)
+    except OSError:
+        stats_marker = None
+    try:
+        legacy_stat = LEGACY_STATS_DB.stat()
+        legacy_marker: tuple[int, int, int, int] | None = (
+            legacy_stat.st_dev,
+            legacy_stat.st_ino,
+            legacy_stat.st_mtime_ns,
+            legacy_stat.st_size,
+        )
+    except OSError:
+        legacy_marker = None
+    return (str(STATS_DB.resolve()), stats_marker, str(LEGACY_STATS_DB.resolve()), legacy_marker)
+
+
 def ensure_stats_db() -> None:
+    global VISIT_STATS_INIT_SIGNATURE
     STATS_DB.parent.mkdir(parents=True, exist_ok=True)
+    signature = visit_stats_init_signature()
+    if VISIT_STATS_INIT_SIGNATURE == signature and STATS_DB.exists():
+        return
     with VISIT_STATS_LOCK:
-        with closing(sqlite3.connect(STATS_DB)) as con:
+        signature = visit_stats_init_signature()
+        if VISIT_STATS_INIT_SIGNATURE == signature and STATS_DB.exists():
+            return
+        with closing(sqlite3.connect(STATS_DB, timeout=5.0)) as con:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
             con.execute("""
                 CREATE TABLE IF NOT EXISTS visit_stats (
                     key TEXT PRIMARY KEY,
@@ -609,8 +640,16 @@ def ensure_stats_db() -> None:
                     completed_at REAL NOT NULL
                 )
             """)
-            migrate_legacy_visit_stats(con)
+            migration_ready = migrate_legacy_visit_stats(con)
+            now = _now_ts()
+            unique_count = int(con.execute("SELECT COUNT(*) FROM unique_visitors").fetchone()[0] or 0)
+            con.execute(
+                "INSERT INTO visit_stats(key,value,updated_at) VALUES('home_unique',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (unique_count, now),
+            )
             con.commit()
+        VISIT_STATS_INIT_SIGNATURE = visit_stats_init_signature() if migration_ready else None
 
 
 def sqlite_table_exists(con: sqlite3.Connection, table: str) -> bool:
@@ -620,22 +659,22 @@ def sqlite_table_exists(con: sqlite3.Connection, table: str) -> bool:
     ).fetchone() is not None
 
 
-def migrate_legacy_visit_stats(con: sqlite3.Connection) -> None:
+def migrate_legacy_visit_stats(con: sqlite3.Connection) -> bool:
     """Move visit counters out of the retired dashboard user database once."""
     if LEGACY_STATS_DB == STATS_DB or not LEGACY_STATS_DB.exists():
-        return
+        return True
     if con.execute(
         "SELECT 1 FROM stats_migrations WHERE key=?",
         (LEGACY_STATS_MIGRATION_KEY,),
     ).fetchone():
-        return
+        return True
 
     try:
         with closing(sqlite3.connect(LEGACY_STATS_DB)) as legacy:
             has_visit_stats = sqlite_table_exists(legacy, "visit_stats")
             has_unique_visitors = sqlite_table_exists(legacy, "unique_visitors")
             if not has_visit_stats and not has_unique_visitors:
-                return
+                return True
 
             legacy_views = 0
             legacy_updated_at = 0.0
@@ -654,7 +693,7 @@ def migrate_legacy_visit_stats(con: sqlite3.Connection) -> None:
                 ).fetchall()
     except sqlite3.Error as exc:
         print(f"访问统计迁移跳过：无法读取旧统计库 {LEGACY_STATS_DB}: {exc}", file=sys.stderr)
-        return
+        return False
 
     current_row = con.execute(
         "SELECT value, updated_at FROM visit_stats WHERE key='home_views'"
@@ -683,6 +722,7 @@ def migrate_legacy_visit_stats(con: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO stats_migrations(key,completed_at) VALUES(?,?)",
         (LEGACY_STATS_MIGRATION_KEY, _now_ts()),
     )
+    return True
 
 
 def increment_visit_count(visitor_id: str) -> dict[str, int]:
@@ -691,16 +731,30 @@ def increment_visit_count(visitor_id: str) -> dict[str, int]:
     now = _now_ts()
     visitor_hash = hash_token(visitor_id)
     with VISIT_STATS_LOCK:
-        with closing(sqlite3.connect(STATS_DB)) as con:
+        with closing(sqlite3.connect(STATS_DB, timeout=5.0)) as con:
+            con.execute("PRAGMA synchronous=NORMAL")
             con.execute("INSERT OR IGNORE INTO visit_stats(key,value,updated_at) VALUES('home_views',0,?)", (now,))
             con.execute("UPDATE visit_stats SET value=value+1, updated_at=? WHERE key='home_views'", (now,))
-            con.execute(
-                "INSERT INTO unique_visitors(visitor_hash,first_seen_at,last_seen_at) VALUES(?,?,?) "
-                "ON CONFLICT(visitor_hash) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+            inserted = con.execute(
+                "INSERT OR IGNORE INTO unique_visitors(visitor_hash,first_seen_at,last_seen_at) VALUES(?,?,?)",
                 (visitor_hash, now, now),
+            ).rowcount
+            if not inserted:
+                con.execute(
+                    "UPDATE unique_visitors SET last_seen_at=? WHERE visitor_hash=?",
+                    (now, visitor_hash),
+                )
+            con.execute(
+                "INSERT OR IGNORE INTO visit_stats(key,value,updated_at) VALUES('home_unique',0,?)",
+                (now,),
             )
+            if inserted:
+                con.execute(
+                    "UPDATE visit_stats SET value=value+1, updated_at=? WHERE key='home_unique'",
+                    (now,),
+                )
             visit_row = con.execute("SELECT value FROM visit_stats WHERE key='home_views'").fetchone()
-            unique_row = con.execute("SELECT COUNT(*) FROM unique_visitors").fetchone()
+            unique_row = con.execute("SELECT value FROM visit_stats WHERE key='home_unique'").fetchone()
             con.commit()
     return {"visits": int(visit_row[0] if visit_row else 0), "unique": int(unique_row[0] if unique_row else 0)}
 
@@ -4027,6 +4081,11 @@ def _safe_float(v: str) -> float | None:
 
 def main() -> None:
     ensure_stats_db()
+    # Complete message schema/index setup before accepting browser requests so
+    # the first uncached X page never waits on migration work while a writer is
+    # active.
+    with closing(push_history.connect()):
+        pass
     get_or_create_admin_token()
     parser = argparse.ArgumentParser(description="NiuOne dashboard")
     parser.add_argument("--host", default="127.0.0.1")

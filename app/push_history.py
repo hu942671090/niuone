@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -20,7 +21,7 @@ from niuone_paths import get_dashboard_home
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
 DB_PATH = Path(os.environ.get("DASHBOARD_PUSH_HISTORY_DB") or str(DASHBOARD_HOME / "push_history.db"))
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MESSAGE_COLUMNS = (
     "id",
     "timestamp",
@@ -47,17 +48,43 @@ MESSAGE_COLUMNS = (
     "updated_at",
 )
 
+_DB_INIT_LOCK = threading.Lock()
+_INITIALIZED_DB_IDENTITIES: dict[str, tuple[int, int]] = {}
+
+
+def _database_identity(db_path: Path) -> tuple[int, int] | None:
+    try:
+        stat = db_path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino)
+
+
+def _open_connection(db_path: Path) -> sqlite3.Connection:
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA foreign_keys=ON")
+    return con
+
 
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
     db_path = Path(path) if path else DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA foreign_keys=ON")
-    init_db(con)
-    return con
+    path_key = str(db_path.resolve())
+    identity = _database_identity(db_path)
+    if identity is None or _INITIALIZED_DB_IDENTITIES.get(path_key) != identity:
+        with _DB_INIT_LOCK:
+            identity = _database_identity(db_path)
+            if identity is None or _INITIALIZED_DB_IDENTITIES.get(path_key) != identity:
+                con = _open_connection(db_path)
+                con.execute("PRAGMA journal_mode=WAL")
+                init_db(con)
+                refreshed_identity = _database_identity(db_path)
+                if refreshed_identity is not None:
+                    _INITIALIZED_DB_IDENTITIES[path_key] = refreshed_identity
+                return con
+    return _open_connection(db_path)
 
 
 def init_db(con: sqlite3.Connection) -> None:
@@ -116,6 +143,9 @@ def init_db(con: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_dashboard_category_time
             ON dashboard_messages(category, timestamp DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_dashboard_category_external
+            ON dashboard_messages(category, external_id);
 
         CREATE INDEX IF NOT EXISTS idx_dashboard_time
             ON dashboard_messages(timestamp DESC);
@@ -179,9 +209,42 @@ def x_metadata_priority(category: Any, metadata_json: Any) -> int:
     return 1
 
 
+def x_row_is_better(
+    candidate_metadata: Any,
+    candidate_kind: Any,
+    candidate_content: Any,
+    candidate_timestamp: Any,
+    candidate_id: Any,
+    current_metadata: Any,
+    current_kind: Any,
+    current_content: Any,
+    current_timestamp: Any,
+    current_id: Any,
+) -> int:
+    """Return 1 when an X row is the preferred copy of the same post."""
+    candidate_priority = x_metadata_priority("x_monitor", candidate_metadata)
+    current_priority = x_metadata_priority("x_monitor", current_metadata)
+    if candidate_priority != current_priority:
+        return int(candidate_priority < current_priority)
+    candidate_kind_priority = 0 if str(candidate_kind or "") == "cron_output" else 1
+    current_kind_priority = 0 if str(current_kind or "") == "cron_output" else 1
+    if candidate_kind_priority != current_kind_priority:
+        return int(candidate_kind_priority < current_kind_priority)
+    candidate_length = len(str(candidate_content or ""))
+    current_length = len(str(current_content or ""))
+    if candidate_length != current_length:
+        return int(candidate_length > current_length)
+    candidate_time = float(candidate_timestamp or 0)
+    current_time = float(current_timestamp or 0)
+    if candidate_time != current_time:
+        return int(candidate_time > current_time)
+    return int(str(candidate_id or "") > str(current_id or ""))
+
+
 def register_query_functions(con: sqlite3.Connection) -> None:
-    con.create_function("dashboard_message_dedupe_key", 4, message_dedupe_key)
-    con.create_function("dashboard_x_metadata_priority", 2, x_metadata_priority)
+    con.create_function("dashboard_message_dedupe_key", 4, message_dedupe_key, deterministic=True)
+    con.create_function("dashboard_x_metadata_priority", 2, x_metadata_priority, deterministic=True)
+    con.create_function("dashboard_x_row_is_better", 10, x_row_is_better, deterministic=True)
 
 
 def upsert_message(con: sqlite3.Connection, message: dict[str, Any]) -> str:
@@ -375,8 +438,57 @@ def query_messages(
         ranked_column_select = ", ".join(f"ranked.{column}" for column in MESSAGE_COLUMNS)
         rows = []
         if row_limit != 0:
-            rows = con.execute(
-                f"""
+            if category == "x_monitor" and not chat and not q:
+                # X pages are small and ordered by time. Use the time index for
+                # pagination and probe only same-post candidates for legacy
+                # duplicate resolution instead of ranking the entire history.
+                rows = con.execute(
+                    f"""
+                    SELECT {column_select}
+                    FROM dashboard_messages m INDEXED BY idx_dashboard_category_time
+                    LEFT JOIN dashboard_messages group_head
+                      ON group_head.id = CASE
+                        WHEN COALESCE(m.external_id, '') = '' THEN m.id
+                        ELSE (
+                            SELECT head.id
+                            FROM dashboard_messages head INDEXED BY idx_dashboard_category_external
+                            WHERE head.category = 'x_monitor'
+                              AND head.external_id = m.external_id
+                            ORDER BY
+                                head.timestamp DESC,
+                                CASE WHEN head.kind = 'cron_output' THEN 0 ELSE 1 END ASC,
+                                length(COALESCE(head.content, '')) DESC,
+                                head.id DESC
+                            LIMIT 1
+                        )
+                      END
+                    WHERE m.category = 'x_monitor'
+                      AND (
+                        COALESCE(m.external_id, '') = ''
+                        OR NOT EXISTS (
+                            SELECT 1
+                            FROM dashboard_messages better INDEXED BY idx_dashboard_category_external
+                            WHERE better.category = 'x_monitor'
+                              AND better.external_id = m.external_id
+                              AND better.id != m.id
+                              AND dashboard_x_row_is_better(
+                                  better.metadata_json, better.kind, better.content, better.timestamp, better.id,
+                                  m.metadata_json, m.kind, m.content, m.timestamp, m.id
+                              ) = 1
+                        )
+                      )
+                    ORDER BY
+                        group_head.timestamp DESC,
+                        CASE WHEN group_head.kind = 'cron_output' THEN 0 ELSE 1 END ASC,
+                        length(COALESCE(group_head.content, '')) DESC,
+                        group_head.id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (row_limit, row_offset),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    f"""
                 WITH base AS (
                     SELECT
                         {column_select},
@@ -447,8 +559,8 @@ def query_messages(
                     group_id DESC
                 LIMIT ? OFFSET ?
                 """,
-                [*params, row_limit, row_offset],
-            ).fetchall()
+                    [*params, row_limit, row_offset],
+                ).fetchall()
         platforms = [
             row["platform"]
             for row in con.execute("SELECT DISTINCT platform FROM dashboard_messages WHERE platform != '' ORDER BY platform")

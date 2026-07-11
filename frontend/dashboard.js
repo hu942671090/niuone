@@ -42,6 +42,9 @@ try {
   if (['a_share', 'us'].includes(savedIndexPriority)) indicesIndexPriorityOverride = savedIndexPriority;
 } catch (e) {}
 const X_MONITOR_PAGE_SIZE = 10;
+const X_PAGE_CACHE_TTL_MS = 5 * 60 * 1000;
+const X_PAGE_CACHE_MAX_ENTRIES = 6;
+const X_PAGE_STATE_KEY = 'niuniu-dashboard-x-pages-v1';
 let usRatingDayIndex = 0;
 let ratingExpandedRowId = '';
 let xExpandedRecordKey = '';
@@ -50,6 +53,7 @@ let marketExpandedRecordKey = '';
 let marketDayIndex = Math.max(0, Number(initialParams.get('day') || 1) - 1);
 let xPageOffset = Math.max(0, (Number(initialParams.get('page') || 1) - 1) * X_MONITOR_PAGE_SIZE);
 let xLoadedOffset = -1;
+let xPageCache = {};
 let practiceCurveMode = initialParams.get('curve') === 'daily' ? 'daily' : 'intraday';
 window.practiceCurveMode = practiceCurveMode;
 let practicePositionMode = initialParams.get('holdings') === 'sold' ? 'sold' : 'open';
@@ -328,7 +332,49 @@ const US_RATINGS_AUTO_REFRESH_MS = 10 * 60 * 1000;
 let loadSeq = 0;
 let pendingLoadController = null;
 let loadingMoreHistory = false;
+let xPageLoadInFlight = false;
+let xPageNavigationSeq = 0;
+const xPagePrefetches = new Map();
 let lastAutoRefreshAt = 0;
+function rememberXPage(offset, payload, savedAt = Date.now()) {
+  const key = String(Math.max(0, Number(offset || 0)));
+  xPageCache[key] = {data: payload, savedAt: Number(savedAt || Date.now())};
+  const entries = Object.entries(xPageCache).sort((a, b) => Number(b[1]?.savedAt || 0) - Number(a[1]?.savedAt || 0));
+  xPageCache = Object.fromEntries(entries.slice(0, X_PAGE_CACHE_MAX_ENTRIES));
+}
+function restoreXPageCache(cachedPages) {
+  xPageCache = {};
+  for (const [offset, entry] of Object.entries(cachedPages || {})) {
+    if (!entry?.data || Date.now() - Number(entry.savedAt || 0) > X_PAGE_CACHE_TTL_MS) continue;
+    rememberXPage(offset, entry.data, entry.savedAt);
+  }
+}
+function cachedXPage(offset = xPageOffset) {
+  const key = String(Math.max(0, Number(offset || 0)));
+  const entry = xPageCache[key];
+  if (!entry) return null;
+  if (Date.now() - Number(entry.savedAt || 0) > X_PAGE_CACHE_TTL_MS) {
+    delete xPageCache[key];
+    return null;
+  }
+  return entry.data || null;
+}
+function applyCachedXPage(offset = xPageOffset) {
+  const cachedPage = cachedXPage(offset);
+  if (!cachedPage) return false;
+  data = cachedPage;
+  xLoadedOffset = Math.max(0, Number(offset || 0));
+  return true;
+}
+function saveXPageState() {
+  try {
+    sessionStorage.setItem(X_PAGE_STATE_KEY, JSON.stringify({
+      xPageCache,
+      xPageOffset,
+      savedAt: Date.now(),
+    }));
+  } catch (e) {}
+}
 function saveViewState() {
   try {
     sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
@@ -342,7 +388,16 @@ function saveViewState() {
 function restoreViewState() {
   try {
     const cached = JSON.parse(sessionStorage.getItem(VIEW_STATE_KEY) || '{}');
-    if (!cached.savedAt || Date.now() - cached.savedAt > DATA_CACHE_TTL_MS) return;
+    const cachedXPages = JSON.parse(sessionStorage.getItem(X_PAGE_STATE_KEY) || '{}');
+    const cachedXPagesFresh = cachedXPages.savedAt && Date.now() - cachedXPages.savedAt <= X_PAGE_CACHE_TTL_MS;
+    restoreXPageCache(cachedXPagesFresh ? cachedXPages.xPageCache : cached.xPageCache);
+    if (activeCategory === 'x_monitor' && !initialParams.has('page') && cachedXPagesFresh) {
+      xPageOffset = Math.max(0, Number(cachedXPages.xPageOffset || 0));
+    }
+    if (!cached.savedAt || Date.now() - cached.savedAt > DATA_CACHE_TTL_MS) {
+      if (activeCategory === 'x_monitor') applyCachedXPage(xPageOffset);
+      return;
+    }
     data = cached.data || data;
     indicesData = cached.indicesData || indicesData;
     sectorData = cached.sectorData || sectorData;
@@ -378,12 +433,13 @@ function restoreViewState() {
     }
     if (!initialParams.has('page')) xPageOffset = Math.max(0, Number(cached.xPageOffset || 0));
     xLoadedOffset = Number.isFinite(Number(cached.xLoadedOffset)) ? Number(cached.xLoadedOffset) : -1;
+    if (activeCategory === 'x_monitor' && !applyCachedXPage(xPageOffset)) xLoadedOffset = -1;
   } catch (e) {}
 }
 function hasWarmData(category) {
   if (category === 'indices') return Array.isArray(indicesData.items) && indicesData.items.length;
   if (category === 'practice') return (Array.isArray(practiceCandidatesData.items) && practiceCandidatesData.items.length) || Array.isArray(niuniuPracticeData.equity_history);
-  if (category === 'x_monitor') return xLoadedOffset === xPageOffset && (data.records || []).some(r => r.category === category);
+  if (category === 'x_monitor') return xLoadedOffset === xPageOffset && !!cachedXPage(xPageOffset) && Array.isArray(data.records);
   if (isMessageCategory(category)) return (data.records || []).some(r => r.category === category);
   return false;
 }
@@ -448,18 +504,59 @@ function mergeRecordLists(primary, secondary) {
     return bt - at;
   });
 }
+function xPageRevision(payload) {
+  const records = Array.isArray(payload?.records) ? payload.records : [];
+  const total = Number(payload?.categories?.x_monitor?.count || 0);
+  return JSON.stringify([
+    total,
+    records.map(record => [recordKey(record), record.timestamp, record.content_hash, record.metadata]),
+  ]);
+}
 function activeCategoryTotal() {
   if (isMessageCategory()) return Number(data.categories?.[activeCategory]?.count || 0);
   return Number(data.total || 0);
 }
-function messagesUrl(offset = messageOffset(), limit = messagePageLimit()) {
-  const msgCategory = isMessageCategory() ? activeCategory : '';
+function messagesUrl(offset = messageOffset(), limit = messagePageLimit(), category = activeCategory) {
+  const msgCategory = isMessageCategory(category) ? category : '';
   return `/api/messages?limit=${limit}&offset=${offset}${msgCategory ? '&category=' + encodeURIComponent(msgCategory) : ''}`;
+}
+function prefetchXPage(offset, total) {
+  const targetOffset = Math.max(0, Number(offset || 0));
+  if (targetOffset >= Number(total || 0) || cachedXPage(targetOffset)) return null;
+  const key = String(targetOffset);
+  if (xPagePrefetches.has(key)) return xPagePrefetches.get(key);
+  const request = fetch(messagesUrl(targetOffset, messagePageLimit('x_monitor'), 'x_monitor'))
+    .then(response => {
+      if (!response.ok) throw new Error(`x page prefetch failed: ${response.status}`);
+      return response.json();
+    })
+    .then(payload => {
+      rememberXPage(targetOffset, payload);
+      return payload;
+    })
+    .catch(() => null)
+    .finally(() => {
+      if (xPagePrefetches.get(key) === request) xPagePrefetches.delete(key);
+    });
+  xPagePrefetches.set(key, request);
+  return request;
+}
+function prefetchAdjacentXPages(offset, payload) {
+  const total = Number(payload?.categories?.x_monitor?.count || payload?.matched_total || 0);
+  if (!total) return;
+  prefetchXPage(offset - X_MONITOR_PAGE_SIZE, total);
+  prefetchXPage(offset + X_MONITOR_PAGE_SIZE, total);
+}
+function cancelXMediaRequests() {
+  document.querySelectorAll('img[data-x-media-request]').forEach(img => {
+    if (!img.complete) img.removeAttribute('src');
+  });
 }
 function autoRefreshIntervalMs(category = activeCategory) {
   return category === 'us_ratings' ? US_RATINGS_AUTO_REFRESH_MS : AUTO_REFRESH_TICK_MS;
 }
 async function autoRefresh() {
+  if (xPageLoadInFlight) return;
   if (Date.now() - lastAutoRefreshAt < autoRefreshIntervalMs()) return;
   await load({background:true});
 }
@@ -469,14 +566,16 @@ function loadActiveCategoryData(category = activeCategory) {
   if (category === 'market_monitor') return loadIndicesDataInBg();
   return null;
 }
-async function load({background=false, updateTabs=true} = {}) {
+async function load({background=false, updateTabs=true, waitFor=null} = {}) {
   const seq = ++loadSeq;
   const categoryAtStart = activeCategory;
+  const offsetAtStart = messageOffset(categoryAtStart);
+  const limitAtStart = messagePageLimit(categoryAtStart);
   if (pendingLoadController) pendingLoadController.abort();
   const controller = new AbortController();
   pendingLoadController = controller;
-  const msgUrl = messagesUrl(isMessageCategory() ? messageOffset() : 0, isMessageCategory() ? messagePageLimit() : 0);
-  if (!background && !hasWarmData(activeCategory)) {
+  const msgUrl = messagesUrl(isMessageCategory(categoryAtStart) ? offsetAtStart : 0, isMessageCategory(categoryAtStart) ? limitAtStart : 0, categoryAtStart);
+  if (!background && !hasWarmData(categoryAtStart)) {
     $('feed').innerHTML = '<div class="loading">加载中…</div>';
   }
   // Category data is independent from message counts. Start it immediately so
@@ -484,18 +583,29 @@ async function load({background=false, updateTabs=true} = {}) {
   loadActiveCategoryData(categoryAtStart);
   const res = await fetch(msgUrl, {signal: controller.signal});
   const nextData = await res.json();
-  if (seq !== loadSeq) return;
-  data = background && isMessageCategory() && activeCategory !== 'x_monitor'
+  if (waitFor) await waitFor;
+  if (seq !== loadSeq || activeCategory !== categoryAtStart) return;
+  if (categoryAtStart === 'x_monitor' && xPageOffset !== offsetAtStart) return;
+  const unchangedXPage = background
+    && categoryAtStart === 'x_monitor'
+    && xLoadedOffset === offsetAtStart
+    && xPageRevision(data) === xPageRevision(nextData);
+  data = background && isMessageCategory(categoryAtStart) && categoryAtStart !== 'x_monitor'
     ? {...nextData, records: mergeRecordLists(nextData.records || [], data.records || [])}
     : nextData;
-  if (activeCategory === 'x_monitor') xLoadedOffset = xPageOffset;
+  if (categoryAtStart === 'x_monitor') {
+    xLoadedOffset = offsetAtStart;
+    rememberXPage(offsetAtStart, nextData);
+    prefetchAdjacentXPages(offsetAtStart, nextData);
+  }
   $('updated').textContent = data.generated_at?.slice(11) || '--';
   if (updateTabs) renderTabs();
   if (seq !== loadSeq) return;
-  render();
+  if (!unchangedXPage) render();
   if (activeCategory === 'us_ratings') refreshVisibleUsQuotes();
   lastAutoRefreshAt = Date.now();
-  saveViewState();
+  if (categoryAtStart === 'x_monitor') saveXPageState();
+  else saveViewState();
 }
 async function loadMoreMessages() {
   if (!isMessageCategory() || activeCategory === 'us_ratings' || activeCategory === 'x_monitor' || loadingMoreHistory) return;
@@ -527,21 +637,37 @@ async function loadXPage(nextOffset) {
   const maxOffset = total ? Math.max(0, (Math.ceil(total / limit) - 1) * limit) : Math.max(0, Number(nextOffset || 0));
   const targetOffset = Math.max(0, Math.min(Number(nextOffset || 0), maxOffset));
   if (targetOffset === xPageOffset && xLoadedOffset === xPageOffset) return;
+  const navigationSeq = ++xPageNavigationSeq;
   const previousOffset = xPageOffset;
+  const previousLoadedOffset = xLoadedOffset;
+  const previousData = data;
+  cancelXMediaRequests();
   xPageOffset = targetOffset;
   xExpandedRecordKey = '';
+  const hasCachedPage = applyCachedXPage(targetOffset);
+  if (!hasCachedPage) xLoadedOffset = -1;
   syncViewUrl();
-  loadingMoreHistory = true;
-  render();
+  xPageLoadInFlight = true;
+  loadingMoreHistory = !hasCachedPage;
+  if (hasCachedPage) render();
+  else $('feed').innerHTML = '<div class="loading">加载中…</div>';
   try {
     await load({background:true});
   } catch (err) {
-    xPageOffset = previousOffset;
-    syncViewUrl();
+    if (navigationSeq !== xPageNavigationSeq || (err && err.name === 'AbortError')) return;
+    if (!hasCachedPage) {
+      xPageOffset = previousOffset;
+      xLoadedOffset = previousLoadedOffset;
+      data = previousData;
+      syncViewUrl();
+    }
     throw err;
   } finally {
-    loadingMoreHistory = false;
-    render();
+    if (navigationSeq === xPageNavigationSeq) {
+      xPageLoadInFlight = false;
+      loadingMoreHistory = false;
+      if (activeCategory === 'x_monitor' && !hasCachedPage) render();
+    }
   }
 }
 function ratingSymbolsFromRecords(records) {
@@ -830,6 +956,7 @@ function renderTabs() {
     event.preventDefault();
     const nextCategory = tab.dataset.category;
     if (!nextCategory || !categoryAvailable(nextCategory) || nextCategory === activeCategory) return;
+    if (activeCategory === 'x_monitor') cancelXMediaRequests();
     activeCategory = nextCategory;
     usRatingDayIndex = 0;
     ratingExpandedRowId = '';
@@ -838,7 +965,7 @@ function renderTabs() {
     if (activeCategory === 'market_monitor') marketDayIndex = 0;
     if (activeCategory === 'x_monitor') {
       xPageOffset = 0;
-      xLoadedOffset = -1;
+      if (!applyCachedXPage(0)) xLoadedOffset = -1;
     }
     syncViewUrl({push:true});
     renderTabs();
@@ -859,7 +986,7 @@ function applyViewStateFromLocation() {
   indicesViewMode = params.get('panel') === 'market' ? 'market' : 'index';
   marketDayIndex = Math.max(0, Number(params.get('day') || 1) - 1);
   xPageOffset = Math.max(0, (Number(params.get('page') || 1) - 1) * X_MONITOR_PAGE_SIZE);
-  xLoadedOffset = -1;
+  if (activeCategory !== 'x_monitor' || !applyCachedXPage(xPageOffset)) xLoadedOffset = -1;
   practicePositionMode = params.get('holdings') === 'sold' ? 'sold' : 'open';
   window.practicePositionMode = practicePositionMode;
   practiceCurveMode = params.get('curve') === 'daily' ? 'daily' : 'intraday';
@@ -872,6 +999,8 @@ function applyViewStateFromLocation() {
   marketExpandedRecordKey = '';
 }
 window.addEventListener('popstate', () => {
+  const wasXMonitor = activeCategory === 'x_monitor';
+  if (wasXMonitor) cancelXMediaRequests();
   applyViewStateFromLocation();
   if (location.pathname + location.search !== currentViewUrl()) syncViewUrl();
   renderTabs();
@@ -3555,8 +3684,8 @@ function xAllMediaItems(r) {
 function renderXMediaStrip(r) {
   const media = xAllMediaItems(r).filter(item => item.url);
   if (!media.length) return '';
-  const thumbs = media.slice(0, 3).map(item => `<span class="x-media-thumb"><img src="${esc(xMediaDisplayUrl(item.url))}" alt="推文图片" loading="lazy"></span>`).join('');
-  const more = media.length > 3 ? `<span class="x-media-more">+${media.length - 3}</span>` : '';
+  const thumbs = media.slice(0, 1).map(item => `<span class="x-media-thumb"><img src="${esc(xMediaDisplayUrl(item.url))}" data-x-media-request="1" alt="推文图片" loading="lazy" fetchpriority="low" decoding="async"></span>`).join('');
+  const more = media.length > 1 ? `<span class="x-media-more">+${media.length - 1}</span>` : '';
   return `<div class="x-media-strip">${thumbs}${more}</div>`;
 }
 function renderXMediaGallery(groups) {
@@ -3565,7 +3694,7 @@ function renderXMediaGallery(groups) {
   return `<div class="x-media-gallery">${groups.map(group => {
     const tiles = group.items.map(item => {
       return `<button type="button" class="x-media-tile" data-x-image-url="${esc(item.url)}" data-x-image-label="${esc(group.label)}" title="查看图片">
-        <span class="x-media-frame"><img src="${esc(xMediaDisplayUrl(item.url))}" alt="${esc(group.label)}" loading="lazy"></span>
+        <span class="x-media-frame"><img src="${esc(xMediaDisplayUrl(item.url))}" data-x-media-request="1" alt="${esc(group.label)}" loading="lazy" fetchpriority="low" decoding="async"></span>
       </button>`;
     }).join('');
     return `<div class="x-media-group"><div class="x-media-label">${esc(group.label)}</div><div class="x-media-grid">${tiles}</div></div>`;
@@ -3856,21 +3985,25 @@ async function loadDashboardBootstrap() {
 
 async function startDashboard() {
   restoreViewState();
-  const needsFeatureCheck = US_FEATURE_CATEGORIES.has(activeCategory);
+  const categoryBeforeBootstrap = activeCategory;
+  const needsFeatureCheck = US_FEATURE_CATEGORIES.has(categoryBeforeBootstrap);
   const bootstrapPromise = loadDashboardBootstrap();
   const reportLoadError = err => { if (!err || err.name !== 'AbortError') console.error(err); };
-  let initialLoadPromise = null;
-
-  // Native dashboard pages do not depend on the feature flags returned by the
-  // bootstrap endpoint, so their data can begin loading in parallel with it.
-  if (!needsFeatureCheck) {
-    if (hasWarmData(activeCategory)) render();
-    initialLoadPromise = load({updateTabs:false});
-    initialLoadPromise.catch(reportLoadError);
-  }
+  if (!needsFeatureCheck && hasWarmData(activeCategory)) render();
+  let initialLoadPromise = load({
+    background: hasWarmData(activeCategory),
+    updateTabs: needsFeatureCheck,
+    waitFor: needsFeatureCheck ? bootstrapPromise : null,
+  });
+  initialLoadPromise.catch(reportLoadError);
 
   await bootstrapPromise;
   activeCategory = normalizeActiveCategory(activeCategory);
+  const categoryChanged = activeCategory !== categoryBeforeBootstrap;
+  if (categoryChanged) {
+    if (pendingLoadController) pendingLoadController.abort();
+    initialLoadPromise = null;
+  }
   if (location.pathname + location.search !== currentViewUrl()) syncViewUrl();
   renderTabs();
   if (hasWarmData(activeCategory)) render();
