@@ -2949,8 +2949,37 @@ def build_admin_config_payload() -> dict[str, Any]:
             else str(item.get("effective") or "")
         )
         items.append(item)
+    item_counts: dict[str, int] = {}
+    for item in items:
+        group_name = str(item.get("group") or "其他")
+        item_counts[group_name] = item_counts.get(group_name, 0) + 1
     return {
         "items": items,
+        "groups": [
+            {
+                **group,
+                "note": ADMIN_GROUP_NOTES.get(str(group["name"]), ""),
+                "item_count": item_counts.get(str(group["name"]), 0),
+            }
+            for group in ADMIN_SETTING_GROUPS
+            if item_counts.get(str(group["name"]), 0)
+        ],
+        "notification_channels": [
+            {
+                **channel,
+                "field_names": list(channel.get("field_names", ())),
+            }
+            for channel in NOTIFICATION_CHANNEL_SETTINGS
+        ],
+        "notification_general_names": list(NOTIFICATION_GENERAL_CONFIG_NAMES),
+        "ui": {
+            "us_feature_toggle_name": "DASHBOARD_US_FEATURES_ENABLED",
+            "us_feature_gated_names": sorted(US_FEATURE_GATED_NAMES),
+            "strategy_source_name": STRATEGY_SOURCE_ENV,
+            "strategy_builtin_name": PERSONA_STRATEGY_ENV,
+            "strategy_preset_name": PRESET_STRATEGY_TEXT_ENV,
+            "strategy_builtin_value": STRATEGY_SOURCE_BUILTIN,
+        },
         "secret_placeholder": SECRET_PLACEHOLDER,
     }
 
