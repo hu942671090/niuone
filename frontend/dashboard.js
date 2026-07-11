@@ -14,7 +14,7 @@ let practiceBenchmarksData = {items: []};
 let benchmarkOverlay = {sh000001: true, sh000300: true, sz399006: true, sh000688: true};
 const initialParams = new URLSearchParams(location.search);
 const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];
-const CATEGORY_LABELS = {all:'全部', indices:'指数行情', practice:'实战页面', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
+const CATEGORY_LABELS = {all:'全部', indices:'指数行情', practice:'模拟交易', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
 const CATEGORY_PATHS = {
   practice: '/practice',
   indices: '/indices',
@@ -1021,7 +1021,6 @@ async function loadPracticePage() {
   await Promise.allSettled(tasks);
 }
 function renderTabs() {
-  document.title = `牛牛1号 · ${CATEGORY_LABELS[activeCategory] || 'Dashboard'}`;
   $('categoryTabs').innerHTML = visibleCategoryOrder().map(key => {
     const count = (key === 'indices' || key === 'practice') ? '' : ` · ${data.categories?.[key]?.count || 0}`;
     return `<a class="tab ${activeCategory === key ? 'active' : ''}" data-category="${key}" href="${CATEGORY_PATHS[key]}">${CATEGORY_LABELS[key]}${count}</a>`;
@@ -1657,6 +1656,14 @@ function buildPracticeCalendarRows(history, dailyHistory, initialCash=1000000) {
     return {date, time:p.time, equity, pnl, pnlPct};
   }).filter(row => row.date);
 }
+function renderPracticeChartTitle(title, visibleDate='', measureDate=visibleDate) {
+  const shownDate = String(visibleDate || '').slice(0, 10);
+  const reservedDate = String(measureDate || shownDate || '0000-00-00').slice(0, 10);
+  return `<div class="practice-chart-title">
+    <span class="practice-chart-title-text">${esc(title)}${shownDate ? `（${esc(shownDate)}）` : ''}</span>
+    <span class="practice-chart-title-measure" aria-hidden="true">今日收益曲线（${esc(reservedDate)}）</span>
+  </div>`;
+}
 function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchmarks={items:[]}) {
   const isDailyMode = practiceCurveMode === 'daily';
   const normalizedHistory = normalizePracticeEquityPoints(history);
@@ -1755,7 +1762,11 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
       </div>`;
       const calendarButton = `<button class="practice-calendar-open-btn" type="button" onclick="openPracticeCalendar(event)">交易日历</button>`;
       const latestHint = latestDataDay && latestDataDay !== latestDay ? ` · 最近已有分时点 ${esc(latestDataDay)}` : '';
-      const emptyTitle = isNonTradingCalendarDay && latestDay ? `今日收益曲线（${esc(latestDay)}）` : '今日收益曲线';
+      const emptyTitleHtml = renderPracticeChartTitle(
+        '今日收益曲线',
+        isNonTradingCalendarDay && latestDay ? latestDay : '',
+        latestDay || targetDate,
+      );
       const emptySub = isNonTradingCalendarDay
         ? `非交易日展示最近交易日 · ${latestHint.replace(/^ · /, '') || '等待交易日'}`
         : `北京时间 ${esc(latestDay || targetDate || '--')} · 等待今日盘中净值点${latestHint}`;
@@ -1763,7 +1774,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
         <div class="practice-chart-head">
           <div>
             <div class="practice-chart-title-row">
-              <div class="practice-chart-title">${emptyTitle}</div>
+              ${emptyTitleHtml}
               ${modeButtons}
               ${calendarButton}
             </div>
@@ -1961,7 +1972,11 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     </span>`
     : '';
   const tradeMarkerHtml = isDailyMode ? '' : renderPracticeTradeMarkers(latestDay, xFromTime, plottedPts, w, h);
-  const chartTitle = isDailyMode ? '收益曲线 · 累计收益' : `今日收益曲线${isNonTradingCalendarDay && latestDay ? `（${esc(latestDay)}）` : ''}`;
+  const chartTitleHtml = renderPracticeChartTitle(
+    isDailyMode ? '累积收益曲线' : '今日收益曲线',
+    !isDailyMode && isNonTradingCalendarDay && latestDay ? latestDay : '',
+    latestDay || targetDate,
+  );
   const intradayBaseLabel = hasIntradayOpenBase
     ? `0轴为上一交易日净值(${esc(String(intradayBasePoint.time || '').slice(5, 16))})`
     : '0轴为今日首个净值';
@@ -1982,7 +1997,7 @@ function renderPracticeCurve(history, dailyHistory, initialCash=1000000, benchma
     <div class="practice-chart-head">
       <div>
         <div class="practice-chart-title-row">
-          <div class="practice-chart-title">${chartTitle}</div>
+          ${chartTitleHtml}
           ${modeButtons}
           ${calendarButton}
         </div>
@@ -2453,13 +2468,15 @@ function renderPracticePanel() {
   const channels = quote.channel_counts || {};
   const ruleNote = p.trade_rule_note || practiceRuleFallbackNote();
   const ruleModal = renderPracticeRuleNoteModal(ruleNote);
-  const channelText = quote.quote_time ? `腾讯${channels.tencent ?? 0}/东财${channels.eastmoney ?? 0}/Sina${channels.sina ?? 0}/单票${channels.single ?? 0}` : '';
-  const quoteNote = quote.quote_time ? `行情：${esc(quote.quote_time)} 更新${quote.updated ?? 0}只 ${channelText}${quote.fallback ? `，回退${quote.fallback}只` : ''}` : '';
+  const channelText = quote.quote_time ? `腾讯${channels.tencent ?? 0}/东财${channels.eastmoney ?? 0}/Sina${channels.sina ?? 0}` : '';
+  const singleRetryCount = Math.max(0, Math.trunc(Number(channels.single) || 0));
+  const singleRetryText = singleRetryCount ? `，单股重试${singleRetryCount}只` : '';
+  const quoteNote = quote.quote_time ? `行情：${esc(quote.quote_time)} 更新${quote.updated ?? 0}只 ${channelText}${singleRetryText}${quote.fallback ? `，回退${quote.fallback}只` : ''}` : '';
   const decisionModel = String(p.decision_model || '').trim();
   const missingModelLabel = practiceFullSnapshotStatus === 'error' ? '未知' : '加载中';
   const ruleMeta = [`模型：${esc(decisionModel || missingModelLabel)}`, quoteNote].filter(Boolean).join('｜');
   return `<section class="sector-cloud" style="margin-bottom:18px">
-    <h3>实战页面 · 模拟账户</h3>
+    <h3>模拟账户</h3>
     ${p.trading_paused ? `<div style=\"background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);border-radius:12px;padding:10px 14px;margin:10px 0;display:flex;justify-content:space-between;align-items:center\">
       <span style=\"color:#fbbf24;font-size:13px\">⏸️ 交易已暂停：${esc(p.pause_reason||'风控触发')}（${esc((p.pause_since||'').slice(11,16))}起）</span>
       <button onclick=\"actionFetch('/api/niuniu_practice/resume').then(r=>r.json()).then(d=>{if(d.resumed)location.reload()})\" style=\"background:rgba(52,211,153,.18);color:#34d399;border:1px solid rgba(52,211,153,.35);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600\">🔄 强制恢复交易</button>

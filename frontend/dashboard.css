@@ -268,7 +268,9 @@
     .practice-chart-card { position:relative; z-index:0; isolation:isolate; overflow:hidden; margin:12px 0; padding:14px 14px 10px; border-radius:18px; border:1px solid rgba(255,255,255,.08); background:radial-gradient(circle at 15% 0%, rgba(113,112,255,.16), transparent 34%), linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.018)); box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 18px 42px rgba(0,0,0,.22); }
     .practice-chart-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:8px; }
     .practice-chart-title-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-    .practice-chart-title { color:#f7f8f8; font-size:13px; font-weight:800; letter-spacing:-.01em; }
+    .practice-chart-title { display:inline-grid; flex:0 0 auto; color:#f7f8f8; font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; letter-spacing:-.01em; white-space:nowrap; }
+    .practice-chart-title-text, .practice-chart-title-measure { grid-area:1 / 1; }
+    .practice-chart-title-measure { visibility:hidden; pointer-events:none; user-select:none; }
     .practice-chart-sub { margin-top:3px; color:#8a8f98; font-size:11px; }
     .practice-mode-control { display:inline-flex; align-items:center; gap:2px; padding:2px; border-radius:9px; border:1px solid rgba(255,255,255,.08); background:rgba(0,0,0,.20); }
     .practice-mode-btn { appearance:none; border:0; border-radius:7px; padding:4px 8px; cursor:pointer; background:transparent; color:#8a8f98; font-size:11px; line-height:1; font-weight:800; letter-spacing:0; white-space:nowrap; }

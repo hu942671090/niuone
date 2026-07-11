@@ -149,7 +149,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard_js.do_GET()
         admin_js = FakeHandler(path='/static/admin.js')
         admin_js.do_GET()
-        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=12')
+        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=18')
         versioned_dashboard_js.do_GET()
 
         self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
@@ -157,8 +157,9 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
-        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=9">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=12" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=10">', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=18" defer></script>', DASHBOARD_FRONTEND)
+        self.assertNotIn('document.title', DASHBOARD_FRONTEND)
         self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
         self.assertIn('max-age=31536000', dashboard_js.header('Cache-Control'))
         self.assertIn('immutable', dashboard_js.header('Cache-Control'))
@@ -1079,13 +1080,17 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('今日收益曲线', DASHBOARD_FRONTEND)
         self.assertIn('isNonTradingCalendarDay', DASHBOARD_FRONTEND)
         self.assertIn('tradingCalendar.is_trading_day === false', DASHBOARD_FRONTEND)
-        self.assertIn('（${esc(latestDay)}）', DASHBOARD_FRONTEND)
+        self.assertIn('function renderPracticeChartTitle', DASHBOARD_FRONTEND)
+        self.assertIn('class="practice-chart-title-measure" aria-hidden="true"', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-chart-title { display:inline-grid; flex:0 0 auto;', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-chart-title-text, .practice-chart-title-measure { grid-area:1 / 1;', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-chart-title-measure { visibility:hidden;', DASHBOARD_FRONTEND)
         self.assertIn('currentDateKey', DASHBOARD_FRONTEND)
         self.assertIn("timeZone: 'Asia/Shanghai'", DASHBOARD_FRONTEND)
         self.assertIn('practicePayloadDateKey', DASHBOARD_FRONTEND)
         self.assertIn('等待今日盘中净值点', DASHBOARD_FRONTEND)
         self.assertIn('最近已有分时点', DASHBOARD_FRONTEND)
-        self.assertIn('收益曲线 · 累计收益', DASHBOARD_FRONTEND)
+        self.assertIn('累积收益曲线', DASHBOARD_FRONTEND)
         self.assertIn('practice-hover-tooltip', DASHBOARD_FRONTEND)
         self.assertIn('practice-chart-hover-layer', DASHBOARD_FRONTEND)
         self.assertIn('practiceHoverMove(event, this)', DASHBOARD_FRONTEND)
@@ -1189,7 +1194,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertNotIn('practiceCalendarAnchor', DASHBOARD_FRONTEND)
         self.assertNotIn('practice-calendar-values empty', DASHBOARD_FRONTEND)
         self.assertNotIn('<h3 class="practice-panel-title"><span>牛牛实战 · 模拟账户</span><button class="practice-calendar-open-btn"', DASHBOARD_FRONTEND)
-        self.assertIn('<h3>实战页面 · 模拟账户</h3>', DASHBOARD_FRONTEND)
+        self.assertIn('<h3>模拟账户</h3>', DASHBOARD_FRONTEND)
         self.assertNotIn('最近交易日收益', DASHBOARD_FRONTEND)
         self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', DASHBOARD_FRONTEND)
 
@@ -1212,10 +1217,21 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('buildPracticeCalendarRows(practiceCalendarHistoryPoints(p)', DASHBOARD_FRONTEND)
         self.assertIn('renderPracticeCurve(p.equity_history || []', DASHBOARD_FRONTEND)
 
+    def test_index_template_separates_single_stock_retries_from_quote_channels(self):
+        self.assertIn(
+            '`腾讯${channels.tencent ?? 0}/东财${channels.eastmoney ?? 0}/Sina${channels.sina ?? 0}`',
+            DASHBOARD_FRONTEND,
+        )
+        self.assertNotIn('/单票${channels.single', DASHBOARD_FRONTEND)
+        self.assertIn(
+            'const singleRetryText = singleRetryCount ? `，单股重试${singleRetryCount}只` : \'\';',
+            DASHBOARD_FRONTEND,
+        )
+
     def test_index_template_uses_independent_category_routes(self):
         self.assertIn("let activeCategory = categoryFromLocation(initialParams);", DASHBOARD_FRONTEND)
         self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];", DASHBOARD_FRONTEND)
-        self.assertIn("practice:'实战页面'", DASHBOARD_FRONTEND)
+        self.assertIn("practice:'模拟交易'", DASHBOARD_FRONTEND)
         self.assertIn("practice: '/practice'", DASHBOARD_FRONTEND)
         self.assertIn("indices: '/indices'", DASHBOARD_FRONTEND)
         self.assertIn("const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};", DASHBOARD_FRONTEND)
