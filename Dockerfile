@@ -28,6 +28,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --disable-pip-version-check --requirement requirements.txt
 
 COPY app/ ./app/
+COPY frontend/ ./frontend/
 COPY --chmod=755 scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
 
 RUN mkdir -p /data/runtime/cron/state /data/runtime/cron/output /data/runtime/logs \

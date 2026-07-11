@@ -4,7 +4,6 @@ import gzip
 import io
 import json
 import os
-import re
 import sqlite3
 import subprocess
 import tempfile
@@ -23,6 +22,15 @@ MODULE_PATH = SRC / 'niuone_dashboard.py'
 spec = importlib.util.spec_from_file_location('dashboard_under_test', MODULE_PATH)
 dashboard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dashboard)
+FRONTEND = ROOT / 'frontend'
+DASHBOARD_FRONTEND = '\n'.join(
+    (FRONTEND / name).read_text(encoding='utf-8')
+    for name in ('index.html', 'dashboard.css', 'dashboard.js')
+)
+ADMIN_FRONTEND = '\n'.join(
+    (FRONTEND / name).read_text(encoding='utf-8')
+    for name in ('admin.html', 'admin.css', 'admin.js')
+)
 
 
 class FakeHandler(dashboard.Handler):
@@ -117,10 +125,11 @@ class DashboardAuthTests(unittest.TestCase):
         admin.do_GET()
         self.assertEqual(admin.status, 200)
         admin_body = admin.wfile.getvalue().decode('utf-8')
-        self.assertIn('<h1>设置页验证</h1>', admin_body)
-        self.assertIn('name="admin_password"', admin_body)
-        self.assertNotIn('<h1>设置</h1>', admin_body)
+        self.assertIn('<script src="/static/admin.js" defer></script>', admin_body)
+        self.assertNotIn('name="admin_password"', admin_body)
         self.assertNotIn("name='env__DASHBOARD_GROK_API_KEY'", admin_body)
+        self.assertIn("fetch('/api/admin/config'", ADMIN_FRONTEND)
+        self.assertIn("renderAdminLogin('')", ADMIN_FRONTEND)
 
         config = FakeHandler(path='/api/admin/config')
         config.do_GET()
@@ -129,6 +138,43 @@ class DashboardAuthTests(unittest.TestCase):
             json.loads(config.wfile.getvalue().decode('utf-8'))['error'],
             'admin_password_required',
         )
+
+    def test_frontend_pages_and_assets_are_served_from_native_static_files(self):
+        home = FakeHandler(path='/')
+        home.do_GET()
+        admin = FakeHandler(path='/admin')
+        admin.do_GET()
+        dashboard_js = FakeHandler(path='/static/dashboard.js')
+        dashboard_js.do_GET()
+        admin_js = FakeHandler(path='/static/admin.js')
+        admin_js.do_GET()
+
+        self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
+        self.assertEqual(admin.wfile.getvalue(), (FRONTEND / 'admin.html').read_bytes())
+        self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
+        self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
+        self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
+        self.assertIn('max-age=300', dashboard_js.header('Cache-Control'))
+        self.assertTrue(dashboard_js.header('ETag'))
+
+        backend_source = MODULE_PATH.read_text(encoding='utf-8')
+        self.assertNotIn('INDEX_HTML', backend_source)
+        self.assertNotIn('ADMIN_HTML', backend_source)
+        self.assertNotIn('<!doctype html>', backend_source)
+
+    def test_dashboard_bootstrap_owns_visit_count_and_visitor_cookie(self):
+        home = FakeHandler(path='/')
+        home.do_GET()
+        self.assertIsNone(home.header('Set-Cookie'))
+
+        bootstrap = FakeHandler(path='/api/dashboard/bootstrap')
+        bootstrap.do_GET()
+        payload = json.loads(bootstrap.wfile.getvalue().decode('utf-8'))
+        self.assertEqual(bootstrap.status, 200)
+        self.assertEqual(payload['visits'], 1)
+        self.assertEqual(payload['unique'], 1)
+        self.assertIn('us_features_enabled', payload)
+        self.assertTrue((bootstrap.header('Set-Cookie') or '').startswith(f'{dashboard.VISITOR_COOKIE_NAME}=nvst_'))
 
     def test_admin_head_routes_match_get_and_post_only_contracts(self):
         admin = FakeHandler(path='/admin', method='HEAD')
@@ -718,36 +764,36 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(payload['snapshot_meta']['source_updated_at'], '2026-06-26 15:00:10')
 
     def test_index_template_has_scrollable_practice_operation_log(self):
-        self.assertIn('function renderPracticeOperationLog(payload)', dashboard.INDEX_HTML)
-        self.assertIn('class="practice-log-scroll"', dashboard.INDEX_HTML)
-        self.assertIn('overflow-y:auto', dashboard.INDEX_HTML)
-        self.assertIn('aria-label="当日所有操作日志"', dashboard.INDEX_HTML)
+        self.assertIn('function renderPracticeOperationLog(payload)', DASHBOARD_FRONTEND)
+        self.assertIn('class="practice-log-scroll"', DASHBOARD_FRONTEND)
+        self.assertIn('overflow-y:auto', DASHBOARD_FRONTEND)
+        self.assertIn('aria-label="当日所有操作日志"', DASHBOARD_FRONTEND)
 
     def test_index_template_can_open_full_practice_log_modal(self):
-        self.assertIn('let practiceLogDetailKey = \'\';', dashboard.INDEX_HTML)
-        self.assertIn('data-practice-log-key=', dashboard.INDEX_HTML)
-        self.assertIn('function renderPracticeLogDetailModal(payload)', dashboard.INDEX_HTML)
-        self.assertIn('function practiceLogRawText(item)', dashboard.INDEX_HTML)
-        self.assertIn('class="practice-log-detail-backdrop"', dashboard.INDEX_HTML)
-        self.assertIn('class="practice-log-detail-text"', dashboard.INDEX_HTML)
-        self.assertIn('data-practice-log-action="close"', dashboard.INDEX_HTML)
-        self.assertIn('practiceLogDetailKey = logTrigger.dataset.practiceLogKey || \'\';', dashboard.INDEX_HTML)
-        self.assertNotIn('practice-log-detail-json', dashboard.INDEX_HTML)
-        self.assertNotIn('practice-log-detail-field', dashboard.INDEX_HTML)
+        self.assertIn('let practiceLogDetailKey = \'\';', DASHBOARD_FRONTEND)
+        self.assertIn('data-practice-log-key=', DASHBOARD_FRONTEND)
+        self.assertIn('function renderPracticeLogDetailModal(payload)', DASHBOARD_FRONTEND)
+        self.assertIn('function practiceLogRawText(item)', DASHBOARD_FRONTEND)
+        self.assertIn('class="practice-log-detail-backdrop"', DASHBOARD_FRONTEND)
+        self.assertIn('class="practice-log-detail-text"', DASHBOARD_FRONTEND)
+        self.assertIn('data-practice-log-action="close"', DASHBOARD_FRONTEND)
+        self.assertIn('practiceLogDetailKey = logTrigger.dataset.practiceLogKey || \'\';', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-log-detail-json', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-log-detail-field', DASHBOARD_FRONTEND)
 
     def test_index_template_hides_trade_rule_note_in_modal(self):
-        self.assertIn('let practiceRuleNoteOpen = false', dashboard.INDEX_HTML)
-        self.assertIn('function renderPracticeRuleNoteModal(note)', dashboard.INDEX_HTML)
-        self.assertIn('data-practice-rule-action="open"', dashboard.INDEX_HTML)
-        self.assertIn('class="practice-rule-backdrop"', dashboard.INDEX_HTML)
-        self.assertIn('${ruleModal}', dashboard.INDEX_HTML)
-        self.assertNotIn('${esc(p.trade_rule_note||', dashboard.INDEX_HTML)
+        self.assertIn('let practiceRuleNoteOpen = false', DASHBOARD_FRONTEND)
+        self.assertIn('function renderPracticeRuleNoteModal(note)', DASHBOARD_FRONTEND)
+        self.assertIn('data-practice-rule-action="open"', DASHBOARD_FRONTEND)
+        self.assertIn('class="practice-rule-backdrop"', DASHBOARD_FRONTEND)
+        self.assertIn('${ruleModal}', DASHBOARD_FRONTEND)
+        self.assertNotIn('${esc(p.trade_rule_note||', DASHBOARD_FRONTEND)
 
     def test_non_message_tabs_request_message_counts_without_records(self):
         self.assertEqual(dashboard.clamp_limit('0'), 0)
         self.assertIn(
             "isMessageCategory() ? messagePageLimit() : 0",
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
 
     def test_us_sector_api_returns_sector_snapshot(self):
@@ -767,239 +813,239 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["symbol"], "SMH")
 
     def test_indices_market_panel_switches_to_us_sectors_with_index_session(self):
-        self.assertIn("let usSectorData = {items: []};", dashboard.INDEX_HTML)
-        self.assertIn("fetch('/api/us_sectors')", dashboard.INDEX_HTML)
-        self.assertIn('function indicesSwitchSession(aIndexItems = [])', dashboard.INDEX_HTML)
-        self.assertIn("let indicesMarketRegionOverride = '';", dashboard.INDEX_HTML)
-        self.assertIn('function resolvedIndicesMarketRegion(aIndexItems = [])', dashboard.INDEX_HTML)
-        self.assertIn('function setIndicesMarketRegion(mode)', dashboard.INDEX_HTML)
-        self.assertIn("const marketRegion = resolvedIndicesMarketRegion(aIndexItems);", dashboard.INDEX_HTML)
-        self.assertIn("const marketUsesUsSectors = marketRegion === 'us';", dashboard.INDEX_HTML)
-        self.assertIn('aria-label="行情市场切换"', dashboard.INDEX_HTML)
-        self.assertIn('data-market-region="a_share"', dashboard.INDEX_HTML)
-        self.assertIn('data-market-region="us"', dashboard.INDEX_HTML)
-        self.assertIn("const activeTitleHtml = activePanel === 'index'", dashboard.INDEX_HTML)
-        self.assertIn('${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}', dashboard.INDEX_HTML)
-        self.assertNotIn('<h2 class="indices-part-title">${activeTitle}</h2>', dashboard.INDEX_HTML)
-        self.assertNotIn('indicesMarketRegionOverride,\n      savedAt', dashboard.INDEX_HTML)
-        self.assertIn('function renderUsSectorMarketBlock()', dashboard.INDEX_HTML)
-        self.assertIn('function renderSectorCloudHeading(source)', dashboard.INDEX_HTML)
-        self.assertIn('更新 ${esc(source.generated_at)}', dashboard.INDEX_HTML)
-        self.assertIn('${renderSectorCloudHeading(sec)}', dashboard.INDEX_HTML)
-        self.assertIn('${renderSectorCloudHeading(usSectorData)}', dashboard.INDEX_HTML)
-        self.assertNotIn('<h3>美股板块涨跌幅', dashboard.INDEX_HTML)
-        self.assertIn('rows.filter(row => Number.isFinite(row.pct) && row.pct > 0)', dashboard.INDEX_HTML)
-        self.assertIn('rows.filter(row => Number.isFinite(row.pct) && row.pct < 0)', dashboard.INDEX_HTML)
-        self.assertIn('暂无上涨板块', dashboard.INDEX_HTML)
-        self.assertIn('暂无下跌板块', dashboard.INDEX_HTML)
-        self.assertIn("s.a_share_mapping.slice(0, 3).join('、')", dashboard.INDEX_HTML)
-        self.assertNotIn("`A股映射 ${s.a_share_mapping.slice(0, 3).join('、')}`", dashboard.INDEX_HTML)
-        self.assertNotIn('const US_MARKET_QUOTE_SYMBOLS', dashboard.INDEX_HTML)
+        self.assertIn("let usSectorData = {items: []};", DASHBOARD_FRONTEND)
+        self.assertIn("fetch('/api/us_sectors')", DASHBOARD_FRONTEND)
+        self.assertIn('function indicesSwitchSession(aIndexItems = [])', DASHBOARD_FRONTEND)
+        self.assertIn("let indicesMarketRegionOverride = '';", DASHBOARD_FRONTEND)
+        self.assertIn('function resolvedIndicesMarketRegion(aIndexItems = [])', DASHBOARD_FRONTEND)
+        self.assertIn('function setIndicesMarketRegion(mode)', DASHBOARD_FRONTEND)
+        self.assertIn("const marketRegion = resolvedIndicesMarketRegion(aIndexItems);", DASHBOARD_FRONTEND)
+        self.assertIn("const marketUsesUsSectors = marketRegion === 'us';", DASHBOARD_FRONTEND)
+        self.assertIn('aria-label="行情市场切换"', DASHBOARD_FRONTEND)
+        self.assertIn('data-market-region="a_share"', DASHBOARD_FRONTEND)
+        self.assertIn('data-market-region="us"', DASHBOARD_FRONTEND)
+        self.assertIn("const activeTitleHtml = activePanel === 'index'", DASHBOARD_FRONTEND)
+        self.assertIn('${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}', DASHBOARD_FRONTEND)
+        self.assertNotIn('<h2 class="indices-part-title">${activeTitle}</h2>', DASHBOARD_FRONTEND)
+        self.assertNotIn('indicesMarketRegionOverride,\n      savedAt', DASHBOARD_FRONTEND)
+        self.assertIn('function renderUsSectorMarketBlock()', DASHBOARD_FRONTEND)
+        self.assertIn('function renderSectorCloudHeading(source)', DASHBOARD_FRONTEND)
+        self.assertIn('更新 ${esc(source.generated_at)}', DASHBOARD_FRONTEND)
+        self.assertIn('${renderSectorCloudHeading(sec)}', DASHBOARD_FRONTEND)
+        self.assertIn('${renderSectorCloudHeading(usSectorData)}', DASHBOARD_FRONTEND)
+        self.assertNotIn('<h3>美股板块涨跌幅', DASHBOARD_FRONTEND)
+        self.assertIn('rows.filter(row => Number.isFinite(row.pct) && row.pct > 0)', DASHBOARD_FRONTEND)
+        self.assertIn('rows.filter(row => Number.isFinite(row.pct) && row.pct < 0)', DASHBOARD_FRONTEND)
+        self.assertIn('暂无上涨板块', DASHBOARD_FRONTEND)
+        self.assertIn('暂无下跌板块', DASHBOARD_FRONTEND)
+        self.assertIn("s.a_share_mapping.slice(0, 3).join('、')", DASHBOARD_FRONTEND)
+        self.assertNotIn("`A股映射 ${s.a_share_mapping.slice(0, 3).join('、')}`", DASHBOARD_FRONTEND)
+        self.assertNotIn('const US_MARKET_QUOTE_SYMBOLS', DASHBOARD_FRONTEND)
 
     def test_indices_panel_can_put_a_share_or_us_indices_first(self):
-        self.assertIn("const INDICES_INDEX_PRIORITY_STATE_KEY = 'niuniu-dashboard-index-priority-v1';", dashboard.INDEX_HTML)
-        self.assertIn("let indicesIndexPriorityOverride = '';", dashboard.INDEX_HTML)
-        self.assertIn('function setIndicesIndexPriority(mode)', dashboard.INDEX_HTML)
-        self.assertIn('function resolvedIndicesIndexPriority(aIndexItems = [])', dashboard.INDEX_HTML)
-        self.assertIn("sessionStorage.setItem(INDICES_INDEX_PRIORITY_STATE_KEY, mode)", dashboard.INDEX_HTML)
-        self.assertIn("const indexSections = indexPriority === 'a_share' ? [", dashboard.INDEX_HTML)
-        self.assertIn("['A股指数', aIndexItems],\n      ['美股指数', usIndexItems],", dashboard.INDEX_HTML)
-        self.assertIn("['美股指数', usIndexItems],\n      ['A股指数', aIndexItems],", dashboard.INDEX_HTML)
-        self.assertIn('return [...indexSections, ...supportingSections]', dashboard.INDEX_HTML)
-        self.assertIn('aria-label="指数排序切换"', dashboard.INDEX_HTML)
-        self.assertIn('data-index-priority="a_share"', dashboard.INDEX_HTML)
-        self.assertIn('data-index-priority="us"', dashboard.INDEX_HTML)
-        self.assertIn('A股在上', dashboard.INDEX_HTML)
-        self.assertIn('美股在上', dashboard.INDEX_HTML)
-        self.assertIn('${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}', dashboard.INDEX_HTML)
+        self.assertIn("const INDICES_INDEX_PRIORITY_STATE_KEY = 'niuniu-dashboard-index-priority-v1';", DASHBOARD_FRONTEND)
+        self.assertIn("let indicesIndexPriorityOverride = '';", DASHBOARD_FRONTEND)
+        self.assertIn('function setIndicesIndexPriority(mode)', DASHBOARD_FRONTEND)
+        self.assertIn('function resolvedIndicesIndexPriority(aIndexItems = [])', DASHBOARD_FRONTEND)
+        self.assertIn("sessionStorage.setItem(INDICES_INDEX_PRIORITY_STATE_KEY, mode)", DASHBOARD_FRONTEND)
+        self.assertIn("const indexSections = indexPriority === 'a_share' ? [", DASHBOARD_FRONTEND)
+        self.assertIn("['A股指数', aIndexItems],\n      ['美股指数', usIndexItems],", DASHBOARD_FRONTEND)
+        self.assertIn("['美股指数', usIndexItems],\n      ['A股指数', aIndexItems],", DASHBOARD_FRONTEND)
+        self.assertIn('return [...indexSections, ...supportingSections]', DASHBOARD_FRONTEND)
+        self.assertIn('aria-label="指数排序切换"', DASHBOARD_FRONTEND)
+        self.assertIn('data-index-priority="a_share"', DASHBOARD_FRONTEND)
+        self.assertIn('data-index-priority="us"', DASHBOARD_FRONTEND)
+        self.assertIn('A股在上', DASHBOARD_FRONTEND)
+        self.assertIn('美股在上', DASHBOARD_FRONTEND)
+        self.assertIn('${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}', DASHBOARD_FRONTEND)
 
     def test_index_template_github_button_links_to_repo_with_icon(self):
         self.assertIn(
             '<a class="header-link" href="https://github.com/kunkundi/niuone"',
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
-        self.assertIn('.settings-link, .header-link { align-items:center;', dashboard.INDEX_HTML)
-        self.assertIn('.settings-link:hover, .header-link:hover', dashboard.INDEX_HTML)
-        self.assertIn('rel="noopener noreferrer"', dashboard.INDEX_HTML)
-        self.assertIn('<svg viewBox="0 0 16 16" aria-hidden="true"', dashboard.INDEX_HTML)
-        self.assertNotIn('<span class="header-text" title="开源仓库">GitHub</span>', dashboard.INDEX_HTML)
+        self.assertIn('.settings-link, .header-link { align-items:center;', DASHBOARD_FRONTEND)
+        self.assertIn('.settings-link:hover, .header-link:hover', DASHBOARD_FRONTEND)
+        self.assertIn('rel="noopener noreferrer"', DASHBOARD_FRONTEND)
+        self.assertIn('<svg viewBox="0 0 16 16" aria-hidden="true"', DASHBOARD_FRONTEND)
+        self.assertNotIn('<span class="header-text" title="开源仓库">GitHub</span>', DASHBOARD_FRONTEND)
 
     def test_index_template_inlines_trade_reasons_on_stock_cards(self):
-        self.assertNotIn('买入战法绩效', dashboard.INDEX_HTML)
-        self.assertNotIn('BUY_COLORS', dashboard.INDEX_HTML)
-        self.assertNotIn('renderStrategyPerformance', dashboard.INDEX_HTML)
-        self.assertNotIn('practice-perf', dashboard.INDEX_HTML)
-        self.assertNotIn('exit-rule-row', dashboard.INDEX_HTML)
-        self.assertIn('x.bought_today', dashboard.INDEX_HTML)
-        self.assertIn('买入理由', dashboard.INDEX_HTML)
-        self.assertIn('卖出归因', dashboard.INDEX_HTML)
-        self.assertIn('最低/最高', dashboard.INDEX_HTML)
-        self.assertNotIn('最低涨幅', dashboard.INDEX_HTML)
-        self.assertNotIn('最高涨幅', dashboard.INDEX_HTML)
-        self.assertIn('industryLabel = item.industry || item.sector || item.board', dashboard.INDEX_HTML)
-        self.assertIn('${esc(industryLabel)}</span>', dashboard.INDEX_HTML)
-        self.assertIn('white-space:nowrap', dashboard.INDEX_HTML)
-        self.assertNotIn('所属板块', dashboard.INDEX_HTML)
-        self.assertNotIn('板块 ${esc(industryLabel)}', dashboard.INDEX_HTML)
-        self.assertIn('仓位占比', dashboard.INDEX_HTML)
-        self.assertIn('可卖/持有', dashboard.INDEX_HTML)
-        self.assertNotIn('${esc(x.qty)}股', dashboard.INDEX_HTML)
-        self.assertIn('今日收益曲线', dashboard.INDEX_HTML)
-        self.assertIn('isNonTradingCalendarDay', dashboard.INDEX_HTML)
-        self.assertIn('tradingCalendar.is_trading_day === false', dashboard.INDEX_HTML)
-        self.assertIn('（${esc(latestDay)}）', dashboard.INDEX_HTML)
-        self.assertIn('currentDateKey', dashboard.INDEX_HTML)
-        self.assertIn("timeZone: 'Asia/Shanghai'", dashboard.INDEX_HTML)
-        self.assertIn('practicePayloadDateKey', dashboard.INDEX_HTML)
-        self.assertIn('等待今日盘中净值点', dashboard.INDEX_HTML)
-        self.assertIn('最近已有分时点', dashboard.INDEX_HTML)
-        self.assertIn('收益曲线 · 累计收益', dashboard.INDEX_HTML)
-        self.assertIn('practice-hover-tooltip', dashboard.INDEX_HTML)
-        self.assertIn('practice-chart-hover-layer', dashboard.INDEX_HTML)
-        self.assertIn('practiceHoverMove(event, this)', dashboard.INDEX_HTML)
-        self.assertIn('touch-action:none', dashboard.INDEX_HTML)
-        self.assertIn('data-practice-hover-points', dashboard.INDEX_HTML)
-        self.assertIn("layer.classList.toggle('place-left'", dashboard.INDEX_HTML)
-        self.assertIn("layer.classList.toggle('place-bottom'", dashboard.INDEX_HTML)
-        self.assertIn('收益金额', dashboard.INDEX_HTML)
-        self.assertIn('累计收益率', dashboard.INDEX_HTML)
-        self.assertIn('当日收益率', dashboard.INDEX_HTML)
-        self.assertIn('function renderPracticeTradeMarkers', dashboard.INDEX_HTML)
-        self.assertIn('practiceTradeMarkersForDate', dashboard.INDEX_HTML)
-        self.assertIn('practice-trade-marker-tooltip', dashboard.INDEX_HTML)
-        self.assertIn("const side = trade.action === 'BUY' ? '买' : '卖';", dashboard.INDEX_HTML)
-        self.assertIn('function renderPracticeTradeMarkerLine', dashboard.INDEX_HTML)
-        self.assertIn('practice-trade-marker-side', dashboard.INDEX_HTML)
-        self.assertIn('.practice-chart-card { position:relative; z-index:0; isolation:isolate; overflow:hidden;', dashboard.INDEX_HTML)
-        self.assertIn('.practice-trade-marker { --marker-size:18px; --marker-radius:9px; appearance:none;', dashboard.INDEX_HTML)
+        self.assertNotIn('买入战法绩效', DASHBOARD_FRONTEND)
+        self.assertNotIn('BUY_COLORS', DASHBOARD_FRONTEND)
+        self.assertNotIn('renderStrategyPerformance', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-perf', DASHBOARD_FRONTEND)
+        self.assertNotIn('exit-rule-row', DASHBOARD_FRONTEND)
+        self.assertIn('x.bought_today', DASHBOARD_FRONTEND)
+        self.assertIn('买入理由', DASHBOARD_FRONTEND)
+        self.assertIn('卖出归因', DASHBOARD_FRONTEND)
+        self.assertIn('最低/最高', DASHBOARD_FRONTEND)
+        self.assertNotIn('最低涨幅', DASHBOARD_FRONTEND)
+        self.assertNotIn('最高涨幅', DASHBOARD_FRONTEND)
+        self.assertIn('industryLabel = item.industry || item.sector || item.board', DASHBOARD_FRONTEND)
+        self.assertIn('${esc(industryLabel)}</span>', DASHBOARD_FRONTEND)
+        self.assertIn('white-space:nowrap', DASHBOARD_FRONTEND)
+        self.assertNotIn('所属板块', DASHBOARD_FRONTEND)
+        self.assertNotIn('板块 ${esc(industryLabel)}', DASHBOARD_FRONTEND)
+        self.assertIn('仓位占比', DASHBOARD_FRONTEND)
+        self.assertIn('可卖/持有', DASHBOARD_FRONTEND)
+        self.assertNotIn('${esc(x.qty)}股', DASHBOARD_FRONTEND)
+        self.assertIn('今日收益曲线', DASHBOARD_FRONTEND)
+        self.assertIn('isNonTradingCalendarDay', DASHBOARD_FRONTEND)
+        self.assertIn('tradingCalendar.is_trading_day === false', DASHBOARD_FRONTEND)
+        self.assertIn('（${esc(latestDay)}）', DASHBOARD_FRONTEND)
+        self.assertIn('currentDateKey', DASHBOARD_FRONTEND)
+        self.assertIn("timeZone: 'Asia/Shanghai'", DASHBOARD_FRONTEND)
+        self.assertIn('practicePayloadDateKey', DASHBOARD_FRONTEND)
+        self.assertIn('等待今日盘中净值点', DASHBOARD_FRONTEND)
+        self.assertIn('最近已有分时点', DASHBOARD_FRONTEND)
+        self.assertIn('收益曲线 · 累计收益', DASHBOARD_FRONTEND)
+        self.assertIn('practice-hover-tooltip', DASHBOARD_FRONTEND)
+        self.assertIn('practice-chart-hover-layer', DASHBOARD_FRONTEND)
+        self.assertIn('practiceHoverMove(event, this)', DASHBOARD_FRONTEND)
+        self.assertIn('touch-action:none', DASHBOARD_FRONTEND)
+        self.assertIn('data-practice-hover-points', DASHBOARD_FRONTEND)
+        self.assertIn("layer.classList.toggle('place-left'", DASHBOARD_FRONTEND)
+        self.assertIn("layer.classList.toggle('place-bottom'", DASHBOARD_FRONTEND)
+        self.assertIn('收益金额', DASHBOARD_FRONTEND)
+        self.assertIn('累计收益率', DASHBOARD_FRONTEND)
+        self.assertIn('当日收益率', DASHBOARD_FRONTEND)
+        self.assertIn('function renderPracticeTradeMarkers', DASHBOARD_FRONTEND)
+        self.assertIn('practiceTradeMarkersForDate', DASHBOARD_FRONTEND)
+        self.assertIn('practice-trade-marker-tooltip', DASHBOARD_FRONTEND)
+        self.assertIn("const side = trade.action === 'BUY' ? '买' : '卖';", DASHBOARD_FRONTEND)
+        self.assertIn('function renderPracticeTradeMarkerLine', DASHBOARD_FRONTEND)
+        self.assertIn('practice-trade-marker-side', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-chart-card { position:relative; z-index:0; isolation:isolate; overflow:hidden;', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-trade-marker { --marker-size:18px; --marker-radius:9px; appearance:none;', DASHBOARD_FRONTEND)
         self.assertIn(
             'left:clamp(var(--marker-radius), var(--marker-x), calc(100% - var(--marker-radius)));',
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
-        self.assertIn('min-width:var(--marker-size); max-width:var(--marker-size);', dashboard.INDEX_HTML)
+        self.assertIn('min-width:var(--marker-size); max-width:var(--marker-size);', DASHBOARD_FRONTEND)
         self.assertIn(
             '.practice-calendar-day-curve-chart .practice-trade-marker { --marker-size:15px; --marker-radius:7.5px;',
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
-        self.assertIn('style="--marker-x:${xPct.toFixed(2)}%;top:${yPct.toFixed(2)}%"', dashboard.INDEX_HTML)
-        self.assertIn('font-family:inherit; cursor:default;', dashboard.INDEX_HTML)
-        self.assertNotIn('font-family:inherit; cursor:help;', dashboard.INDEX_HTML)
-        self.assertIn('.practice-trade-marker-pnl.up { color:#ff6b6d; }', dashboard.INDEX_HTML)
-        self.assertIn('.practice-trade-marker-pnl.down { color:#39d98a; }', dashboard.INDEX_HTML)
-        self.assertIn('.practice-trade-marker.sell-partial { background:#f59e0b;', dashboard.INDEX_HTML)
-        self.assertIn('.practice-trade-marker.sell-full { background:#ef4444;', dashboard.INDEX_HTML)
-        self.assertIn("? 'sell-full'", dashboard.INDEX_HTML)
-        self.assertIn("? 'sell-partial' : 'sell-mixed'", dashboard.INDEX_HTML)
-        self.assertIn("trade.action === 'SELL' && trade.isFullExit", dashboard.INDEX_HTML)
-        self.assertIn("${practiceTradeShareText(trade.shares)}股×${practiceTradePriceText(trade.price)}", dashboard.INDEX_HTML)
-        self.assertIn('renderPracticeTradeMarkers(latestDay, xFromTime, plottedPts, w, h)', dashboard.INDEX_HTML)
-        self.assertIn('const tradeMarkerHtml = renderPracticeTradeMarkers(', dashboard.INDEX_HTML)
-        self.assertIn('class="practice-calendar-day-curve-chart"', dashboard.INDEX_HTML)
-        self.assertNotIn('practice-hover-readout', dashboard.INDEX_HTML)
-        self.assertNotIn('拖动查看收益曲线点位', dashboard.INDEX_HTML)
-        self.assertNotIn('每日总收益', dashboard.INDEX_HTML)
-        self.assertNotIn('if (points.length < 2) points = rawPoints.slice(-180);', dashboard.INDEX_HTML)
-        self.assertIn('交易日历', dashboard.INDEX_HTML)
-        self.assertIn('openPracticeCalendar(event)', dashboard.INDEX_HTML)
-        self.assertIn('buildPracticeCalendarRows', dashboard.INDEX_HTML)
-        self.assertIn('practice-calendar-popover', dashboard.INDEX_HTML)
-        self.assertIn('practiceCalendarSelectedDate', dashboard.INDEX_HTML)
-        self.assertIn('renderPracticeCalendarDayCurve', dashboard.INDEX_HTML)
-        self.assertIn('practice-calendar-day-curve', dashboard.INDEX_HTML)
-        self.assertIn('data-practice-calendar-date="${esc(date)}"', dashboard.INDEX_HTML)
-        self.assertIn('data-practice-calendar-action="clear-day"', dashboard.INDEX_HTML)
-        self.assertIn('data-practice-calendar-curve', dashboard.INDEX_HTML)
-        self.assertIn('selectedCls = date === practiceCalendarSelectedDate', dashboard.INDEX_HTML)
-        self.assertIn("practiceCalendarSelectedDate = practiceCalendarSelectedDate === nextDate ? '' : nextDate", dashboard.INDEX_HTML)
-        self.assertIn('sessionDayPoints', dashboard.INDEX_HTML)
-        self.assertIn('allDayHistoryPoints.at(-1)?.equity', dashboard.INDEX_HTML)
-        self.assertIn("? '分时加载失败 · '", dashboard.INDEX_HTML)
-        self.assertIn('practiceCalendarHistoryPoints(p)', dashboard.INDEX_HTML)
-        self.assertIn('practiceCalendarHistoryCoversDate(p, date)', dashboard.INDEX_HTML)
+        self.assertIn('style="--marker-x:${xPct.toFixed(2)}%;top:${yPct.toFixed(2)}%"', DASHBOARD_FRONTEND)
+        self.assertIn('font-family:inherit; cursor:default;', DASHBOARD_FRONTEND)
+        self.assertNotIn('font-family:inherit; cursor:help;', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-trade-marker-pnl.up { color:#ff6b6d; }', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-trade-marker-pnl.down { color:#39d98a; }', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-trade-marker.sell-partial { background:#f59e0b;', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-trade-marker.sell-full { background:#ef4444;', DASHBOARD_FRONTEND)
+        self.assertIn("? 'sell-full'", DASHBOARD_FRONTEND)
+        self.assertIn("? 'sell-partial' : 'sell-mixed'", DASHBOARD_FRONTEND)
+        self.assertIn("trade.action === 'SELL' && trade.isFullExit", DASHBOARD_FRONTEND)
+        self.assertIn("${practiceTradeShareText(trade.shares)}股×${practiceTradePriceText(trade.price)}", DASHBOARD_FRONTEND)
+        self.assertIn('renderPracticeTradeMarkers(latestDay, xFromTime, plottedPts, w, h)', DASHBOARD_FRONTEND)
+        self.assertIn('const tradeMarkerHtml = renderPracticeTradeMarkers(', DASHBOARD_FRONTEND)
+        self.assertIn('class="practice-calendar-day-curve-chart"', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-hover-readout', DASHBOARD_FRONTEND)
+        self.assertNotIn('拖动查看收益曲线点位', DASHBOARD_FRONTEND)
+        self.assertNotIn('每日总收益', DASHBOARD_FRONTEND)
+        self.assertNotIn('if (points.length < 2) points = rawPoints.slice(-180);', DASHBOARD_FRONTEND)
+        self.assertIn('交易日历', DASHBOARD_FRONTEND)
+        self.assertIn('openPracticeCalendar(event)', DASHBOARD_FRONTEND)
+        self.assertIn('buildPracticeCalendarRows', DASHBOARD_FRONTEND)
+        self.assertIn('practice-calendar-popover', DASHBOARD_FRONTEND)
+        self.assertIn('practiceCalendarSelectedDate', DASHBOARD_FRONTEND)
+        self.assertIn('renderPracticeCalendarDayCurve', DASHBOARD_FRONTEND)
+        self.assertIn('practice-calendar-day-curve', DASHBOARD_FRONTEND)
+        self.assertIn('data-practice-calendar-date="${esc(date)}"', DASHBOARD_FRONTEND)
+        self.assertIn('data-practice-calendar-action="clear-day"', DASHBOARD_FRONTEND)
+        self.assertIn('data-practice-calendar-curve', DASHBOARD_FRONTEND)
+        self.assertIn('selectedCls = date === practiceCalendarSelectedDate', DASHBOARD_FRONTEND)
+        self.assertIn("practiceCalendarSelectedDate = practiceCalendarSelectedDate === nextDate ? '' : nextDate", DASHBOARD_FRONTEND)
+        self.assertIn('sessionDayPoints', DASHBOARD_FRONTEND)
+        self.assertIn('allDayHistoryPoints.at(-1)?.equity', DASHBOARD_FRONTEND)
+        self.assertIn("? '分时加载失败 · '", DASHBOARD_FRONTEND)
+        self.assertIn('practiceCalendarHistoryPoints(p)', DASHBOARD_FRONTEND)
+        self.assertIn('practiceCalendarHistoryCoversDate(p, date)', DASHBOARD_FRONTEND)
         self.assertIn(
             'const needsFullHistory = isCurrentDate || (hasPartialHistory && !practiceCalendarHistoryCoversDate(p, date));',
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
-        self.assertIn('分时曲线加载中…', dashboard.INDEX_HTML)
-        self.assertIn('分时曲线加载失败', dashboard.INDEX_HTML)
-        self.assertIn("time: `${date} 15:00:00`", dashboard.INDEX_HTML)
-        self.assertIn('const w = 464, h = 96', dashboard.INDEX_HTML)
-        self.assertIn('0轴 ${prevPoint ? esc(String(prevPoint.time || \'\').slice(5, 16)) : \'初始资金\'}', dashboard.INDEX_HTML)
-        self.assertIn('position:absolute; left:0; right:0; bottom:calc(100% + 8px)', dashboard.INDEX_HTML)
-        self.assertIn('overflow:visible', dashboard.INDEX_HTML)
-        self.assertIn('width:min(390px', dashboard.INDEX_HTML)
-        self.assertIn('transform:translate(-50%,-50%)', dashboard.INDEX_HTML)
-        self.assertNotIn('max-height:min(76vh, 640px); display:grid; gap:8px', dashboard.INDEX_HTML)
-        self.assertNotIn('practice-calendar-popover::before', dashboard.INDEX_HTML)
-        self.assertNotIn('filter:blur(18px)', dashboard.INDEX_HTML)
-        self.assertIn('border:1px solid transparent', dashboard.INDEX_HTML)
-        self.assertIn('linear-gradient(135deg, rgba(96,165,250,.68), rgba(124,92,255,.56) 48%, rgba(52,211,153,.32)) border-box', dashboard.INDEX_HTML)
-        self.assertIn('background:linear-gradient(180deg, #172033, #101827)', dashboard.INDEX_HTML)
-        self.assertIn('background:rgba(31,42,62,.72)', dashboard.INDEX_HTML)
-        self.assertIn('practice-calendar-no-data', dashboard.INDEX_HTML)
-        self.assertIn('grid-template-columns:repeat(5, minmax(0, 1.14fr)) repeat(2, minmax(30px, .72fr))', dashboard.INDEX_HTML)
-        self.assertIn('dayOfWeek === 0 || dayOfWeek === 6', dashboard.INDEX_HTML)
-        self.assertIn('practice-calendar-day.weekend', dashboard.INDEX_HTML)
-        self.assertIn('practice-calendar-weekday.weekend', dashboard.INDEX_HTML)
-        self.assertIn('weekendTodayMarker = isToday && isWeekend && !row', dashboard.INDEX_HTML)
-        self.assertIn('inlineTodayMarker = isToday && !weekendTodayMarker', dashboard.INDEX_HTML)
-        self.assertIn('class="practice-calendar-today weekend-today"', dashboard.INDEX_HTML)
-        self.assertIn('grid-row:2; align-self:end; justify-self:start; padding:0 3px', dashboard.INDEX_HTML)
-        self.assertNotIn('practice-calendar-day.weekend { min-height', dashboard.INDEX_HTML)
-        self.assertNotIn('align-self:start', dashboard.INDEX_HTML)
-        self.assertIn("${date}${isWeekend ? ' 周末' : ''}", dashboard.INDEX_HTML)
-        self.assertIn('signedCellPct', dashboard.INDEX_HTML)
-        self.assertIn('signedCellAmount', dashboard.INDEX_HTML)
-        self.assertIn('aria-label="${esc(fullText)}"', dashboard.INDEX_HTML)
-        self.assertIn('practice-calendar-grid', dashboard.INDEX_HTML)
-        self.assertIn('data-practice-calendar-action="prev"', dashboard.INDEX_HTML)
-        self.assertNotIn('practice-calendar-backdrop', dashboard.INDEX_HTML)
-        self.assertNotIn('practiceCalendarAnchor', dashboard.INDEX_HTML)
-        self.assertNotIn('practice-calendar-values empty', dashboard.INDEX_HTML)
-        self.assertNotIn('<h3 class="practice-panel-title"><span>牛牛实战 · 模拟账户</span><button class="practice-calendar-open-btn"', dashboard.INDEX_HTML)
-        self.assertIn('<h3>实战页面 · 模拟账户</h3>', dashboard.INDEX_HTML)
-        self.assertNotIn('最近交易日收益', dashboard.INDEX_HTML)
-        self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', dashboard.INDEX_HTML)
+        self.assertIn('分时曲线加载中…', DASHBOARD_FRONTEND)
+        self.assertIn('分时曲线加载失败', DASHBOARD_FRONTEND)
+        self.assertIn("time: `${date} 15:00:00`", DASHBOARD_FRONTEND)
+        self.assertIn('const w = 464, h = 96', DASHBOARD_FRONTEND)
+        self.assertIn('0轴 ${prevPoint ? esc(String(prevPoint.time || \'\').slice(5, 16)) : \'初始资金\'}', DASHBOARD_FRONTEND)
+        self.assertIn('position:absolute; left:0; right:0; bottom:calc(100% + 8px)', DASHBOARD_FRONTEND)
+        self.assertIn('overflow:visible', DASHBOARD_FRONTEND)
+        self.assertIn('width:min(390px', DASHBOARD_FRONTEND)
+        self.assertIn('transform:translate(-50%,-50%)', DASHBOARD_FRONTEND)
+        self.assertNotIn('max-height:min(76vh, 640px); display:grid; gap:8px', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-calendar-popover::before', DASHBOARD_FRONTEND)
+        self.assertNotIn('filter:blur(18px)', DASHBOARD_FRONTEND)
+        self.assertIn('border:1px solid transparent', DASHBOARD_FRONTEND)
+        self.assertIn('linear-gradient(135deg, rgba(96,165,250,.68), rgba(124,92,255,.56) 48%, rgba(52,211,153,.32)) border-box', DASHBOARD_FRONTEND)
+        self.assertIn('background:linear-gradient(180deg, #172033, #101827)', DASHBOARD_FRONTEND)
+        self.assertIn('background:rgba(31,42,62,.72)', DASHBOARD_FRONTEND)
+        self.assertIn('practice-calendar-no-data', DASHBOARD_FRONTEND)
+        self.assertIn('grid-template-columns:repeat(5, minmax(0, 1.14fr)) repeat(2, minmax(30px, .72fr))', DASHBOARD_FRONTEND)
+        self.assertIn('dayOfWeek === 0 || dayOfWeek === 6', DASHBOARD_FRONTEND)
+        self.assertIn('practice-calendar-day.weekend', DASHBOARD_FRONTEND)
+        self.assertIn('practice-calendar-weekday.weekend', DASHBOARD_FRONTEND)
+        self.assertIn('weekendTodayMarker = isToday && isWeekend && !row', DASHBOARD_FRONTEND)
+        self.assertIn('inlineTodayMarker = isToday && !weekendTodayMarker', DASHBOARD_FRONTEND)
+        self.assertIn('class="practice-calendar-today weekend-today"', DASHBOARD_FRONTEND)
+        self.assertIn('grid-row:2; align-self:end; justify-self:start; padding:0 3px', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-calendar-day.weekend { min-height', DASHBOARD_FRONTEND)
+        self.assertNotIn('align-self:start', DASHBOARD_FRONTEND)
+        self.assertIn("${date}${isWeekend ? ' 周末' : ''}", DASHBOARD_FRONTEND)
+        self.assertIn('signedCellPct', DASHBOARD_FRONTEND)
+        self.assertIn('signedCellAmount', DASHBOARD_FRONTEND)
+        self.assertIn('aria-label="${esc(fullText)}"', DASHBOARD_FRONTEND)
+        self.assertIn('practice-calendar-grid', DASHBOARD_FRONTEND)
+        self.assertIn('data-practice-calendar-action="prev"', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-calendar-backdrop', DASHBOARD_FRONTEND)
+        self.assertNotIn('practiceCalendarAnchor', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-calendar-values empty', DASHBOARD_FRONTEND)
+        self.assertNotIn('<h3 class="practice-panel-title"><span>牛牛实战 · 模拟账户</span><button class="practice-calendar-open-btn"', DASHBOARD_FRONTEND)
+        self.assertIn('<h3>实战页面 · 模拟账户</h3>', DASHBOARD_FRONTEND)
+        self.assertNotIn('最近交易日收益', DASHBOARD_FRONTEND)
+        self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', DASHBOARD_FRONTEND)
 
     def test_index_template_loads_calendar_history_without_waiting_for_full_snapshot(self):
-        self.assertIn("const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v5';", dashboard.INDEX_HTML)
-        self.assertIn("'/api/niuniu_practice?fast=1&calendar_schema=1'", dashboard.INDEX_HTML)
-        self.assertIn("fetchJson('/api/niuniu_practice?snapshot_schema=2')", dashboard.INDEX_HTML)
-        self.assertIn('const fullPracticePromise = practiceFullRequest;', dashboard.INDEX_HTML)
-        self.assertIn('function mergePracticePayloadSnapshots', dashboard.INDEX_HTML)
-        self.assertIn('function mergePracticeEquityRows', dashboard.INDEX_HTML)
-        self.assertIn('function comparePracticePayloadFreshness', dashboard.INDEX_HTML)
-        self.assertIn("String(payload.equity_history_scope || '') === 'unavailable'", dashboard.INDEX_HTML)
-        self.assertNotIn("typeof payload !== 'object' || payload.last_error", dashboard.INDEX_HTML)
-        self.assertIn('if (seq !== practiceLoadSeq) return;', dashboard.INDEX_HTML)
-        self.assertIn("practiceFullSnapshotStatus = 'loading';", dashboard.INDEX_HTML)
-        self.assertIn("practiceFullSnapshotStatus = 'loaded';", dashboard.INDEX_HTML)
-        self.assertIn("practiceFullSnapshotStatus = 'error';", dashboard.INDEX_HTML)
-        self.assertIn('function compactPracticeCalendarHistoryPoints', dashboard.INDEX_HTML)
-        self.assertIn('calendar.complete !== true', dashboard.INDEX_HTML)
-        self.assertIn('buildPracticeCalendarRows(practiceCalendarHistoryPoints(p)', dashboard.INDEX_HTML)
-        self.assertIn('renderPracticeCurve(p.equity_history || []', dashboard.INDEX_HTML)
+        self.assertIn("const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v5';", DASHBOARD_FRONTEND)
+        self.assertIn("'/api/niuniu_practice?fast=1&calendar_schema=1'", DASHBOARD_FRONTEND)
+        self.assertIn("fetchJson('/api/niuniu_practice?snapshot_schema=2')", DASHBOARD_FRONTEND)
+        self.assertIn('const fullPracticePromise = practiceFullRequest;', DASHBOARD_FRONTEND)
+        self.assertIn('function mergePracticePayloadSnapshots', DASHBOARD_FRONTEND)
+        self.assertIn('function mergePracticeEquityRows', DASHBOARD_FRONTEND)
+        self.assertIn('function comparePracticePayloadFreshness', DASHBOARD_FRONTEND)
+        self.assertIn("String(payload.equity_history_scope || '') === 'unavailable'", DASHBOARD_FRONTEND)
+        self.assertNotIn("typeof payload !== 'object' || payload.last_error", DASHBOARD_FRONTEND)
+        self.assertIn('if (seq !== practiceLoadSeq) return;', DASHBOARD_FRONTEND)
+        self.assertIn("practiceFullSnapshotStatus = 'loading';", DASHBOARD_FRONTEND)
+        self.assertIn("practiceFullSnapshotStatus = 'loaded';", DASHBOARD_FRONTEND)
+        self.assertIn("practiceFullSnapshotStatus = 'error';", DASHBOARD_FRONTEND)
+        self.assertIn('function compactPracticeCalendarHistoryPoints', DASHBOARD_FRONTEND)
+        self.assertIn('calendar.complete !== true', DASHBOARD_FRONTEND)
+        self.assertIn('buildPracticeCalendarRows(practiceCalendarHistoryPoints(p)', DASHBOARD_FRONTEND)
+        self.assertIn('renderPracticeCurve(p.equity_history || []', DASHBOARD_FRONTEND)
 
     def test_index_template_uses_practice_as_the_canonical_page_name(self):
-        self.assertIn("let activeCategory = initialParams.get('category') || 'practice';", dashboard.INDEX_HTML)
-        self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];", dashboard.INDEX_HTML)
-        self.assertIn("practice:'实战页面'", dashboard.INDEX_HTML)
-        self.assertIn("const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};", dashboard.INDEX_HTML)
-        self.assertIn('const normalized = LEGACY_CATEGORY_ALIASES[category] || category;', dashboard.INDEX_HTML)
-        self.assertIn("fetchJson('/api/practice_candidates')", dashboard.INDEX_HTML)
-        self.assertIn("actionFetch('/api/practice_candidates/refresh')", dashboard.INDEX_HTML)
-        self.assertIn('async function loadPracticePage()', dashboard.INDEX_HTML)
-        self.assertIn('function renderPracticePage()', dashboard.INDEX_HTML)
-        self.assertIn("initialParams.get('category') !== activeCategory", dashboard.INDEX_HTML)
-        self.assertNotIn('function loadB1Screen', dashboard.INDEX_HTML)
-        self.assertNotIn('function renderB1Screen', dashboard.INDEX_HTML)
-        self.assertNotIn("fetchJson('/api/b1_screen')", dashboard.INDEX_HTML)
-        self.assertNotIn("actionFetch('/api/b1_screen/trigger')", dashboard.INDEX_HTML)
+        self.assertIn("let activeCategory = initialParams.get('category') || 'practice';", DASHBOARD_FRONTEND)
+        self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];", DASHBOARD_FRONTEND)
+        self.assertIn("practice:'实战页面'", DASHBOARD_FRONTEND)
+        self.assertIn("const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};", DASHBOARD_FRONTEND)
+        self.assertIn('const normalized = LEGACY_CATEGORY_ALIASES[category] || category;', DASHBOARD_FRONTEND)
+        self.assertIn("fetchJson('/api/practice_candidates')", DASHBOARD_FRONTEND)
+        self.assertIn("actionFetch('/api/practice_candidates/refresh')", DASHBOARD_FRONTEND)
+        self.assertIn('async function loadPracticePage()', DASHBOARD_FRONTEND)
+        self.assertIn('function renderPracticePage()', DASHBOARD_FRONTEND)
+        self.assertIn("initialParams.get('category') !== activeCategory", DASHBOARD_FRONTEND)
+        self.assertNotIn('function loadB1Screen', DASHBOARD_FRONTEND)
+        self.assertNotIn('function renderB1Screen', DASHBOARD_FRONTEND)
+        self.assertNotIn("fetchJson('/api/b1_screen')", DASHBOARD_FRONTEND)
+        self.assertNotIn("actionFetch('/api/b1_screen/trigger')", DASHBOARD_FRONTEND)
 
     def test_index_snapshot_merge_handles_business_errors_and_stale_full_responses(self):
-        start = dashboard.INDEX_HTML.index('function mergePracticeTimedRows')
-        end = dashboard.INDEX_HTML.index('async function loadPracticePage', start)
-        functions = dashboard.INDEX_HTML[start:end]
+        start = DASHBOARD_FRONTEND.index('function mergePracticeTimedRows')
+        end = DASHBOARD_FRONTEND.index('async function loadPracticePage', start)
+        functions = DASHBOARD_FRONTEND[start:end]
         scenario = r"""
 const fast = {
   snapshot_mode:'fast', equity_history_scope:'latest_day', source_updated_at:'2026-07-10 15:00:00',
@@ -1073,12 +1119,12 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(all(checks.values()), checks)
 
     def test_index_template_does_not_guess_missing_decision_model(self):
-        self.assertIn("const decisionModel = String(p.decision_model || '').trim();", dashboard.INDEX_HTML)
-        self.assertIn("practiceFullSnapshotStatus === 'error' ? '未知' : '加载中'", dashboard.INDEX_HTML)
-        self.assertIn('delete niuniuPracticeData.decision_model;', dashboard.INDEX_HTML)
-        self.assertIn('delete niuniuPracticeData.decision_provider;', dashboard.INDEX_HTML)
-        self.assertIn("{cache: 'no-cache'}", dashboard.INDEX_HTML)
-        self.assertNotIn("p.decision_model || 'deepseek-v4-pro'", dashboard.INDEX_HTML)
+        self.assertIn("const decisionModel = String(p.decision_model || '').trim();", DASHBOARD_FRONTEND)
+        self.assertIn("practiceFullSnapshotStatus === 'error' ? '未知' : '加载中'", DASHBOARD_FRONTEND)
+        self.assertIn('delete niuniuPracticeData.decision_model;', DASHBOARD_FRONTEND)
+        self.assertIn('delete niuniuPracticeData.decision_provider;', DASHBOARD_FRONTEND)
+        self.assertIn("{cache: 'no-cache'}", DASHBOARD_FRONTEND)
+        self.assertNotIn("p.decision_model || 'deepseek-v4-pro'", DASHBOARD_FRONTEND)
 
     def test_cache_invalidation_prevents_inflight_model_snapshot_from_repopulating_cache(self):
         cache_key = dashboard.PRACTICE_FAST_CACHE_KEY
@@ -1114,34 +1160,34 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(json.loads(payload)['decision_model'], 'gpt-regression-test')
 
     def test_index_template_intraday_curve_renders_single_point_from_opening_base(self):
-        self.assertIn('if (rawPoints.length < (isDailyMode ? 2 : 1))', dashboard.INDEX_HTML)
-        self.assertIn('if (sessionPoints.length >= 1)', dashboard.INDEX_HTML)
-        self.assertIn('isNonTradingCalendarDay && dayPoints.length >= 2', dashboard.INDEX_HTML)
-        self.assertIn('if (points.length < 1)', dashboard.INDEX_HTML)
+        self.assertIn('if (rawPoints.length < (isDailyMode ? 2 : 1))', DASHBOARD_FRONTEND)
+        self.assertIn('if (sessionPoints.length >= 1)', DASHBOARD_FRONTEND)
+        self.assertIn('isNonTradingCalendarDay && dayPoints.length >= 2', DASHBOARD_FRONTEND)
+        self.assertIn('if (points.length < 1)', DASHBOARD_FRONTEND)
         self.assertIn(
             'if (points.length < 2) return \'<div class="empty" style="padding:18px">累计收益等待更多交易日净值点…</div>\';',
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
         self.assertIn(
             'const hasIntradayOpenBase = !isDailyMode && Number.isFinite(intradayBaseEquity) && intradayBaseEquity > 0;',
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
         self.assertIn(
             'const chartBase = isDailyMode ? initialCash : (hasIntradayOpenBase ? intradayBaseEquity : vals[0]);',
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
-        self.assertIn('const axisPcts = hasIntradayOpenBase ? [0, ...chartPcts] : chartPcts;', dashboard.INDEX_HTML)
-        self.assertIn('const openAnchor = [left, y(0)];', dashboard.INDEX_HTML)
-        self.assertIn('pts.unshift(openAnchor);', dashboard.INDEX_HTML)
-        self.assertIn('hasSyntheticOpenAnchor = true;', dashboard.INDEX_HTML)
+        self.assertIn('const axisPcts = hasIntradayOpenBase ? [0, ...chartPcts] : chartPcts;', DASHBOARD_FRONTEND)
+        self.assertIn('const openAnchor = [left, y(0)];', DASHBOARD_FRONTEND)
+        self.assertIn('pts.unshift(openAnchor);', DASHBOARD_FRONTEND)
+        self.assertIn('hasSyntheticOpenAnchor = true;', DASHBOARD_FRONTEND)
         self.assertIn(
             '} else if (!isDailyMode && points.length > 1 && pts.length > 0 && pts[0][0] > left + 1) {',
-            dashboard.INDEX_HTML,
+            DASHBOARD_FRONTEND,
         )
-        self.assertIn('const hasCurveSegment = pts.length > 1;', dashboard.INDEX_HTML)
-        self.assertIn('const drawdownVals = hasIntradayOpenBase ? [chartBase, ...vals] : vals;', dashboard.INDEX_HTML)
-        self.assertIn('time: `${latestDay} 09:30:00`', dashboard.INDEX_HTML)
-        self.assertIn('const intradayBaseLabel = hasIntradayOpenBase', dashboard.INDEX_HTML)
+        self.assertIn('const hasCurveSegment = pts.length > 1;', DASHBOARD_FRONTEND)
+        self.assertIn('const drawdownVals = hasIntradayOpenBase ? [chartBase, ...vals] : vals;', DASHBOARD_FRONTEND)
+        self.assertIn('time: `${latestDay} 09:30:00`', DASHBOARD_FRONTEND)
+        self.assertIn('const intradayBaseLabel = hasIntradayOpenBase', DASHBOARD_FRONTEND)
 
     def test_configured_admin_password_issues_secure_session_and_unlocks_settings(self):
         dashboard.ADMIN_PASSWORD = '管理员密码'
@@ -1152,7 +1198,7 @@ process.stdout.write(JSON.stringify({
 
         wrong_body = urllib.parse.urlencode({'admin_password': '错误密码'}).encode('utf-8')
         wrong = FakeHandler(
-            path='/admin/password',
+            path='/api/admin/session',
             method='POST',
             headers={
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -1166,7 +1212,7 @@ process.stdout.write(JSON.stringify({
 
         password_body = urllib.parse.urlencode({'admin_password': '管理员密码'}).encode('utf-8')
         login = FakeHandler(
-            path='/admin/password',
+            path='/api/admin/session',
             method='POST',
             headers={
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -1179,8 +1225,8 @@ process.stdout.write(JSON.stringify({
         )
         login.do_POST()
 
-        self.assertEqual(login.status, 303)
-        self.assertEqual(login.header('Location'), '/admin')
+        self.assertEqual(login.status, 200)
+        self.assertTrue(json.loads(login.wfile.getvalue().decode('utf-8'))['ok'])
         set_cookie = login.header('Set-Cookie') or ''
         self.assertTrue(set_cookie.startswith(f'{dashboard.ADMIN_SESSION_COOKIE_NAME}=ad_'))
         self.assertIn('HttpOnly', set_cookie)
@@ -1191,7 +1237,7 @@ process.stdout.write(JSON.stringify({
         unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
         unlocked_page.do_GET()
         self.assertEqual(unlocked_page.status, 200)
-        self.assertIn('<h1>设置</h1>', unlocked_page.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
 
         unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
         unlocked_api.do_GET()
@@ -1210,7 +1256,7 @@ process.stdout.write(JSON.stringify({
         body = urllib.parse.urlencode({'admin_password': 'wrong'}).encode('utf-8')
         try:
             first = FakeHandler(
-                path='/admin/password',
+                path='/api/admin/session',
                 method='POST',
                 headers={
                     'Content-Type': 'application/x-www-form-urlencoded',
@@ -1224,7 +1270,7 @@ process.stdout.write(JSON.stringify({
             self.assertEqual(first.status, 403)
 
             spoofed = FakeHandler(
-                path='/admin/password',
+                path='/api/admin/session',
                 method='POST',
                 headers={
                     'Content-Type': 'application/x-www-form-urlencoded',
@@ -1297,7 +1343,7 @@ process.stdout.write(JSON.stringify({
 
         body = urllib.parse.urlencode({'admin_password': token}).encode('utf-8')
         login = FakeHandler(
-            path='/admin/password',
+            path='/api/admin/session',
             method='POST',
             headers={
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -1306,7 +1352,7 @@ process.stdout.write(JSON.stringify({
             body=body,
         )
         login.do_POST()
-        self.assertEqual(login.status, 303)
+        self.assertEqual(login.status, 200)
 
         session = dashboard.new_admin_session(now=1_000)
         self.assertTrue(dashboard.validate_admin_session(session, now=1_001))
@@ -1684,9 +1730,7 @@ process.stdout.write(JSON.stringify({
         dashboard.CONFIG_PATH.write_text('model:\n  default: safe\n', encoding='utf-8')
         try:
             cases = (
-                ('/admin/config/env', b'env__DASHBOARD_GROK_MODEL=attacker'),
                 ('/api/admin/config/env', b'env__DASHBOARD_GROK_MODEL=attacker'),
-                ('/admin/config/yaml', b'config_yaml=model%3A+attacker'),
                 ('/api/admin/config/yaml', b'config_yaml=model%3A+attacker'),
             )
             for path, body in cases:
@@ -1703,15 +1747,11 @@ process.stdout.write(JSON.stringify({
                     )
                     handler.do_POST()
                     self.assertEqual(handler.rfile.tell(), 0)
-                    if path.startswith('/api/'):
-                        self.assertEqual(handler.status, 403)
-                        self.assertEqual(
-                            json.loads(handler.wfile.getvalue().decode('utf-8'))['error'],
-                            'admin_password_required',
-                        )
-                    else:
-                        self.assertEqual(handler.status, 200)
-                        self.assertIn('设置页验证', handler.wfile.getvalue().decode('utf-8'))
+                    self.assertEqual(handler.status, 403)
+                    self.assertEqual(
+                        json.loads(handler.wfile.getvalue().decode('utf-8'))['error'],
+                        'admin_password_required',
+                    )
                     self.assertEqual(
                         dashboard.DASHBOARD_ENV_FILE.read_text(encoding='utf-8'),
                         'DASHBOARD_GROK_MODEL=safe\n',
@@ -1731,9 +1771,7 @@ process.stdout.write(JSON.stringify({
         admin_cookie = self.admin_cookie()
         try:
             cases = (
-                ('/admin/config/env', b'env__DASHBOARD_GROK_MODEL=attacker'),
                 ('/api/admin/config/env', b'env__DASHBOARD_GROK_MODEL=attacker'),
-                ('/admin/config/yaml', b'config_yaml=model%3A+attacker'),
                 ('/api/admin/config/yaml', b'config_yaml=model%3A+attacker'),
             )
             for path, body in cases:
@@ -1767,230 +1805,55 @@ process.stdout.write(JSON.stringify({
             dashboard.CONFIG_PATH = original_config_path
 
     def test_admin_page_only_shows_business_config_content(self):
+        payload = dashboard.build_admin_config_payload()
         handler = FakeHandler(path='/admin', headers={'Cookie': self.admin_cookie()})
         handler.do_GET()
         index_body = handler.wfile.getvalue().decode('utf-8')
-        detail_bodies = [
-            dashboard.render_admin_group_page(group['slug']).decode('utf-8')
-            for group in dashboard.ADMIN_SETTING_GROUPS
-        ]
-        body = ''.join(detail_bodies) + index_body
+        item_names = {item['name'] for item in payload['items']}
 
         self.assertEqual(handler.status, 200)
-        self.assertEqual(index_body.count("class='settings-card'"), 10)
-        self.assertNotIn("id='env-config-form'", index_body)
-        self.assertIn("href='/admin/settings/notifications'", index_body)
-        self.assertIn('每个分组的修改分别保存', index_body)
-        self.assertIn('<title>牛牛1号</title>', body)
-        self.assertNotIn('<title>牛牛1号 · 设置</title>', body)
-        self.assertNotIn('<title>牛牛1号 · 管理</title>', body)
-        self.assertIn('开启牛牛美股', body)
-        self.assertIn("name='env__DASHBOARD_US_FEATURES_ENABLED' data-feature-toggle='us'", body)
-        us_toggle_start = body.index("name='env__DASHBOARD_US_FEATURES_ENABLED' data-feature-toggle='us'")
-        us_toggle_end = body.index('</select>', us_toggle_start)
-        us_toggle_html = body[us_toggle_start:us_toggle_end]
-        self.assertNotIn("value=''", us_toggle_html)
-        self.assertIn("value='1'", us_toggle_html)
-        self.assertIn("value='0'", us_toggle_html)
-        self.assertIn("data-feature-gated='us'", body)
-        self.assertIn('[hidden]{display:none!important}', body)
-        self.assertIn("document.addEventListener('input', handleUsFeatureToggle);", body)
-        self.assertIn('Grok 模型', body)
-        self.assertIn('Grok 模型上下文长度', body)
-        self.assertIn('Grok API 地址', body)
-        self.assertIn('Grok API 密钥', body)
-        self.assertIn('美股评级上下文长度', body)
-        self.assertIn('推文监控作者', body)
-        self.assertIn('推文监控间隔', body)
-        self.assertIn('美股买入评级时间', body)
-        self.assertLess(body.index('开启牛牛美股'), body.index('消息面预检模型'))
-        self.assertLess(body.index('Grok 模型'), body.index('消息面预检模型'))
-        self.assertLess(body.index('Grok API 地址'), body.index('Grok API 密钥'))
-        self.assertLess(body.index('Grok API 密钥'), body.index('消息面预检模型'))
-        self.assertLess(body.index('推文监控作者'), body.index('消息面预检模型'))
-        self.assertLess(body.index('美股买入评级时间'), body.index('消息面预检模型'))
-        self.assertIn("name='env__DASHBOARD_GROK_API_KEY'", body)
-        self.assertNotIn("<div class='config-label'>DASHBOARD_GROK_API_KEY</div>", body)
-        self.assertNotIn('推文监控/美股买入评级模型', body)
-        self.assertNotIn('<h2>推文监控作者</h2>', body)
-        self.assertNotIn('<h2>推文监控周期</h2>', body)
-        self.assertNotIn('<h2>美股买入评级周期</h2>', body)
-        self.assertIn('买卖决策模型', body)
-        self.assertIn('买卖决策上下文长度', body)
-        self.assertIn('消息面预检上下文长度', body)
-        self.assertIn('默认 128000 tokens', body)
-        self.assertIn('默认 4096 tokens', body)
-        self.assertIn('选股及买卖决策时间点', body)
-        self.assertIn('选股策略', body)
-        self.assertIn('当前策略来源', body)
-        self.assertIn('内置策略', body)
-        self.assertIn('预设文字策略', body)
-        self.assertIn("name='env__DASHBOARD_STRATEGY_SOURCE'", body)
-        self.assertIn("value='builtin'", body)
-        self.assertIn("value='preset_text'", body)
-        self.assertIn("data-strategy-source-toggle", body)
-        self.assertIn("data-strategy-source-gated='builtin'", body)
-        self.assertIn("data-strategy-source-gated='preset_text'", body)
-        self.assertIn("name='env__DASHBOARD_PRESET_STRATEGY_TEXT'", body)
-        self.assertIn('preset-strategy-textarea', body)
-        self.assertIn('交易纪律 Prompt', body)
-        self.assertIn("name='env__DASHBOARD_TRADE_DISCIPLINE_TEXT'", body)
-        self.assertIn('trade-discipline-textarea', body)
-        self.assertIn("document.addEventListener('input', handleStrategySourceToggle);", body)
-        self.assertIn("name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
-        self.assertIn("type='radio' name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
-        self.assertNotIn("type='checkbox' name='env__DASHBOARD_ENABLED_PERSONA_STRATEGIES'", body)
-        self.assertIn("value='base'", body)
-        self.assertIn('基础策略', body)
-        self.assertIn("value='zettaranc'", body)
-        self.assertIn('Z哥', body)
-        self.assertNotIn('Z哥体系', body)
-        self.assertNotIn('Z 哥体系', body)
-        self.assertIn("value='li_daxiao_bottom'", body)
-        self.assertIn('李大霄', body)
-        self.assertNotIn('李大霄底部', body)
-        self.assertNotIn("value='buffett_value'", body)
-        self.assertNotIn('巴菲特价值', body)
-        self.assertIn('每次只启用一个内置策略', body)
-        self.assertIn('内置策略和预设文字二选一激活', body)
-        self.assertIn('盘面监控生产时间点', body)
-        self.assertIn('A股盘面模型总结', body)
-        self.assertIn('A股盘面总结上下文长度', body)
-        self.assertIn("name='env__A_SHARE_MODEL_SUMMARY_ENABLED'", body)
-        a_share_model_toggle_start = body.index("name='env__A_SHARE_MODEL_SUMMARY_ENABLED'")
-        a_share_model_toggle_end = body.index('</select>', a_share_model_toggle_start)
-        a_share_model_toggle_html = body[a_share_model_toggle_start:a_share_model_toggle_end]
-        self.assertNotIn("默认", a_share_model_toggle_html)
-        self.assertIn("value='1'", a_share_model_toggle_html)
-        self.assertIn("value='0'", a_share_model_toggle_html)
-        self.assertNotIn('A股盘面Grok总结', body)
-        self.assertIn('指数行情更新周期', body)
-        self.assertIn("class='settings-group'", body)
-        self.assertIn("class='setting-row'", body)
-        self.assertIn("class='settings-actions'", body)
-        self.assertIn("data-env-save-status role='status' aria-live='polite'", body)
-        self.assertIn("data-env-save-button type='submit'", body)
-        self.assertIn("form.getAttribute('data-save-endpoint') || '/api/admin/config/env'", body)
-        self.assertIn("'X-NiuOne-Action': '1'", body)
-        self.assertIn("window.location.replace('/admin')", body)
-        self.assertIn('设置页管理员密码', body)
-        self.assertIn("正在保存本组设置", body)
-        self.assertIn("配置未变化，无需重新应用", body)
-        self.assertIn('.save-button:active,.save-button.pressed', body)
-        self.assertIn("document.addEventListener('pointerdown'", body)
-        self.assertIn("button.classList.add('pressed')", body)
-        self.assertIn('function envFormSnapshot(form)', body)
-        self.assertIn('function resetEnvSaveIfDirty(form)', body)
-        self.assertIn('markEnvFormSaved(form);', body)
-        self.assertIn("<div class='setting-state-label'>当前状态</div>", body)
-        self.assertNotIn("<div class='setting-state-label'>当前</div>", body)
-        self.assertIn("data-env-current='DASHBOARD_GROK_MODEL'", body)
-        self.assertIn("当前状态：<span data-env-current='DASHBOARD_NOTIFICATION_ENABLED'>", body)
-        self.assertIn('function applyEnvConfigState(form, config)', body)
-        self.assertIn('var submittedSafeSnapshot = envFormSnapshot(form);', body)
-        self.assertIn("var submittedRevision = form.dataset.editRevision || '0';", body)
-        self.assertIn("var formUnchanged = (form.dataset.editRevision || '0') === submittedRevision;", body)
-        self.assertIn("data.set(input.name, '');", body)
-        self.assertIn('var envSavedSnapshots = new WeakMap();', body)
-        self.assertNotIn('form.dataset.savedSnapshot', body)
-        self.assertIn("保存期间有新的修改，请再次保存", body)
-        apply_function_start = body.index('function applyEnvConfigState(form, config)')
-        apply_function_end = body.index('function setNotificationTestFeedback', apply_function_start)
-        apply_function = body[apply_function_start:apply_function_end]
-        self.assertIn("currentNode.textContent = state || '未设置';", apply_function)
-        self.assertIn("secretInput.value = '';", apply_function)
-        save_feedback_function_start = body.index('function setEnvSaveFeedback(form, state, message)')
-        save_feedback_function_end = body.index(
-            "document.addEventListener('input'",
-            save_feedback_function_start,
-        )
-        save_feedback_function = body[save_feedback_function_start:save_feedback_function_end]
-        self.assertIn("state === 'ok'", save_feedback_function)
-        self.assertIn('markEnvFormSaved(form);', save_feedback_function)
-        apply_state_index = body.index('applyEnvConfigState(form, payload.config);')
-        save_feedback_index = body.index(
-            "setEnvSaveFeedback(form, 'ok', businessSaveMessage(payload));",
-            apply_state_index,
-        )
-        self.assertLess(apply_state_index, save_feedback_index)
-        reauth_index = body.index('if (payload.reauth_required)')
-        reauth_mark_saved_index = body.index('markEnvFormSaved(form);', reauth_index)
-        reauth_redirect_index = body.index("window.location.replace('/admin');", reauth_index)
-        self.assertLess(reauth_mark_saved_index, reauth_redirect_index)
-        self.assertIn('有未保存修改', body)
-        self.assertNotIn("setEnvSaveFeedback(form, '', ''); }, 3800", body)
-        self.assertNotIn('<table class=', body)
-        self.assertNotIn("<div class='config-name'>", body)
-        self.assertNotIn('<th>生效</th>', body)
-        self.assertNotIn('重启后', body)
-        self.assertNotIn('下次任务', body)
-        self.assertIn("type='time'", body)
-        self.assertIn("name='env__DASHBOARD_B1_SCHEDULE_TIMES'", body)
-        self.assertIn("type='hidden' name='env__DASHBOARD_B1_SCHEDULE_TIMES'", body)
-        self.assertIn('data-time-list-add', body)
-        self.assertIn('data-time-list-remove', body)
-        self.assertEqual(body.count("type='time' name='env__DASHBOARD_B1_SCHEDULE_TIMES'"), 10)
-        self.assertIn('09:25', body)
-        self.assertIn('10:30', body)
-        self.assertIn('周一至周五', body)
-        self.assertNotIn('09:25,10:00', body)
-        self.assertNotIn('25 9 * * 1-5', body)
-        self.assertNotIn('生成邀请码', body)
-        self.assertNotIn('HIDDEN-CODE', body)
-        self.assertNotIn('/admin/invite', body)
-        self.assertNotIn('启用邀请码登录', body)
-        self.assertNotIn('观看者', body)
-        self.assertNotIn('<th>来源</th>', body)
-        self.assertNotIn('新增配置项', body)
-        self.assertNotIn('DASHBOARD_HOME', body)
-        self.assertNotIn('LaunchAgent', body)
+        self.assertEqual(len(payload['groups']), 10)
+        self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
+        self.assertIn('<script src="/static/admin.js" defer></script>', index_body)
+        self.assertNotIn("name='env__", index_body)
+        self.assertIn('function renderSettingsIndex()', ADMIN_FRONTEND)
+        self.assertIn('function renderSettingsGroup(slug)', ADMIN_FRONTEND)
+        self.assertIn("data-save-endpoint='/api/admin/config/env/", ADMIN_FRONTEND)
+        self.assertIn("'X-NiuOne-Action': '1'", ADMIN_FRONTEND)
+        self.assertIn("window.history.pushState({}, '', link.getAttribute('href'))", ADMIN_FRONTEND)
+        self.assertIn('function renderEnvInput(item)', ADMIN_FRONTEND)
+        self.assertNotIn('HIDDEN-CODE', ADMIN_FRONTEND)
+        self.assertNotIn('/admin/invite', ADMIN_FRONTEND)
 
     def test_admin_settings_groups_have_standalone_pages(self):
         payload = dashboard.build_admin_config_payload()
-        index = dashboard.render_admin_page().decode('utf-8')
-        groups = dashboard.admin_setting_groups(payload)
+        groups = payload['groups']
+        slugs = [group['slug'] for group in groups]
+        grouped_names = set()
+        for slug in slugs:
+            names = dashboard.admin_setting_group_env_names(slug)
+            self.assertTrue(names, slug)
+            self.assertTrue(grouped_names.isdisjoint(names), slug)
+            grouped_names.update(names)
+            route = FakeHandler(path=f'/admin/settings/{slug}')
+            route.do_GET()
+            self.assertEqual(route.status, 200)
+            self.assertIn('<script src="/static/admin.js" defer></script>', route.wfile.getvalue().decode('utf-8'))
 
         self.assertEqual(len(groups), 10)
-        self.assertEqual(index.count("class='settings-card'"), len(groups))
-        self.assertNotIn("id='env-config-form'", index)
-        self.assertNotIn("name='env__", index)
-
-        rendered_names = set()
-        for group in groups:
-            slug = group['slug']
-            expected_names = {item['name'] for item in group['items']}
-            page = dashboard.render_admin_group_page(slug).decode('utf-8')
-            page_names = set(re.findall(r"name='env__([A-Z0-9_]+)'", page))
-            control_tags = re.findall(
-                r"<(?:input|select|textarea)\b[^>]*\bname='env__[^']+'[^>]*>",
-                page,
-            )
-
-            self.assertIn(f"href='/admin/settings/{slug}'", index)
-            self.assertEqual(page_names, expected_names, slug)
-            self.assertEqual(page.count("id='env-config-form'"), 1)
-            self.assertIn(f"data-save-endpoint='/api/admin/config/env/{slug}'", page)
-            self.assertIn('保存本组设置', page)
-            for control_tag in control_tags:
-                if "type='hidden'" not in control_tag:
-                    self.assertIn("aria-label='", control_tag, control_tag)
-            self.assertTrue(rendered_names.isdisjoint(page_names), slug)
-            rendered_names.update(page_names)
-
-        self.assertEqual(rendered_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        us_page = dashboard.render_admin_group_page('us-market').decode('utf-8')
-        self.assertEqual(us_page.count('<h2>牛牛美股</h2>'), 1)
-        self.assertEqual(us_page.count("name='env__X_WATCHLIST_MAX_TOKENS'"), 1)
+        self.assertEqual(len(slugs), len(set(slugs)))
+        self.assertEqual(grouped_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
+        self.assertIn("data-save-endpoint='/api/admin/config/env/", ADMIN_FRONTEND)
+        self.assertIn("settingsGroupSlug()", ADMIN_FRONTEND)
+        self.assertIn('保存本组设置', ADMIN_FRONTEND)
         self.assertEqual(len(dashboard.admin_setting_group_env_names('us-market')), 14)
-        notification_page = dashboard.render_admin_group_page('notifications').decode('utf-8')
-        self.assertIn("aria-labelledby='notification-channel-name-feishu'", notification_page)
 
-    def test_admin_settings_group_routes_require_auth_and_handle_unknown_groups(self):
+    def test_admin_settings_group_routes_use_static_shell_and_api_auth(self):
         locked = FakeHandler(path='/admin/settings/notifications')
         locked.do_GET()
         locked_body = locked.wfile.getvalue().decode('utf-8')
         self.assertEqual(locked.status, 200)
-        self.assertIn('<h1>设置页验证</h1>', locked_body)
+        self.assertIn('<script src="/static/admin.js" defer></script>', locked_body)
         self.assertNotIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", locked_body)
 
         cookie = self.admin_cookie()
@@ -2001,8 +1864,12 @@ process.stdout.write(JSON.stringify({
         unlocked.do_GET()
         unlocked_body = unlocked.wfile.getvalue().decode('utf-8')
         self.assertEqual(unlocked.status, 200)
-        self.assertIn('<h1>交易通知</h1>', unlocked_body)
-        self.assertIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", unlocked_body)
+        self.assertEqual(unlocked_body, locked_body)
+
+        config = FakeHandler(path='/api/admin/config', headers={'Cookie': cookie})
+        config.do_GET()
+        self.assertEqual(config.status, 200)
+        self.assertIn('DASHBOARD_NOTIFICATION_ENABLED', config.wfile.getvalue().decode('utf-8'))
 
         missing = FakeHandler(
             path='/admin/settings/not-a-group',
@@ -2010,7 +1877,8 @@ process.stdout.write(JSON.stringify({
         )
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        self.assertIn('未找到该设置分组', missing.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js" defer></script>', missing.wfile.getvalue().decode('utf-8'))
+        self.assertIn('未找到该设置分组', ADMIN_FRONTEND)
 
     def test_group_save_ignores_fields_from_other_settings_groups(self):
         original_values = {
@@ -2166,21 +2034,22 @@ process.stdout.write(JSON.stringify({
 
     def test_home_page_uses_us_feature_flag_for_tabs_without_deleting_data(self):
         dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
-        disabled = FakeHandler(path='/?category=x_monitor')
+        disabled = FakeHandler(path='/api/dashboard/bootstrap')
         disabled.do_GET()
-        disabled_body = disabled.wfile.getvalue().decode('utf-8')
+        disabled_payload = json.loads(disabled.wfile.getvalue().decode('utf-8'))
 
         dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=1\n', encoding='utf-8')
-        enabled = FakeHandler(path='/?category=x_monitor')
+        enabled = FakeHandler(path='/api/dashboard/bootstrap')
         enabled.do_GET()
-        enabled_body = enabled.wfile.getvalue().decode('utf-8')
+        enabled_payload = json.loads(enabled.wfile.getvalue().decode('utf-8'))
 
         self.assertEqual(disabled.status, 200)
-        self.assertIn('const US_FEATURES_ENABLED = false;', disabled_body)
-        self.assertIn("const US_FEATURE_CATEGORIES = new Set(['x_monitor', 'us_ratings']);", disabled_body)
-        self.assertIn('activeCategory = normalizeActiveCategory(activeCategory);', disabled_body)
+        self.assertFalse(disabled_payload['us_features_enabled'])
         self.assertEqual(enabled.status, 200)
-        self.assertIn('const US_FEATURES_ENABLED = true;', enabled_body)
+        self.assertTrue(enabled_payload['us_features_enabled'])
+        self.assertIn('let US_FEATURES_ENABLED = false;', DASHBOARD_FRONTEND)
+        self.assertIn("fetch('/api/dashboard/bootstrap'", DASHBOARD_FRONTEND)
+        self.assertIn('activeCategory = normalizeActiveCategory(activeCategory);', DASHBOARD_FRONTEND)
 
     def test_us_feature_flag_reads_dashboard_env_without_touching_records(self):
         dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
@@ -2315,11 +2184,11 @@ process.stdout.write(JSON.stringify({
             self.assertEqual(item['default'], '4096')
             self.assertEqual(item['file_value'], '4096')
 
-        body = dashboard.render_admin_group_page('decision-model').decode('utf-8')
-        self.assertIn("placeholder='默认 4096；例如 2048 或 8192'", body)
-        self.assertIn('默认 4096 tokens', body)
-        self.assertIn("placeholder='默认 128000；例如 128K、1M 或 1000000'", body)
-        self.assertIn('默认 128000 tokens', body)
+        body = ADMIN_FRONTEND
+        self.assertIn("'4096；例如 2048 或 8192'", body)
+        self.assertIn("'4096 tokens；填写后覆盖请求 max_tokens'", body)
+        self.assertIn("'128000；例如 128K、1M 或 1000000'", body)
+        self.assertIn("'128000 tokens；填写后保存为数字 tokens'", body)
 
     def test_business_settings_are_local_to_dashboard_env(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE
@@ -2752,7 +2621,7 @@ process.stdout.write(JSON.stringify({
 
     def test_settings_page_omits_contest_panel_and_config(self):
         payload = dashboard.build_admin_config_payload()
-        body = dashboard.render_admin_page().decode('utf-8')
+        body = ADMIN_FRONTEND
 
         self.assertFalse(any(str(item.get('name') or '').startswith('DASHBOARD_CONTEST_') for item in payload['items']))
         self.assertNotIn('<h2>策略大赛</h2>', body)

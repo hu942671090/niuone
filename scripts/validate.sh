@@ -17,27 +17,9 @@ for base in ("app", "scripts", "tests"):
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
 PY
 
-echo "== Embedded dashboard JavaScript syntax =="
-TMP_JS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/niuone-dashboard-js.XXXXXX")"
-TMP_JS="$TMP_JS_DIR/dashboard.js"
-TMP_ADMIN_JS="$TMP_JS_DIR/admin.js"
-trap 'rm -rf "$TMP_JS_DIR"' EXIT
-"$PYTHON_BIN" - "$TMP_JS" "$TMP_ADMIN_JS" <<'PY'
-from pathlib import Path
-import sys
-
-s = Path('app/niuone_dashboard.py').read_text()
-for marker, output in (
-    ('INDEX_HTML = r"""', sys.argv[1]),
-    ('ADMIN_HTML = r"""', sys.argv[2]),
-):
-    html = s.split(marker, 1)[1].split('"""', 1)[0]
-    js = html.split('<script>', 1)[1].split('</script>', 1)[0]
-    Path(output).write_text(js)
-    print(output)
-PY
-node --check "$TMP_JS"
-node --check "$TMP_ADMIN_JS"
+echo "== Frontend JavaScript syntax =="
+node --check frontend/dashboard.js
+node --check frontend/admin.js
 
 echo "== Shell syntax checks =="
 for script in *.sh scripts/*.sh *.command; do

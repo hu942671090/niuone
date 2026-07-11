@@ -20,7 +20,7 @@ function settingsGroupSlug() {
 
 function setAdminHeader(title, detail) {
   adminPageTitle.textContent = title;
-  document.title = detail ? title + ' · 牛牛1号' : '牛牛1号';
+  document.title = detail ? title + ' · 牛牛1号' : '牛牛1号 · 设置';
   adminHeaderActions.innerHTML = (detail
     ? "<a class='toplink' href='/admin' data-settings-route>全部设置</a>"
     : '') + "<a class='toplink' href='/'>返回首页</a>";
@@ -305,7 +305,7 @@ document.addEventListener('click', function(event) {
   event.preventDefault();
   window.history.pushState({}, '', link.getAttribute('href'));
   renderAdminRoute();
-  window.scrollTo({top: 0, behavior: 'instant'});
+  window.scrollTo(0, 0);
 });
 
 window.addEventListener('popstate', renderAdminRoute);
@@ -594,6 +594,7 @@ document.addEventListener('submit', function(event) {
       return payload;
     });
   }).then(function(payload) {
+    if (payload.config && Array.isArray(payload.config.items)) adminConfig = payload.config;
     var formUnchanged = (form.dataset.editRevision || '0') === submittedRevision;
     if (formUnchanged) {
       applyEnvConfigState(form, payload.config);

@@ -14,7 +14,7 @@ let practiceBenchmarksData = {items: []};
 let benchmarkOverlay = {sh000001: true, sh000300: true, sz399006: true, sh000688: true};
 const initialParams = new URLSearchParams(location.search);
 let activeCategory = initialParams.get('category') || 'practice';
-const US_FEATURES_ENABLED = __US_FEATURES_ENABLED__;
+let US_FEATURES_ENABLED = false;
 let indicesViewMode = initialParams.get('panel') === 'market' ? 'market' : 'index';
 let indicesMarketRegionOverride = '';
 const INDICES_INDEX_PRIORITY_STATE_KEY = 'niuniu-dashboard-index-priority-v1';
@@ -308,7 +308,6 @@ function normalizeActiveCategory(category) {
   const normalized = LEGACY_CATEGORY_ALIASES[category] || category;
   return visibleCategoryOrder().includes(normalized) ? normalized : 'practice';
 }
-activeCategory = normalizeActiveCategory(activeCategory);
 const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v5';
 const DATA_CACHE_TTL_MS = 30000;
 const AUTO_REFRESH_TICK_MS = 15000;
@@ -3783,9 +3782,33 @@ document.addEventListener('keydown', event => {
     zoomXImageViewer(-0.25);
   }
 });
-restoreViewState();
-if (initialParams.has('category') && initialParams.get('category') !== activeCategory) syncViewUrl();
-renderTabs();
-if (hasWarmData(activeCategory)) render();
-load().catch(err => { if (!err || err.name !== 'AbortError') console.error(err); });
-setInterval(() => autoRefresh().catch(err => { if (!err || err.name !== 'AbortError') console.error(err); }), AUTO_REFRESH_TICK_MS);
+async function loadDashboardBootstrap() {
+  try {
+    const response = await fetch('/api/dashboard/bootstrap', {
+      credentials: 'same-origin',
+      cache: 'no-store'
+    });
+    if (!response.ok) return;
+    const payload = await response.json();
+    US_FEATURES_ENABLED = payload.us_features_enabled === true;
+    const visitCount = document.getElementById('visitCount');
+    const uniqueVisitCount = document.getElementById('uniqueVisitCount');
+    if (visitCount) visitCount.textContent = Number(payload.visits || 0).toLocaleString('zh-CN');
+    if (uniqueVisitCount) uniqueVisitCount.textContent = Number(payload.unique || 0).toLocaleString('zh-CN');
+  } catch (error) {
+    console.error('Dashboard bootstrap failed', error);
+  }
+}
+
+async function startDashboard() {
+  await loadDashboardBootstrap();
+  activeCategory = normalizeActiveCategory(activeCategory);
+  restoreViewState();
+  if (initialParams.has('category') && initialParams.get('category') !== activeCategory) syncViewUrl();
+  renderTabs();
+  if (hasWarmData(activeCategory)) render();
+  load().catch(err => { if (!err || err.name !== 'AbortError') console.error(err); });
+  setInterval(() => autoRefresh().catch(err => { if (!err || err.name !== 'AbortError') console.error(err); }), AUTO_REFRESH_TICK_MS);
+}
+
+startDashboard();

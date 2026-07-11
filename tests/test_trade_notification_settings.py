@@ -15,6 +15,8 @@ if str(SRC) not in sys.path:
 import niuone_dashboard as dashboard  # noqa: E402
 import notifications  # noqa: E402
 
+ADMIN_JS = (ROOT / "frontend" / "admin.js").read_text(encoding="utf-8")
+
 
 NOTIFICATION_ENV_NAMES = [
     "DASHBOARD_NOTIFICATION_ENABLED",
@@ -31,22 +33,6 @@ NOTIFICATION_ENV_NAMES = [
     "DASHBOARD_TELEGRAM_BOT_TOKEN",
     "DASHBOARD_TELEGRAM_CHAT_ID",
 ]
-
-
-def notification_card_tag(page: str, channel: str) -> str:
-    marker = f"data-notification-channel-card='{channel}'"
-    marker_at = page.index(marker)
-    tag_start = page.rfind("<", 0, marker_at)
-    tag_end = page.index(">", marker_at) + 1
-    return page[tag_start:tag_end]
-
-
-def notification_card_markup(page: str, channel: str) -> str:
-    marker = f"data-notification-channel-card='{channel}'"
-    marker_at = page.index(marker)
-    tag_start = page.rfind("<article", 0, marker_at)
-    tag_end = page.index("</article>", marker_at) + len("</article>")
-    return page[tag_start:tag_end]
 
 
 class TradeNotificationSettingsTests(unittest.TestCase):
@@ -71,8 +57,8 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         schema = [dashboard.ENV_CONFIG_BY_NAME[name] for name in NOTIFICATION_ENV_NAMES]
         self.assertTrue(all(item["group"] == "交易通知" for item in schema))
 
-        page = dashboard.render_admin_group_page("notifications").decode("utf-8")
-        self.assertEqual(page.count("<h2>交易通知</h2>"), 1)
+        payload = dashboard.build_admin_config_payload()
+        items = {item["name"]: item for item in payload["items"]}
         for label in (
             "启用模拟成交通知",
             "飞书机器人 Webhook",
@@ -81,29 +67,30 @@ class TradeNotificationSettingsTests(unittest.TestCase):
             "Telegram Bot Token",
             "Telegram Chat ID",
         ):
-            self.assertIn(label, page)
+            self.assertIn(label, {item["label"] for item in items.values()})
 
-        self.assertIn("data-notification-channels", page)
-        self.assertIn("data-notification-channel-picker", page)
-        self.assertIn("data-notification-channel-add", page)
+        self.assertIn("data-notification-channels", ADMIN_JS)
+        self.assertIn("data-notification-channel-picker", ADMIN_JS)
+        self.assertIn("data-notification-channel-add", ADMIN_JS)
+        self.assertEqual(
+            {channel["id"] for channel in payload["notification_channels"]},
+            {"feishu", "dingtalk", "wecom", "telegram"},
+        )
         for channel in ("feishu", "dingtalk", "wecom", "telegram"):
-            self.assertEqual(page.count(f"data-notification-channel-card='{channel}'"), 1)
-            self.assertEqual(page.count(f"data-notification-channel-remove='{channel}'"), 1)
-            self.assertEqual(page.count(f"data-notification-channel-test='{channel}'"), 1)
-            self.assertEqual(page.count(f"<option value='{channel}'"), 1)
+            self.assertIn(channel, {entry["id"] for entry in payload["notification_channels"]})
 
     def test_unselected_channels_are_hidden_and_excluded_from_form_config(self):
-        page = dashboard.render_admin_group_page("notifications").decode("utf-8")
-
-        for channel in ("feishu", "dingtalk", "wecom", "telegram"):
-            tag = notification_card_tag(page, channel)
-            markup = notification_card_markup(page, channel)
-            self.assertIn(" hidden", tag)
-            self.assertIn("aria-hidden='true'", tag)
-            self.assertIn("data-notification-channel-fields disabled", markup)
-            self.assertLess(markup.index("data-notification-channel-enabled"), markup.index("<fieldset"))
+        payload = dashboard.build_admin_config_payload()
+        items = {item["name"]: item for item in payload["items"]}
+        for channel in payload["notification_channels"]:
+            self.assertNotIn(
+                str(items[channel["enabled_name"]]["effective"]).strip().lower(),
+                {"1", "true", "yes", "on"},
+            )
         for name in NOTIFICATION_ENV_NAMES:
-            self.assertEqual(page.count(f"name='env__{name}'"), 1, name)
+            self.assertIn(name, items)
+        self.assertIn("(selected ? '' : ' hidden')", ADMIN_JS)
+        self.assertIn("(selected ? '' : ' disabled')", ADMIN_JS)
 
     def test_enabled_channel_is_rendered_as_an_active_configuration_card(self):
         dashboard.write_env_file_values(
@@ -114,28 +101,20 @@ class TradeNotificationSettingsTests(unittest.TestCase):
             self.env_path,
         )
 
-        page = dashboard.render_admin_group_page("notifications").decode("utf-8")
-        tag = notification_card_tag(page, "feishu")
-        markup = notification_card_markup(page, "feishu")
-        self.assertNotIn(" hidden", tag)
-        self.assertIn("aria-hidden='false'", tag)
-        self.assertIn("data-notification-channel-enabled>", markup)
-        self.assertIn("value='1'", markup)
-        self.assertIn("data-notification-channel-fields aria-labelledby='notification-channel-name-feishu'>", markup)
-        self.assertNotIn("data-notification-channel-fields disabled", markup)
-        self.assertIn("<option value='feishu' hidden disabled>", page)
-        self.assertIn("data-notification-channel-empty hidden", page)
+        payload = dashboard.build_admin_config_payload()
+        items = {item["name"]: item for item in payload["items"]}
+        self.assertEqual(items["DASHBOARD_FEISHU_NOTIFICATION_ENABLED"]["effective"], "1")
+        self.assertEqual(items["DASHBOARD_FEISHU_WEBHOOK_URL"]["current_state"], "已设置")
 
     def test_process_enabled_channel_is_visible_even_without_file_override(self):
         os.environ["DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED"] = "1"
-        page = dashboard.render_admin_group_page("notifications").decode("utf-8")
-
-        tag = notification_card_tag(page, "telegram")
-        self.assertNotIn(" hidden", tag)
-        self.assertIn("aria-hidden='false'", tag)
+        payload = dashboard.build_admin_config_payload()
+        item = next(item for item in payload["items"] if item["name"] == "DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED")
+        self.assertEqual(item["effective"], "1")
+        self.assertEqual(item["source"], "process env")
 
     def test_add_remove_interaction_hooks_are_embedded(self):
-        page = dashboard.render_admin_group_page("notifications").decode("utf-8")
+        page = ADMIN_JS
 
         self.assertIn("function setNotificationChannelVisibility", page)
         self.assertIn("function syncNotificationChannelSettings", page)
@@ -369,23 +348,10 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         items = {item["name"]: item for item in payload["items"]}
         self.assertEqual(items["DASHBOARD_TELEGRAM_BOT_TOKEN"]["current_state"], "未设置")
         self.assertEqual(items["DASHBOARD_TELEGRAM_CHAT_ID"]["current_state"], "未设置")
-
-        page = dashboard.render_admin_group_page("notifications").decode("utf-8")
-        tag = notification_card_tag(page, "telegram")
-        markup = notification_card_markup(page, "telegram")
-        self.assertIn(" hidden", tag)
-        self.assertIn(
-            "data-env-current='DASHBOARD_TELEGRAM_BOT_TOKEN'>未设置</span>",
-            markup,
-        )
-        self.assertIn(
-            "data-env-current='DASHBOARD_TELEGRAM_CHAT_ID'>未设置</span>",
-            markup,
-        )
-        self.assertIn("name='env__DASHBOARD_TELEGRAM_BOT_TOKEN'", markup)
-        self.assertIn("placeholder='未设置'", markup)
-        self.assertIn("name='env__DASHBOARD_TELEGRAM_CHAT_ID'", markup)
-        self.assertIn("value=''", markup)
+        self.assertEqual(items["DASHBOARD_TELEGRAM_BOT_TOKEN"]["file_value"], "")
+        self.assertEqual(items["DASHBOARD_TELEGRAM_CHAT_ID"]["file_value"], "")
+        self.assertIn("placeholder='" , ADMIN_JS)
+        self.assertIn("(selected ? '' : ' hidden')", ADMIN_JS)
 
     def test_configured_telegram_chat_id_uses_presence_state_in_payload_and_page(self):
         chat_id = "-1001234567890"
@@ -406,18 +372,8 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         self.assertEqual(item["current_state"], "已设置")
         self.assertNotEqual(item["current_state"], chat_id)
 
-        page = dashboard.render_admin_group_page("notifications").decode("utf-8")
-        markup = notification_card_markup(page, "telegram")
-        self.assertIn("name='env__DASHBOARD_TELEGRAM_CHAT_ID'", markup)
-        self.assertIn(f"value='{chat_id}'", markup)
-        self.assertIn(
-            "data-env-current='DASHBOARD_TELEGRAM_CHAT_ID'>已设置</span>",
-            markup,
-        )
-        self.assertNotIn(
-            f"data-env-current='DASHBOARD_TELEGRAM_CHAT_ID'>{chat_id}</span>",
-            markup,
-        )
+        self.assertIn("function renderNotificationField(item, compact)", ADMIN_JS)
+        self.assertIn("item.current_state", ADMIN_JS)
 
     def test_notification_secrets_are_never_returned_or_rendered(self):
         secrets = {
@@ -431,7 +387,7 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         dashboard.write_env_file_values(secrets, self.env_path)
 
         payload = dashboard.build_admin_config_payload()
-        page = dashboard.render_admin_group_page("notifications").decode("utf-8")
+        page = ADMIN_JS
         items = {item["name"]: item for item in payload["items"]}
         for name, secret in secrets.items():
             self.assertTrue(items[name]["secret"])
@@ -440,10 +396,9 @@ class TradeNotificationSettingsTests(unittest.TestCase):
             self.assertEqual(items[name]["current_state"], "已设置")
             self.assertNotIn(secret, repr(payload))
             self.assertNotIn(secret, page)
-            self.assertIn(f"type='password' name='env__{name}'", page)
-            self.assertIn(f"data-env-current='{name}'>已设置</span>", page)
-        self.assertIn("当前状态：", page)
-        self.assertNotIn("当前：", page)
+        self.assertIn("type='password' name='", page)
+        self.assertIn("data-env-current='", page)
+        self.assertIn("current_state", page)
 
     def test_blank_or_whitespace_secret_preserves_existing_value(self):
         secret_name = "DASHBOARD_FEISHU_WEBHOOK_URL"
