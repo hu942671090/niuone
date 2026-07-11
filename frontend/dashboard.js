@@ -45,15 +45,20 @@ const X_MONITOR_PAGE_SIZE = 10;
 const X_PAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 const X_PAGE_CACHE_MAX_ENTRIES = 6;
 const X_PAGE_STATE_KEY = 'niuniu-dashboard-x-pages-v1';
+const MARKET_PAGE_CACHE_TTL_MS = 5 * 60 * 1000;
+const MARKET_PAGE_STATE_KEY = 'niuniu-dashboard-market-page-v1';
+const MARKET_AUX_REFRESH_MS = 5 * 60 * 1000;
 let usRatingDayIndex = 0;
 let ratingExpandedRowId = '';
 let xExpandedRecordKey = '';
 let xImageViewer = {url: '', label: '', zoom: 1};
 let marketExpandedRecordKey = '';
+let usMarketSummaryExpanded = false;
 let marketDayIndex = Math.max(0, Number(initialParams.get('day') || 1) - 1);
 let xPageOffset = Math.max(0, (Number(initialParams.get('page') || 1) - 1) * X_MONITOR_PAGE_SIZE);
 let xLoadedOffset = -1;
 let xPageCache = {};
+let marketPageCache = null;
 let practiceCurveMode = initialParams.get('curve') === 'daily' ? 'daily' : 'intraday';
 window.practiceCurveMode = practiceCurveMode;
 let practicePositionMode = initialParams.get('holdings') === 'sold' ? 'sold' : 'open';
@@ -335,6 +340,8 @@ let loadingMoreHistory = false;
 let xPageLoadInFlight = false;
 let xPageNavigationSeq = 0;
 const xPagePrefetches = new Map();
+let marketAuxLoadPromise = null;
+let lastMarketAuxRefreshAt = 0;
 let lastAutoRefreshAt = 0;
 function rememberXPage(offset, payload, savedAt = Date.now()) {
   const key = String(Math.max(0, Number(offset || 0)));
@@ -375,6 +382,33 @@ function saveXPageState() {
     }));
   } catch (e) {}
 }
+function rememberMarketPage(payload, savedAt = Date.now()) {
+  marketPageCache = {data: payload, savedAt: Number(savedAt || Date.now())};
+}
+function cachedMarketPage() {
+  if (!marketPageCache) return null;
+  if (Date.now() - Number(marketPageCache.savedAt || 0) > MARKET_PAGE_CACHE_TTL_MS) {
+    marketPageCache = null;
+    return null;
+  }
+  return marketPageCache.data || null;
+}
+function applyCachedMarketPage() {
+  const cachedPage = cachedMarketPage();
+  if (!cachedPage) return false;
+  data = cachedPage;
+  return true;
+}
+function saveMarketPageState() {
+  try {
+    sessionStorage.setItem(MARKET_PAGE_STATE_KEY, JSON.stringify({
+      marketPageCache,
+      usMarketSummaryData,
+      lastMarketAuxRefreshAt,
+      savedAt: Date.now(),
+    }));
+  } catch (e) {}
+}
 function saveViewState() {
   try {
     sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
@@ -389,13 +423,25 @@ function restoreViewState() {
   try {
     const cached = JSON.parse(sessionStorage.getItem(VIEW_STATE_KEY) || '{}');
     const cachedXPages = JSON.parse(sessionStorage.getItem(X_PAGE_STATE_KEY) || '{}');
+    const cachedMarketPageState = JSON.parse(sessionStorage.getItem(MARKET_PAGE_STATE_KEY) || '{}');
     const cachedXPagesFresh = cachedXPages.savedAt && Date.now() - cachedXPages.savedAt <= X_PAGE_CACHE_TTL_MS;
+    const cachedMarketPageFresh = cachedMarketPageState.savedAt
+      && Date.now() - cachedMarketPageState.savedAt <= MARKET_PAGE_CACHE_TTL_MS;
     restoreXPageCache(cachedXPagesFresh ? cachedXPages.xPageCache : cached.xPageCache);
+    if (cachedMarketPageFresh && cachedMarketPageState.marketPageCache?.data) {
+      rememberMarketPage(
+        cachedMarketPageState.marketPageCache.data,
+        cachedMarketPageState.marketPageCache.savedAt,
+      );
+      usMarketSummaryData = cachedMarketPageState.usMarketSummaryData || usMarketSummaryData;
+      lastMarketAuxRefreshAt = Number(cachedMarketPageState.lastMarketAuxRefreshAt || 0);
+    }
     if (activeCategory === 'x_monitor' && !initialParams.has('page') && cachedXPagesFresh) {
       xPageOffset = Math.max(0, Number(cachedXPages.xPageOffset || 0));
     }
     if (!cached.savedAt || Date.now() - cached.savedAt > DATA_CACHE_TTL_MS) {
       if (activeCategory === 'x_monitor') applyCachedXPage(xPageOffset);
+      if (activeCategory === 'market_monitor') applyCachedMarketPage();
       return;
     }
     data = cached.data || data;
@@ -405,7 +451,9 @@ function restoreViewState() {
     hotStocksData = cached.hotStocksData || hotStocksData;
     moneyFlowData = cached.moneyFlowData || moneyFlowData;
     marketFlowData = cached.marketFlowData || marketFlowData;
-    usMarketSummaryData = cached.usMarketSummaryData || usMarketSummaryData;
+    usMarketSummaryData = (cachedMarketPageFresh && cachedMarketPageState.usMarketSummaryData)
+      || cached.usMarketSummaryData
+      || usMarketSummaryData;
     practiceCandidatesData = cached.practiceCandidatesData || practiceCandidatesData;
     if (cached.niuniuPracticeData) {
       niuniuPracticeData = {...cached.niuniuPracticeData};
@@ -434,12 +482,17 @@ function restoreViewState() {
     if (!initialParams.has('page')) xPageOffset = Math.max(0, Number(cached.xPageOffset || 0));
     xLoadedOffset = Number.isFinite(Number(cached.xLoadedOffset)) ? Number(cached.xLoadedOffset) : -1;
     if (activeCategory === 'x_monitor' && !applyCachedXPage(xPageOffset)) xLoadedOffset = -1;
+    if (activeCategory === 'market_monitor' && !applyCachedMarketPage()
+        && (data.records || []).some(record => record.category === 'market_monitor')) {
+      rememberMarketPage(data, cached.savedAt);
+    }
   } catch (e) {}
 }
 function hasWarmData(category) {
   if (category === 'indices') return Array.isArray(indicesData.items) && indicesData.items.length;
   if (category === 'practice') return (Array.isArray(practiceCandidatesData.items) && practiceCandidatesData.items.length) || Array.isArray(niuniuPracticeData.equity_history);
   if (category === 'x_monitor') return xLoadedOffset === xPageOffset && !!cachedXPage(xPageOffset) && Array.isArray(data.records);
+  if (category === 'market_monitor') return !!cachedMarketPage() && (data.records || []).some(r => r.category === category);
   if (isMessageCategory(category)) return (data.records || []).some(r => r.category === category);
   return false;
 }
@@ -512,6 +565,14 @@ function xPageRevision(payload) {
     records.map(record => [recordKey(record), record.timestamp, record.content_hash, record.metadata]),
   ]);
 }
+function marketPageRevision(payload) {
+  const records = Array.isArray(payload?.records) ? payload.records : [];
+  const total = Number(payload?.categories?.market_monitor?.count || 0);
+  return JSON.stringify([
+    total,
+    records.map(record => [recordKey(record), record.timestamp, record.content_hash]),
+  ]);
+}
 function activeCategoryTotal() {
   if (isMessageCategory()) return Number(data.categories?.[activeCategory]?.count || 0);
   return Number(data.total || 0);
@@ -563,7 +624,7 @@ async function autoRefresh() {
 function loadActiveCategoryData(category = activeCategory) {
   if (category === 'indices') return loadIndices();
   if (category === 'practice') return loadPracticePage();
-  if (category === 'market_monitor') return loadIndicesDataInBg();
+  if (category === 'market_monitor') return loadMarketMonitorAuxData();
   return null;
 }
 async function load({background=false, updateTabs=true, waitFor=null} = {}) {
@@ -578,10 +639,12 @@ async function load({background=false, updateTabs=true, waitFor=null} = {}) {
   if (!background && !hasWarmData(categoryAtStart)) {
     $('feed').innerHTML = '<div class="loading">加载中…</div>';
   }
-  // Category data is independent from message counts. Start it immediately so
-  // an expensive market endpoint does not sit behind the common API request.
-  loadActiveCategoryData(categoryAtStart);
-  const res = await fetch(msgUrl, {signal: controller.signal});
+  // Put the message request into the browser's connection queue first. Market
+  // auxiliary data is intentionally started only after the monitor list is
+  // visible so a cold quote provider can never delay the primary content.
+  const messageRequest = fetch(msgUrl, {signal: controller.signal});
+  if (categoryAtStart !== 'market_monitor') loadActiveCategoryData(categoryAtStart);
+  const res = await messageRequest;
   const nextData = await res.json();
   if (waitFor) await waitFor;
   if (seq !== loadSeq || activeCategory !== categoryAtStart) return;
@@ -590,7 +653,12 @@ async function load({background=false, updateTabs=true, waitFor=null} = {}) {
     && categoryAtStart === 'x_monitor'
     && xLoadedOffset === offsetAtStart
     && xPageRevision(data) === xPageRevision(nextData);
-  data = background && isMessageCategory(categoryAtStart) && categoryAtStart !== 'x_monitor'
+  const unchangedMarketPage = background
+    && categoryAtStart === 'market_monitor'
+    && marketPageRevision(data) === marketPageRevision(nextData);
+  data = categoryAtStart === 'market_monitor'
+    ? nextData
+    : background && isMessageCategory(categoryAtStart) && categoryAtStart !== 'x_monitor'
     ? {...nextData, records: mergeRecordLists(nextData.records || [], data.records || [])}
     : nextData;
   if (categoryAtStart === 'x_monitor') {
@@ -598,13 +666,16 @@ async function load({background=false, updateTabs=true, waitFor=null} = {}) {
     rememberXPage(offsetAtStart, nextData);
     prefetchAdjacentXPages(offsetAtStart, nextData);
   }
+  if (categoryAtStart === 'market_monitor') rememberMarketPage(nextData);
   $('updated').textContent = data.generated_at?.slice(11) || '--';
   if (updateTabs) renderTabs();
   if (seq !== loadSeq) return;
-  if (!unchangedXPage) render();
+  if (!unchangedXPage && !unchangedMarketPage) render();
+  if (categoryAtStart === 'market_monitor') loadActiveCategoryData(categoryAtStart);
   if (activeCategory === 'us_ratings') refreshVisibleUsQuotes();
   lastAutoRefreshAt = Date.now();
   if (categoryAtStart === 'x_monitor') saveXPageState();
+  else if (categoryAtStart === 'market_monitor') saveMarketPageState();
   else saveViewState();
 }
 async function loadMoreMessages() {
@@ -624,7 +695,12 @@ async function loadMoreMessages() {
       total: nextData.total || data.total,
       generated_at: nextData.generated_at || data.generated_at,
     };
-    saveViewState();
+    if (activeCategory === 'market_monitor') {
+      rememberMarketPage(data);
+      saveMarketPageState();
+    } else {
+      saveViewState();
+    }
   } finally {
     loadingMoreHistory = false;
     render();
@@ -717,39 +793,37 @@ function refreshVisibleUsQuotes() {
     saveViewState();
   }).catch(e => console.error('us quotes refresh error', e));
 }
-async function loadIndicesDataInBg() {
-  const fetchJson = (url, fallback) => fetch(url).then(r => r.ok ? r.json() : fallback);
-  const refreshMarket = () => {
-    if (activeCategory === 'market_monitor') render();
-    saveViewState();
-  };
-  const applyResult = (label, promise, onData, onError) => promise.then(data => {
-    onData(data);
-    refreshMarket();
-    return data;
-  }).catch(e => {
-    console.error(label + ' load error', e);
-    if (onError) onError(e);
-    refreshMarket();
-    return null;
-  });
+async function loadMarketMonitorAuxData() {
+  if (marketAuxLoadPromise) return marketAuxLoadPromise;
+  if (lastMarketAuxRefreshAt && Date.now() - lastMarketAuxRefreshAt < MARKET_AUX_REFRESH_MS) return null;
   if (!usMarketSummaryData.generated_at && !usMarketSummaryData.summary) {
     usMarketSummaryData = {...usMarketSummaryData, loading: true};
   }
-  const tasks = [
-    applyResult('indices', fetchJson('/api/indices', {}), data => { indicesData = data || {}; }),
-    applyResult('hot stocks', fetchJson('/api/hot_stocks', {}), data => { hotStocksData = data || {}; }),
-    applyResult('us sectors', fetchJson('/api/us_sectors', {items: []}), data => { usSectorData = data || {items: []}; }),
-    applyResult('money flow', fetchJson('/api/money_flow', {inflow: [], outflow: []}), data => { moneyFlowData = data || {inflow: [], outflow: []}; }),
-    applyResult('market flow', fetchJson('/api/market_flow', {total_inflow_yi: null}), data => { marketFlowData = data || {total_inflow_yi: null}; }),
-    applyResult(
-      'us market summary',
-      fetchJson('/api/us_market_summary', {available:false, error:'load_failed'}),
-      data => { usMarketSummaryData = data || {available:false}; },
-      e => { usMarketSummaryData = {available:false, error:String(e), loading:false}; }
-    ),
-  ];
-  await Promise.allSettled(tasks);
+  const request = fetch('/api/us_market_summary')
+    .then(response => {
+      if (!response.ok) throw new Error(`us market summary failed: ${response.status}`);
+      return response.json();
+    })
+    .then(payload => {
+      usMarketSummaryData = payload || {available:false};
+      lastMarketAuxRefreshAt = Date.now();
+      if (activeCategory === 'market_monitor') render();
+      saveMarketPageState();
+      return payload;
+    })
+    .catch(error => {
+      console.error('us market summary load error', error);
+      if (!usMarketSummaryData.generated_at && !usMarketSummaryData.summary) {
+        usMarketSummaryData = {available:false, error:String(error), loading:false};
+        if (activeCategory === 'market_monitor') render();
+      }
+      return null;
+    })
+    .finally(() => {
+      if (marketAuxLoadPromise === request) marketAuxLoadPromise = null;
+    });
+  marketAuxLoadPromise = request;
+  return request;
 }
 async function loadIndices() {
   try {
@@ -962,7 +1036,10 @@ function renderTabs() {
     ratingExpandedRowId = '';
     xExpandedRecordKey = '';
     marketExpandedRecordKey = '';
-    if (activeCategory === 'market_monitor') marketDayIndex = 0;
+    if (activeCategory === 'market_monitor') {
+      marketDayIndex = 0;
+      applyCachedMarketPage();
+    }
     if (activeCategory === 'x_monitor') {
       xPageOffset = 0;
       if (!applyCachedXPage(0)) xLoadedOffset = -1;
@@ -985,6 +1062,7 @@ function applyViewStateFromLocation() {
   activeCategory = normalizeActiveCategory(categoryFromLocation(params));
   indicesViewMode = params.get('panel') === 'market' ? 'market' : 'index';
   marketDayIndex = Math.max(0, Number(params.get('day') || 1) - 1);
+  if (activeCategory === 'market_monitor') applyCachedMarketPage();
   xPageOffset = Math.max(0, (Number(params.get('page') || 1) - 1) * X_MONITOR_PAGE_SIZE);
   if (activeCategory !== 'x_monitor' || !applyCachedXPage(xPageOffset)) xLoadedOffset = -1;
   practicePositionMode = params.get('holdings') === 'sold' ? 'sold' : 'open';
@@ -3322,7 +3400,7 @@ function renderMarketSection(section) {
   if (!items.length && /市场概况|竞价情绪/.test(section.title || '')) return '';
   if (!items.length && !section.meta) return '';
   const tone = section.tone || '';
-  const wide = /热门板块|竞价强势板块|资金流向|竞价成交活跃/.test(section.title || '') ? ' wide' : '';
+  const wide = (section.wide || /热门板块|竞价强势板块|资金流向|竞价成交活跃/.test(section.title || '')) ? ' wide' : '';
   const count = items.length ? `<span class="market-section-count">${items.length} 条</span>` : '';
   const meta = section.meta ? `<span class="market-section-count">${esc(section.meta)}</span>` : count;
   const body = items.map(line => renderMarketDetailLine(line, tone)).filter(Boolean).join('');
@@ -3368,15 +3446,60 @@ function renderMarketMonitorCard(r) {
 function usMarketToneClass(tone) {
   return ['offensive', 'balanced', 'cautious', 'defensive'].includes(tone) ? tone : 'neutral';
 }
+function renderUsMarketSummaryHead(subtitle, toneLabel, preview) {
+  const actionLabel = usMarketSummaryExpanded ? '收起' : '展开';
+  return `<button type="button" class="us-market-head" data-us-market-action="toggle" aria-controls="us-market-summary-body" aria-expanded="${usMarketSummaryExpanded ? 'true' : 'false'}" aria-label="${actionLabel}隔夜美股盘面总结">
+    <span><span class="us-market-title">隔夜美股盘面总结</span><span class="us-market-sub">${esc(subtitle)}</span><span class="market-card-preview us-market-preview">${esc(preview)}</span></span>
+    <span class="us-market-head-actions"><span class="us-market-tone">${esc(toneLabel)}</span><span class="market-chevron us-market-chevron" aria-hidden="true">›</span></span>
+  </button>`;
+}
+function renderUsMarketSummaryMetric(metric) {
+  const pct = Number(metric?.change_pct);
+  const pctTone = Number.isFinite(pct) ? upCls(pct) : 'flat';
+  return `<div class="market-metric-item">
+    <div class="market-metric-label">${esc(metric?.label || '')}</div>
+    <div class="market-metric-value us-market-metric-value"><span>${esc(metric?.value || '--')}</span><span class="market-num ${pctTone}">${esc(metric?.change_pct_text || '--')}</span></div>
+  </div>`;
+}
+function renderUsMarketSummaryDetail(summaryData, summary) {
+  const metrics = (summaryData?.metrics || []).slice(0, 8);
+  const metricHtml = metrics.length ? `<div class="market-metric-grid">${metrics.map(renderUsMarketSummaryMetric).join('')}</div>` : '';
+  const overview = `<div class="market-detail-overview us-market-overview${metrics.length ? '' : ' no-metrics'}">
+    <div class="market-mood-panel"><div class="market-mood-label">核心判断</div><div class="market-mood-text">${esc(summary)}</div></div>
+    ${metricHtml}
+  </div>`;
+  const mappingItems = (summaryData?.sector_mappings || []).slice(0, 5).map(mapping => {
+    const mapText = Array.isArray(mapping.a_share_mapping)
+      ? mapping.a_share_mapping.slice(0, 4).join(' / ')
+      : (mapping.a_share_mapping || '相关板块');
+    const sector = mapping.proxy ? `${mapping.us_sector || ''}(${mapping.proxy})` : (mapping.us_sector || '美股板块');
+    const strategy = cleanMarketLine(mapping.strategy || '');
+    if (strategy) return `${sector} ${mapping.change_pct_text || '--'} · ${strategy}`;
+    const bias = cleanMarketLine(mapping.bias || '');
+    return `${sector} ${mapping.change_pct_text || '--'} · A股映射：${mapText}${bias ? ` · ${bias}` : ''}`;
+  });
+  const summaryText = cleanMarketLine(summary);
+  const guidanceSeen = new Set();
+  const guidanceItems = (summaryData?.guidance_lines || []).slice(0, 7).filter(line => {
+    const clean = cleanMarketLine(line);
+    if (!clean || summaryText.includes(clean) || guidanceSeen.has(clean)) return false;
+    guidanceSeen.add(clean);
+    return true;
+  });
+  const sections = [
+    mappingItems.length ? renderMarketSection({title: 'A股板块映射', icon: '🧭', tone: 'overview', wide: true, items: mappingItems}) : '',
+    guidanceItems.length ? renderMarketSection({title: '今日执行', icon: '💡', tone: 'tip', wide: true, items: guidanceItems}) : '',
+  ].filter(Boolean).join('');
+  return `<div class="market-detail-box">${overview}${sections ? `<div class="market-section-list">${sections}</div>` : ''}</div>`;
+}
 function renderUsMarketSummaryCard() {
   const d = usMarketSummaryData || {};
+  const expandedClass = usMarketSummaryExpanded ? ' open' : ' collapsed';
   if (d.loading && !d.generated_at) {
-    return `<section class="us-market-summary-card neutral">
-      <div class="us-market-head">
-        <div><div class="us-market-title">隔夜美股盘面总结</div><div class="us-market-sub">正在加载昨晚美股盘面...</div></div>
-        <div class="us-market-tone">加载中</div>
-      </div>
-      <div class="us-market-brief">这条摘要会作为今日买卖选股的外盘背景，盘中仍以 A 股竞价、资金流和板块联动确认。</div>
+    const loadingSummary = '这条摘要会作为今日买卖选股的外盘背景，盘中仍以 A 股竞价、资金流和板块联动确认。';
+    return `<section class="us-market-summary-card neutral${expandedClass}">
+      ${renderUsMarketSummaryHead('正在加载昨晚美股盘面...', '加载中', loadingSummary)}
+      <div id="us-market-summary-body" class="market-card-detail us-market-summary-body"${usMarketSummaryExpanded ? '' : ' hidden'}>${renderUsMarketSummaryDetail(d, loadingSummary)}</div>
     </section>`;
   }
   const tone = usMarketToneClass(String(d.tone || 'neutral'));
@@ -3384,37 +3507,9 @@ function renderUsMarketSummaryCard() {
   const target = d.target_us_date || '--';
   const dateRule = d.date_rule || '周一显示上周五美股盘面；其他日期显示前一美股交易日。';
   const summary = d.summary || (d.error ? '隔夜美股盘面暂不可用，今日先按 A 股自身信号执行。' : '等待隔夜美股盘面总结。');
-  const metrics = (d.metrics || []).slice(0, 8);
-  const metricHtml = metrics.length ? `<div class="us-market-metrics">${metrics.map(m => {
-    const pct = Number(m.change_pct);
-    const pctCls = Number.isFinite(pct) ? upCls(pct) : 'flat';
-    return `<div class="us-market-metric">
-      <div class="us-market-metric-label">${esc(m.label || '')}</div>
-      <div class="us-market-metric-value"><span>${esc(m.value || '--')}</span><span class="us-market-pct ${pctCls}">${esc(m.change_pct_text || '--')}</span></div>
-    </div>`;
-  }).join('')}</div>` : '';
-  const mappings = (d.sector_mappings || []).slice(0, 5);
-  const mappingHtml = mappings.length ? `<div class="us-market-map">${mappings.map(m => {
-    const pct = Number(m.change_pct);
-    const pctCls = Number.isFinite(pct) ? upCls(pct) : 'flat';
-    const mapText = Array.isArray(m.a_share_mapping) ? m.a_share_mapping.slice(0, 4).join(' / ') : (m.a_share_mapping || '');
-    const sector = m.proxy ? `${m.us_sector || ''}(${m.proxy})` : (m.us_sector || '');
-    return `<div class="us-market-map-line"><strong>${esc(sector)}</strong> <span class="map-pct ${pctCls}">${esc(m.change_pct_text || '--')}</span> · ${esc(mapText || '相关板块')} · ${esc(m.strategy || m.bias || '观察')}</div>`;
-  }).join('')}</div>` : '';
-  const guidance = (d.guidance_lines || []).slice(0, 7);
-  const guidanceHtml = guidance.length ? `<div class="us-market-guidance">${guidance.map(line => `<div class="us-market-guidance-line"><span>${esc(line)}</span></div>`).join('')}</div>` : '';
-  return `<section class="us-market-summary-card ${tone}">
-    <div class="us-market-head">
-      <div>
-        <div class="us-market-title">隔夜美股盘面总结</div>
-        <div class="us-market-sub">目标美股交易日 ${esc(target)} · ${esc(dateRule)}</div>
-      </div>
-      <div class="us-market-tone">${esc(toneLabel)}</div>
-    </div>
-    <div class="us-market-brief">${esc(summary)}</div>
-    ${metricHtml}
-    ${mappingHtml}
-    ${guidanceHtml}
+  return `<section class="us-market-summary-card ${tone}${expandedClass}">
+    ${renderUsMarketSummaryHead(`目标美股交易日 ${target} · ${dateRule}`, toneLabel, summary)}
+    <div id="us-market-summary-body" class="market-card-detail us-market-summary-body"${usMarketSummaryExpanded ? '' : ' hidden'}>${renderUsMarketSummaryDetail(d, summary)}</div>
   </section>`;
 }
 function marketDateKey(r) {
@@ -3446,7 +3541,7 @@ function setMarketDay(index) {
   marketExpandedRecordKey = '';
   syncViewUrl();
   render();
-  saveViewState();
+  saveMarketPageState();
 }
 function renderMarketDayPager(allRecords, days, day, dayRecords) {
   const total = activeCategoryTotal();
@@ -3468,14 +3563,14 @@ function renderMarketDayPager(allRecords, days, day, dayRecords) {
 }
 function renderMarketMonitor(records) {
   const usSummaryHtml = renderUsMarketSummaryCard();
-  if (!records.length) return `${usSummaryHtml}<div class="empty">暂无盘面监控消息</div>`;
+  if (!records.length) return `<div class="empty">暂无盘面监控消息</div>${usSummaryHtml}`;
   const groups = groupMarketRecordsByDay(records);
   const days = [...groups.keys()].sort().reverse();
-  if (!days.length) return `${usSummaryHtml}<div class="empty">暂无盘面监控消息</div>`;
+  if (!days.length) return `<div class="empty">暂无盘面监控消息</div>${usSummaryHtml}`;
   if (marketDayIndex >= days.length) marketDayIndex = 0;
   const day = days[marketDayIndex] || days[0];
   const dayRecords = groups.get(day) || [];
-  return `${usSummaryHtml}<div class="market-monitor-grid">${dayRecords.map(r => renderMarketMonitorCard(r)).join('')}</div>${renderMarketDayPager(records, days, day, dayRecords)}`;
+  return `<div class="market-monitor-grid">${dayRecords.map(r => renderMarketMonitorCard(r)).join('')}</div>${usSummaryHtml}${renderMarketDayPager(records, days, day, dayRecords)}`;
 }
 function xRecordKey(r) {
   return 'x-' + shortHash(recordKey(r));
@@ -3835,6 +3930,23 @@ function renderCard(r) {
     </article>`;
 }
 document.addEventListener('click', event => {
+  const usMarketAction = event.target.closest('[data-us-market-action]');
+  if (usMarketAction) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (usMarketAction.dataset.usMarketAction === 'toggle') {
+      usMarketSummaryExpanded = !usMarketSummaryExpanded;
+      const actionLabel = usMarketSummaryExpanded ? '收起' : '展开';
+      const summaryCard = usMarketAction.closest('.us-market-summary-card');
+      const summaryBody = summaryCard?.querySelector('.us-market-summary-body');
+      summaryCard?.classList.toggle('collapsed', !usMarketSummaryExpanded);
+      summaryCard?.classList.toggle('open', usMarketSummaryExpanded);
+      if (summaryBody) summaryBody.hidden = !usMarketSummaryExpanded;
+      usMarketAction.setAttribute('aria-expanded', usMarketSummaryExpanded ? 'true' : 'false');
+      usMarketAction.setAttribute('aria-label', `${actionLabel}隔夜美股盘面总结`);
+    }
+    return;
+  }
   const logAction = event.target.closest('[data-practice-log-action]');
   if (logAction) {
     event.preventDefault();
@@ -3992,7 +4104,7 @@ async function startDashboard() {
   if (!needsFeatureCheck && hasWarmData(activeCategory)) render();
   let initialLoadPromise = load({
     background: hasWarmData(activeCategory),
-    updateTabs: needsFeatureCheck,
+    updateTabs: true,
     waitFor: needsFeatureCheck ? bootstrapPromise : null,
   });
   initialLoadPromise.catch(reportLoadError);
