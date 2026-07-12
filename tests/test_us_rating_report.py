@@ -10,6 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'app'
+COMPAT = SRC / 'compat'
+ENTRYPOINTS = SRC / 'entrypoints'
 
 
 class UsRatingReportTests(unittest.TestCase):
@@ -20,8 +22,8 @@ class UsRatingReportTests(unittest.TestCase):
             env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(COMPAT / 'us_rating_report.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 captured = {{}}
@@ -56,8 +58,8 @@ print(json.dumps(captured, ensure_ascii=False))
             env['US_RATING_CONTEXT_LENGTH'] = '128K'
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(COMPAT / 'us_rating_report.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m._get_crossdesk_credentials = lambda: ('https://rating.example/v1', 'secret')
@@ -88,8 +90,8 @@ print(json.dumps({{
             env['US_RATING_MAX_TOKENS'] = '4096'
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(COMPAT / 'us_rating_report.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m._get_crossdesk_credentials = lambda: ('https://rating.example/v1', 'secret')
@@ -118,8 +120,8 @@ print(json.dumps({{
             env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(COMPAT / 'us_rating_report.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 prompt = m.build_user_prompt()
@@ -154,8 +156,8 @@ print(json.dumps({{
 import importlib.util, json, os, sys
 from datetime import datetime, timezone
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(COMPAT / 'us_rating_report.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 now = datetime(2026, 6, 23, 3, 0, 0, tzinfo=timezone.utc)
@@ -204,8 +206,8 @@ print(json.dumps({{
             code = f"""
 import importlib.util, json, sys
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(COMPAT / 'us_rating_report.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 def fail_generate_report(test_mode=False):
@@ -241,8 +243,8 @@ print(json.dumps({{
             code = f"""
 import importlib.util, json, sys
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(SRC / 'us_rating_report.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('us_rating_report_under_test', {str(COMPAT / 'us_rating_report.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.generate_report = lambda test_mode=False: '- TEST / Test Corp: Buy'

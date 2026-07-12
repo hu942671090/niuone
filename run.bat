@@ -142,7 +142,7 @@ set "PYTHONDONTWRITEBYTECODE=1"
 if not defined DASHBOARD_CONFIG set "DASHBOARD_CONFIG=%DASHBOARD_HOME%\config.yaml"
 if not defined DASHBOARD_PUSH_HISTORY_DB set "DASHBOARD_PUSH_HISTORY_DB=%DASHBOARD_HOME%\push_history.db"
 if not defined DASHBOARD_PORTFOLIO_STATE set "DASHBOARD_PORTFOLIO_STATE=%DASHBOARD_HOME%\cron\output\niuniu_practice_portfolio.json"
-if not defined DASHBOARD_TRADER_SCRIPT set "DASHBOARD_TRADER_SCRIPT=%ROOT%\app\niuniu_practice_trader.py"
+if not defined DASHBOARD_TRADER_SCRIPT set "DASHBOARD_TRADER_SCRIPT=%ROOT%\app\entrypoints\niuniu_practice_trader.py"
 
 if "%SERVICE_MODE%"=="1" (
     where powershell.exe >nul 2>nul
@@ -173,7 +173,7 @@ if "%NO_BROWSER%"=="0" (
     start "NiuOne Browser Opener" /min cmd /c "timeout /t 2 /nobreak >nul & start "" "%URL%""
 )
 
-"%PYTHON_BIN%" "%ROOT%\app\niuone_dashboard.py" --host "%DASHBOARD_HOST%" --port "%DASHBOARD_PORT%"
+"%PYTHON_BIN%" "%ROOT%\app\entrypoints\niuone_dashboard.py" --host "%DASHBOARD_HOST%" --port "%DASHBOARD_PORT%"
 exit /b %ERRORLEVEL%
 
 :show_usage
@@ -242,7 +242,7 @@ if not defined DEFAULT_DASHBOARD_PORT set "DEFAULT_DASHBOARD_PORT=8787"
     echo DASHBOARD_CONFIG=%LOCAL_DATA_DIR%\runtime\config.yaml
     echo DASHBOARD_PUSH_HISTORY_DB=%LOCAL_DATA_DIR%\runtime\push_history.db
     echo DASHBOARD_PORTFOLIO_STATE=%LOCAL_DATA_DIR%\runtime\cron\output\niuniu_practice_portfolio.json
-    echo DASHBOARD_TRADER_SCRIPT=%ROOT%\app\niuniu_practice_trader.py
+    echo DASHBOARD_TRADER_SCRIPT=%ROOT%\app\entrypoints\niuniu_practice_trader.py
     echo.
     echo # The dashboard stays public; settings and admin APIs always require authentication.
     echo # Leave blank to use dashboard_admin_token.txt under DASHBOARD_HOME.

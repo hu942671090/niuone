@@ -7,7 +7,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(COMPAT))
 
 import push_history
 

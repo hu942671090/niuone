@@ -9,8 +9,11 @@ from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 sys.path.insert(0, str(SRC))
-MODULE_PATH = SRC / "a_share_midday_summary.py"
+sys.path.insert(0, str(COMPAT))
+MODULE_PATH = COMPAT / "a_share_midday_summary.py"
 
 
 def load_module():

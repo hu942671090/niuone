@@ -312,7 +312,14 @@ For platform-specific status, restart, uninstall, and unattended-operation instr
 
 ```text
 .
-├── app/                    # Dashboard, data adapters, and task source code
+├── app/                    # Domain-organized application source
+│   ├── entrypoints/        # Dashboard, scheduler, monitor, and report launchers
+│   ├── compat/             # Legacy bare-module adapters
+│   ├── dashboard/          # Dashboard service and APIs
+│   ├── reports/            # A-share and US-market reports
+│   ├── monitoring/         # X and other monitoring workflows
+│   ├── storage/            # Message history and practice-trading storage
+│   ├── trading/            # Practice trading and optimization
 │   └── strategies/         # Strategy registry, scoring, selection, attribution, exits, and prompts
 ├── config/                 # Runtime policies and security conventions
 ├── docs/                   # Deployment, operation, and research documentation

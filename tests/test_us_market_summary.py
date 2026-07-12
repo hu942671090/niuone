@@ -10,8 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 sys.path.insert(0, str(SRC))
-MODULE_PATH = SRC / "us_market_summary.py"
+sys.path.insert(0, str(COMPAT))
+MODULE_PATH = COMPAT / "us_market_summary.py"
 
 
 def load_module():

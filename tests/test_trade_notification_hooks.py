@@ -12,8 +12,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+    sys.path.insert(0, str(COMPAT))
 
 _tmp_home = tempfile.TemporaryDirectory()
 os.environ.setdefault("DASHBOARD_HOME", _tmp_home.name)

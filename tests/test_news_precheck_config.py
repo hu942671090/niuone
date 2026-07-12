@@ -10,6 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 NEWS_ENV_KEYS = {
     "DASHBOARD_ENV_FILE",
     "DASHBOARD_NEWS_MODEL",
@@ -29,13 +31,14 @@ NEWS_ENV_KEYS = {
 def import_trader_with_env(updates: dict[str, str]):
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
+        sys.path.insert(0, str(COMPAT))
     for key in NEWS_ENV_KEYS:
         os.environ.pop(key, None)
     os.environ["DASHBOARD_ENV_FILE"] = str(ROOT / ".missing-dashboard.env")
     os.environ.update(updates)
     spec = importlib.util.spec_from_file_location(
         f"niuniu_practice_trader_under_test_{len(sys.modules)}",
-        SRC / "niuniu_practice_trader.py",
+        COMPAT / "niuniu_practice_trader.py",
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

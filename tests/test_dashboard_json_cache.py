@@ -9,11 +9,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(COMPAT))
 
 
 def load_module(name):
-    spec = importlib.util.spec_from_file_location(f"{name}_under_test", SRC / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"{name}_under_test", COMPAT / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

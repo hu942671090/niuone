@@ -34,4 +34,4 @@ export DASHBOARD_CONFIG="${DASHBOARD_CONFIG:-$DASHBOARD_HOME/config.yaml}"
 export DASHBOARD_PUSH_HISTORY_DB="${DASHBOARD_PUSH_HISTORY_DB:-$DASHBOARD_HOME/push_history.db}"
 
 mkdir -p "$DASHBOARD_HOME/cron/state" "$DASHBOARD_HOME/cron/output" "$DASHBOARD_HOME/logs"
-exec "$PYTHON_BIN" "$BASE/app/niuone_cron_scheduler.py"
+exec "$PYTHON_BIN" "$BASE/app/entrypoints/niuone_cron_scheduler.py"

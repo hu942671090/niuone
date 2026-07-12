@@ -9,6 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'app'
+COMPAT = SRC / 'compat'
+ENTRYPOINTS = SRC / 'entrypoints'
 
 
 class DashboardStandalonePathTests(unittest.TestCase):
@@ -22,8 +24,8 @@ class DashboardStandalonePathTests(unittest.TestCase):
             env['DASHBOARD_ENV_FILE'] = str(env_file)
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('dashboard_direct_start_test', {str(SRC / 'niuone_dashboard.py')!r})
+sys.path[:0] = [{str(ENTRYPOINTS)!r}, {str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('dashboard_direct_start_test', {str(ENTRYPOINTS / 'niuone_dashboard.py')!r})
 d = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(d)
 print(json.dumps({{
@@ -45,8 +47,8 @@ print(json.dumps({{
             code = f"""
 import importlib.util, json, sys
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('dashboard_under_test', {str(SRC / 'niuone_dashboard.py')!r})
+sys.path[:0] = [{str(ENTRYPOINTS)!r}, {str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('dashboard_under_test', {str(ENTRYPOINTS / 'niuone_dashboard.py')!r})
 d = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(d)
 import push_history
@@ -64,7 +66,7 @@ print(json.dumps({{
             self.assertTrue(data['stats_db'].startswith(tmp + os.sep))
             self.assertTrue(data['cron_output_dir'].startswith(tmp + os.sep))
             self.assertEqual(data['push_history_db'], str(Path(tmp) / 'push_history.db'))
-            self.assertEqual(data['trader_script'], str(SRC / 'niuniu_practice_trader.py'))
+            self.assertEqual(data['trader_script'], str(ENTRYPOINTS / 'niuniu_practice_trader.py'))
 
     def test_migrated_helper_modules_use_dashboard_home_and_app_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,10 +75,10 @@ print(json.dumps({{
             code = f"""
 import importlib.util, json, sys
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
 mods = {{}}
 for name in ['niuniu_practice_trader', 'niuniu_db', 'self_optimizer', 'multi_strategy_screen']:
-    path = {str(SRC)!r} + '/' + name + '.py'
+    path = {str(COMPAT)!r} + '/' + name + '.py'
     spec = importlib.util.spec_from_file_location(name + '_under_test', path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -91,7 +93,7 @@ print(json.dumps({{
 """
             out = subprocess.check_output([sys.executable, '-c', code], env=env, text=True)
             data = json.loads(out)
-            self.assertEqual(data['stock_tools_script'], str(SRC / 'cn_stock_tools.py'))
+            self.assertEqual(data['stock_tools_script'], str(ENTRYPOINTS / 'cn_stock_tools.py'))
             self.assertEqual(data['portfolio_state'], str(Path(tmp) / 'cron' / 'output' / 'niuniu_practice_portfolio.json'))
             self.assertEqual(data['niuniu_db'], str(Path(tmp) / 'niuniu.db'))
             self.assertEqual(data['optimizer_state'], str(Path(tmp) / 'cron' / 'output' / 'niuniu_practice_portfolio.json'))

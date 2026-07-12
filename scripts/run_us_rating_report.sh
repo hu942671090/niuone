@@ -16,4 +16,4 @@ export DASHBOARD_PUSH_HISTORY_DB="${DASHBOARD_PUSH_HISTORY_DB:-$DASHBOARD_HOME/p
 
 mkdir -p "$DASHBOARD_HOME/logs"
 
-exec "$PYTHON_BIN" "$ROOT/app/us_rating_report.py" --store-only "$@"
+exec "$PYTHON_BIN" "$ROOT/app/entrypoints/us_rating_report.py" --store-only "$@"

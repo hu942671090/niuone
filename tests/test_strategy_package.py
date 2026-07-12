@@ -32,7 +32,7 @@ class StrategyPackageTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import app.strategy_registry as r; assert 'b3_accelerate' in r.STRATEGY_DEFINITIONS",
+                "import app.compat.strategy_registry as r; assert 'b3_accelerate' in r.STRATEGY_DEFINITIONS",
             ],
             cwd=ROOT,
             env=env,
@@ -45,7 +45,7 @@ class StrategyPackageTests(unittest.TestCase):
         env.pop("PYTHONPATH", None)
         code = f"""
 import importlib.util
-spec = importlib.util.spec_from_file_location('strategy_registry_file_compat', {str(APP / 'strategy_registry.py')!r})
+spec = importlib.util.spec_from_file_location('strategy_registry_file_compat', {str(APP / 'compat' / 'strategy_registry.py')!r})
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 assert 'b3_accelerate' in module.STRATEGY_DEFINITIONS

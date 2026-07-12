@@ -30,11 +30,11 @@ try {
             & $Launcher --no-browser --skip-install *>> $LogPath
         }
         "cron-scheduler" {
-            $Script = Join-Path $Root "app\niuone_cron_scheduler.py"
+            $Script = Join-Path $Root "app\entrypoints\niuone_cron_scheduler.py"
             & $Python $Script *>> $LogPath
         }
         "x-watchlist" {
-            $Script = Join-Path $Root "app\x_watchlist_daemon.py"
+            $Script = Join-Path $Root "app\entrypoints\x_watchlist_daemon.py"
             & $Python $Script *>> $LogPath
         }
     }

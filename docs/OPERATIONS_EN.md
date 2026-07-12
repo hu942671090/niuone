@@ -285,7 +285,7 @@ Run:
 ./scripts/validate.sh
 ```
 
-This script extracts the embedded JavaScript from `app/niuone_dashboard.py` and checks its syntax.
+This checks the `frontend/` JavaScript, `app/` Python, Shell/PowerShell entrypoints, and the complete unit-test suite.
 
 ### Do Not Commit Real Data
 

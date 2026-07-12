@@ -35,13 +35,13 @@ export DASHBOARD_LOG_DIR="$DASHBOARD_HOME/logs"
 export DASHBOARD_PUSH_HISTORY_DB="$DASHBOARD_HOME/push_history.db"
 export DASHBOARD_PORTFOLIO_STATE="$DASHBOARD_HOME/cron/output/niuniu_practice_portfolio.json"
 export DASHBOARD_NIUNIU_DB="$DASHBOARD_HOME/niuniu.db"
-export DASHBOARD_TRADER_SCRIPT="$ROOT/app/niuniu_practice_trader.py"
-export DASHBOARD_B1_SCANNER="$ROOT/app/multi_strategy_screen.py"
-export DASHBOARD_CN_STOCK_TOOLS="$ROOT/app/cn_stock_tools.py"
+export DASHBOARD_TRADER_SCRIPT="$ROOT/app/entrypoints/niuniu_practice_trader.py"
+export DASHBOARD_B1_SCANNER="$ROOT/app/entrypoints/multi_strategy_screen.py"
+export DASHBOARD_CN_STOCK_TOOLS="$ROOT/app/entrypoints/cn_stock_tools.py"
 export DASHBOARD_CRON_JOBS="$DASHBOARD_HOME/cron/jobs.json"
 export DASHBOARD_X_WATCHLIST_STATE="$DASHBOARD_HOME/cron/state/x_watchlist_latest.json"
 export NIUONE_ROOT="$ROOT"
-export X_WATCHLIST_MONITOR="$ROOT/app/x_watchlist_monitor.py"
+export X_WATCHLIST_MONITOR="$ROOT/app/entrypoints/x_watchlist_monitor.py"
 export X_WATCHLIST_PYTHON="$PYTHON_BIN"
 export X_WATCHLIST_SCRIPT_ALARM_SECONDS="${X_WATCHLIST_SCRIPT_ALARM_SECONDS:-140}"
 export X_WATCHLIST_DAEMON_INNER_TIMEOUT_SECONDS="${X_WATCHLIST_DAEMON_INNER_TIMEOUT_SECONDS:-150}"
@@ -58,16 +58,16 @@ fi
 case "$1" in
   dashboard)
     shift
-    exec "$PYTHON_BIN" "$ROOT/app/niuone_dashboard.py" \
+    exec "$PYTHON_BIN" "$ROOT/app/entrypoints/niuone_dashboard.py" \
       --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT" "$@"
     ;;
   scheduler)
     shift
-    exec "$PYTHON_BIN" "$ROOT/app/niuone_cron_scheduler.py" "$@"
+    exec "$PYTHON_BIN" "$ROOT/app/entrypoints/niuone_cron_scheduler.py" "$@"
     ;;
   x-watchlist)
     shift
-    exec "$PYTHON_BIN" "$ROOT/app/x_watchlist_daemon.py" "$@"
+    exec "$PYTHON_BIN" "$ROOT/app/entrypoints/x_watchlist_daemon.py" "$@"
     ;;
   *)
     exec "$@"

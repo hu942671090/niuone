@@ -12,12 +12,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 
 
 class MarketReportStoreTests(unittest.TestCase):
     def test_extract_decision_guidance_accepts_premarket_heading(self):
         sys.path.insert(0, str(SRC))
-        spec = importlib.util.spec_from_file_location("store_under_test", SRC / "market_report_store.py")
+        sys.path.insert(0, str(COMPAT))
+        spec = importlib.util.spec_from_file_location("store_under_test", COMPAT / "market_report_store.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
 
@@ -50,8 +53,8 @@ class MarketReportStoreTests(unittest.TestCase):
 import importlib.util, json, os, sys
 from datetime import datetime, timezone
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('store_under_test', {str(SRC / 'market_report_store.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('store_under_test', {str(COMPAT / 'market_report_store.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 now = datetime(2026, 6, 23, 7, 10, 0, tzinfo=timezone.utc)

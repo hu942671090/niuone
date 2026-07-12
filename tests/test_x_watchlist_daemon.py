@@ -6,12 +6,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 
 
 def load_daemon_module():
     module_name = "x_watchlist_daemon_under_test"
     sys.path.insert(0, str(SRC))
-    spec = importlib.util.spec_from_file_location(module_name, SRC / "x_watchlist_daemon.py")
+    sys.path.insert(0, str(COMPAT))
+    spec = importlib.util.spec_from_file_location(module_name, COMPAT / "x_watchlist_daemon.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     assert spec.loader is not None

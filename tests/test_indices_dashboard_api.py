@@ -7,8 +7,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
+COMPAT = SRC / "compat"
+ENTRYPOINTS = SRC / "entrypoints"
 sys.path.insert(0, str(SRC))
-MODULE_PATH = SRC / "indices_dashboard_api.py"
+sys.path.insert(0, str(COMPAT))
+MODULE_PATH = COMPAT / "indices_dashboard_api.py"
 
 
 def load_module():

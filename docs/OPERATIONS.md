@@ -285,7 +285,7 @@ tail -n 200 .local-data/runtime/logs/*.log
 ./scripts/validate.sh
 ```
 
-该脚本会抽取 `app/niuone_dashboard.py` 内嵌 JavaScript 并执行语法检查。
+该脚本会检查 `frontend/` JavaScript、`app/` Python、Shell/PowerShell 入口及完整单元测试。
 
 ### 不要提交真实数据
 

@@ -109,7 +109,7 @@ Strategy code is centralized under `app/strategies/`:
 - `attribution.py` and `performance.py` own strategy marks, attribution, and performance summaries.
 - `exits.py` and `prompts.py` own strategy-specific exit rules and model-prompt fragments.
 
-`app/multi_strategy_screen.py` now keeps only market-data retrieval, full-market scan orchestration, and caching. `app/niuniu_practice_trader.py` keeps account, risk-control, and simulated-execution orchestration. The old `app/strategy_registry.py` is a compatibility import shim; new code should import from the `strategies` package.
+`app/screening/multi_strategy.py` owns market-data retrieval, full-market scan orchestration, and caching. `app/trading/practice_trader.py` owns account, risk-control, and simulated-execution orchestration. Legacy module-name adapters are centralized under `app/compat/`; new code should import from the `strategies` package.
 
 To add a built-in strategy:
 

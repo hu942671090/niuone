@@ -17,8 +17,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'app'
+COMPAT = SRC / 'compat'
+ENTRYPOINTS = SRC / 'entrypoints'
 sys.path.insert(0, str(SRC))
-MODULE_PATH = SRC / 'niuone_dashboard.py'
+sys.path.insert(0, str(COMPAT))
+MODULE_PATH = COMPAT / 'niuone_dashboard.py'
 spec = importlib.util.spec_from_file_location('dashboard_under_test', MODULE_PATH)
 dashboard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dashboard)
@@ -149,7 +152,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard_js.do_GET()
         admin_js = FakeHandler(path='/static/admin.js')
         admin_js.do_GET()
-        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=18')
+        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=19')
         versioned_dashboard_js.do_GET()
 
         self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
@@ -158,7 +161,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=10">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=18" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=19" defer></script>', DASHBOARD_FRONTEND)
         self.assertNotIn('document.title', DASHBOARD_FRONTEND)
         self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
         self.assertIn('max-age=31536000', dashboard_js.header('Cache-Control'))
@@ -972,9 +975,51 @@ class DashboardAuthTests(unittest.TestCase):
             "${usSummaryHtml}${renderMarketDayPager(records, days, day, dayRecords)}`;",
             DASHBOARD_FRONTEND,
         )
+        self.assertIn('const showLiveUsSummary = usMarketSummaryMatchesDay(day);', DASHBOARD_FRONTEND)
+        self.assertIn('dayRecords.filter(record => !isUsMarketSummaryRecord(record))', DASHBOARD_FRONTEND)
         self.assertNotIn(
             "return `${usSummaryHtml}<div class=\"market-monitor-grid\">",
             DASHBOARD_FRONTEND,
+        )
+
+    def test_market_monitor_only_uses_live_us_summary_for_its_target_day(self):
+        start = DASHBOARD_FRONTEND.index('function isUsMarketSummaryRecord')
+        end = DASHBOARD_FRONTEND.index('function marketDateKey', start)
+        functions = DASHBOARD_FRONTEND[start:end]
+        scenario = r"""
+const stored = {
+  title:'隔夜美股盘面总结',
+  source_id:'cron_output_98f0c8a12d3e',
+  delivery:{job_id:'98f0c8a12d3e'},
+};
+const latest = {target_cn_date:'2026-07-13', target_us_date:'2026-07-10'};
+const result = {
+  matchingDay: usMarketSummaryMatchesDay('2026-07-13', latest),
+  historicalDay: usMarketSummaryMatchesDay('2026-07-03', latest),
+  missingTarget: usMarketSummaryMatchesDay('2026-07-13', {}),
+  storedByTitle: isUsMarketSummaryRecord({title:'隔夜美股盘面总结'}),
+  storedBySource: isUsMarketSummaryRecord({source_id:'cron_output_98f0c8a12d3e'}),
+  storedByJob: isUsMarketSummaryRecord(stored),
+  ordinaryRecord: isUsMarketSummaryRecord({title:'A股盘后总结'}),
+};
+console.log(JSON.stringify(result));
+"""
+        output = subprocess.check_output(
+            ['node', '-e', functions + scenario],
+            cwd=ROOT,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(output),
+            {
+                'matchingDay': True,
+                'historicalDay': False,
+                'missingTarget': False,
+                'storedByTitle': True,
+                'storedBySource': True,
+                'storedByJob': True,
+                'ordinaryRecord': False,
+            },
         )
         self.assertNotIn("if (activeCategory === 'market_monitor') render();\n    }\n    return;", DASHBOARD_FRONTEND)
         self.assertIn('.us-market-summary-card.collapsed', DASHBOARD_FRONTEND)

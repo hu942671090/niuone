@@ -61,7 +61,7 @@ class ContainerDeploymentTests(unittest.TestCase):
             code = """
 import json, os, sys
 from pathlib import Path
-sys.path.insert(0, str(Path.cwd() / 'app'))
+sys.path[:0] = [str(Path.cwd() / 'app' / 'compat'), str(Path.cwd() / 'app')]
 import niuone_cron_scheduler
 import niuone_dashboard
 import x_watchlist_daemon

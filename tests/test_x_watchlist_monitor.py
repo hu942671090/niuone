@@ -10,6 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'app'
+COMPAT = SRC / 'compat'
+ENTRYPOINTS = SRC / 'entrypoints'
 
 
 class XWatchlistMonitorTests(unittest.TestCase):
@@ -22,8 +24,8 @@ class XWatchlistMonitorTests(unittest.TestCase):
             env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 captured = {{}}
@@ -54,8 +56,8 @@ print(json.dumps({{
             env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 captured = {{}}
@@ -83,8 +85,8 @@ print(json.dumps({{
             env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 captured = {{}}
@@ -119,8 +121,8 @@ print(json.dumps(captured, ensure_ascii=False))
             env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 print(json.dumps({{
@@ -146,8 +148,8 @@ print(json.dumps({{
             env['X_WATCHLIST_ACCOUNTS'] = '@Foo, bar;Foo invalid-handle-too-long'
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 print(json.dumps({{
@@ -176,8 +178,8 @@ print(json.dumps({{
             env.pop('X_WATCHLIST_ACCOUNTS', None)
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 print(json.dumps({{
@@ -199,8 +201,8 @@ print(json.dumps({{
             env.pop('X_WATCHLIST_ACCOUNTS', None)
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 accounts = m.call_grok('', '', {{}})
@@ -225,8 +227,8 @@ print(json.dumps({{
             code = f"""
 import importlib.util, json, sys, time
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 state = {{'seen_ids': {{}}, 'latest': {{}}}}
@@ -281,8 +283,8 @@ print(json.dumps({{
             code = f"""
 import importlib.util, json, sys, time
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.write_direct_x_alerts_to_db = lambda _items: 0
@@ -319,8 +321,8 @@ print(json.dumps({{
             env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sys, time
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 def item(post_id, minute):
@@ -371,8 +373,8 @@ print(json.dumps({{
             code = f"""
 import importlib.util, json, sqlite3, sys, time
 from pathlib import Path
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 state = {{'seen_ids': {{}}, 'latest': {{}}}}
@@ -434,8 +436,8 @@ print(json.dumps({{
             env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
             code = f"""
 import importlib.util, json, sys
-sys.path.insert(0, {str(SRC)!r})
-spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(SRC / 'x_watchlist_monitor.py')!r})
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 raw = '''

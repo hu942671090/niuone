@@ -109,7 +109,7 @@ NiuOne 将研究流程拆分为四层：
 - `attribution.py`、`performance.py`：策略标记、归因和绩效汇总；
 - `exits.py`、`prompts.py`：策略专属退出规则和模型提示词片段。
 
-`app/multi_strategy_screen.py` 只保留行情获取、全市场扫描和缓存编排，`app/niuniu_practice_trader.py` 只保留账户、风控和模拟成交编排。旧的 `app/strategy_registry.py` 是兼容导入层，新代码应从 `strategies` 包导入。
+`app/screening/multi_strategy.py` 负责行情获取、全市场扫描和缓存编排，`app/trading/practice_trader.py` 负责账户、风控和模拟成交编排。旧模块名适配器集中在 `app/compat/`，新代码应从 `strategies` 包导入。
 
 新增内置策略时：
 
