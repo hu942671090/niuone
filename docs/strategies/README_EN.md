@@ -41,7 +41,7 @@ When built-in rules are used, Basic Strategies, Z-ge, and Li Daxiao are peer str
 
 ### 3.2 Z-ge Rule Group
 
-This rule group references public methods organized in `zettaranc-skill` and currently includes:
+This rule group references public methods organized in [`zettaranc-skill`](https://github.com/lululu811/zettaranc-skill) and currently includes:
 
 - **Shaofu B1**: Focuses on a low J value, an upward-shifting N pattern, a low-volume pullback, and BBI constraints.
 - **B2 confirmation**: Looks for bullish, higher-volume confirmation after B1 and filters samples that are clearly lagging or too far above BBI.
@@ -52,7 +52,7 @@ Exit and risk rules include constraints based on the previous low or entry candl
 
 ### 3.3 Li Daxiao Rule Group
 
-This rule group references the policy, value, bottom-formation, contrarian-sentiment, and leverage-risk-control frameworks in `li-daxiao-skill`. It uses highly liquid blue chips, low-level stabilization, low turnover, contracting volume and low volatility, anti-chasing rules, and risky-security filters as executable proxy signals.
+This rule group references the policy, value, bottom-formation, contrarian-sentiment, and leverage-risk-control frameworks in [`li-daxiao-skill`](https://github.com/sherjy/li-daxiao-skill). It uses highly liquid blue chips, low-level stabilization, low turnover, contracting volume and low volatility, anti-chasing rules, and risky-security filters as executable proxy signals.
 
 The names above are used only to label rule experiments in this project. They do not indicate that the original authors participated in, approved, or endorsed this project. When redistributing related descriptions, retain the references to `zettaranc-skill` and `li-daxiao-skill`.
 
