@@ -1688,7 +1688,6 @@ def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -
 
 # ====== 自动止盈止损规则 ======
 
-STOP_LOSS_PCT = -4.0       # 止损线（基准值，会根据市场情绪自适应调整）
 TAKE_PROFIT_PCT = 12.0     # 止盈线（清仓）
 TAKE_PROFIT_PARTIAL_PCT = 8.0   # 第一批止盈（卖一半）
 TAKE_PROFIT_PARTIAL_RATIO = 0.5  # 第一批卖出的比例
@@ -2931,14 +2930,14 @@ def get_volatility_adjustment(code: str) -> float:
 
 
 def get_adaptive_params() -> dict[str, float]:
-    """根据市场情绪自适应调整参数。"""
+    """根据市场情绪自适应调整仓位参考。"""
     sent = check_market_sentiment()
     if sent["sentiment"] == "hot":
-        return {"stop_loss": STOP_LOSS_PCT, "position_mult": 1.0, "label": "热-只排序不放宽风控"}
+        return {"position_mult": 1.0, "label": "热-只排序不放宽风控"}
     elif sent["sentiment"] == "cold":
-        return {"stop_loss": STOP_LOSS_PCT, "position_mult": 0.5, "label": "冷-减半观察"}
+        return {"position_mult": 0.5, "label": "冷-减半观察"}
     else:
-        return {"stop_loss": STOP_LOSS_PCT, "position_mult": 1.0, "label": "中性"}
+        return {"position_mult": 1.0, "label": "中性"}
 
 
 def check_daily_loss_budget(state: dict[str, Any]) -> tuple[bool, float]:
@@ -3143,12 +3142,13 @@ def evaluate_sell_signal(
         and float(j_now) < float(j_prev) - 3
     )
 
-    shaofu_stop = float(pos.get("shaofu_stop_price") or pos.get("entry_stop_price") or 0)
+    # Legacy positions may still carry the removed fixed-percentage fallback.
+    # Ignore it while preserving genuine entry-candle/previous-low stops.
+    shaofu_stop = 0.0 if pos.get("shaofu_stop_source") == "fallback_pct" else float(
+        pos.get("shaofu_stop_price") or pos.get("entry_stop_price") or 0
+    )
     if shaofu_stop > 0 and price < shaofu_stop:
         return _sell_signal(f"收盘价破入场止损 (收盘{price:.2f} < 止损{shaofu_stop:.2f})", "shaofu_entry_stop")
-
-    if pnl_pct <= STOP_LOSS_PCT:
-        return _sell_signal(f"止损触发 (盈亏{pnl_pct:.1f}% ≤ {STOP_LOSS_PCT}%)", "hard_stop")
 
     chuhuo = pos.get("chuhuo_wushi") or {}
     if chuhuo.get("is_selling"):
@@ -3323,9 +3323,9 @@ def _refresh_position_bbi(state: dict[str, Any]) -> None:
                                 pos["entry_kline_low"] = round(entry_low, 3)
                                 pos["shaofu_stop_price"] = round(max(0.01, entry_low - ENTRY_STOP_TICK_BUFFER), 3)
                                 pos["shaofu_stop_source"] = "entry_kline_low"
-                        elif pos.get("avg_cost"):
-                            pos["shaofu_stop_price"] = round(float(pos.get("avg_cost") or 0) * (1 + STOP_LOSS_PCT / 100), 3)
-                            pos["shaofu_stop_source"] = "fallback_pct"
+                        else:
+                            pos.pop("shaofu_stop_price", None)
+                            pos.pop("shaofu_stop_source", None)
                 if len(rows) >= DONCHIAN_EXIT_LOOKBACK_DAYS + 1:
                     prev_rows = rows[-(DONCHIAN_EXIT_LOOKBACK_DAYS + 1):-1]
                     lows = [float(r.get("low") or 0) for r in prev_rows if float(r.get("low") or 0) > 0]
@@ -3977,6 +3977,10 @@ def current_preset_strategy_text() -> str:
 def current_trade_discipline_text(position_limit_desc: str, adaptive: dict[str, Any] | None = None) -> str:
     custom = decode_trade_discipline_text(os.environ.get(TRADE_DISCIPLINE_TEXT_ENV, ""))
     if custom:
+        # Remove the legacy fixed-percentage stop from saved discipline text so
+        # an older dashboard.env cannot reintroduce it through the model prompt.
+        custom = custom.replace("、-4%硬止损", "")
+        custom = re.sub(r"（止损-?4(?:\.0+)?%，仓位系数", "（仓位系数", custom)
         return custom
     adaptive = adaptive or {}
     return default_trade_discipline_text(
@@ -3984,7 +3988,6 @@ def current_trade_discipline_text(position_limit_desc: str, adaptive: dict[str, 
         max_new_buys_per_decision=MAX_NEW_BUYS_PER_DECISION,
         position_limit_desc=position_limit_desc or "无固定百分比硬限制",
         adaptive_label=str(adaptive.get("label") or "中性"),
-        adaptive_stop_loss_pct=float(adaptive.get("stop_loss", STOP_LOSS_PCT)),
         adaptive_position_mult=float(adaptive.get("position_mult", 1.0)),
     )
 
@@ -4119,7 +4122,7 @@ def call_model_decision(
 硬性准入规则（全部战法通用）：
 - 距BBI > 6.5% → 不买（回测显示追高胜率骤降）
 - 评分 < 8 → 不买（min_score从7提到8后，假信号减少40%+）
-- 止损线统一设为 -4%，买入K线/前低止损优先
+- 止损使用买入K线/前低的结构失效位，不设固定百分比硬止损
 - 止盈设在 +12%~15%（回测显示突破确认能吃到9.6%平均盈利）
 - 仓位弹性由评分、战法确定性、风险标记、盘面级别和账户状态决定；重仓/满仓必须在reason说明集中理由，持仓数仍受静态上限和盘面动态节奏约束
 
@@ -4500,9 +4503,6 @@ def execute_actions(
             current_pnl_pct = ((float(price) / float(pos["avg_cost"]) - 1) * 100) if pos.get("avg_cost") else 0.0
             prior_max_pnl = float(pos.get("max_pnl_pct") or current_pnl_pct)
             pos["max_pnl_pct"] = round(max(prior_max_pnl, current_pnl_pct), 2)
-            if not pos.get("shaofu_stop_price"):
-                pos["shaofu_stop_price"] = round(float(price) * (1 + STOP_LOSS_PCT / 100), 3)
-                pos["shaofu_stop_source"] = "fallback_pct"
             lots = pos.setdefault("buy_date_lots", {})
             lots[today_key()] = int(lots.get(today_key(), 0)) + qty
             cash -= total_cost
@@ -5038,7 +5038,7 @@ def build_trade_rule_note() -> str:
         f"买入硬约束：最多{MAX_OPEN_POSITIONS}只持仓、单轮最多{MAX_NEW_BUYS_PER_DECISION}笔新仓、"
         f"午盘前默认最多{MORNING_MAX_OPEN_POSITIONS}只；仓位不再按固定百分比硬卡，"
         f"由模型结合盘面、评分、战法确定性、风险标记、现有仓位和现金状态决定，极端高确定性时可单票重仓甚至满仓，但必须写清楚集中理由。"
-        f"系统底线风控：-4%硬止损/买入K线前低止损、峰值回撤/ATR吊灯保护、持仓超25日退出；"
+        f"系统底线风控：买入K线/前低结构止损、峰值回撤/ATR吊灯保护、持仓超25日退出；"
         f"Z哥卖出风控：防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
         f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
         f"买入按万一免五计费。"

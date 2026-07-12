@@ -1473,16 +1473,27 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(quote["price"], 10.25)
         self.assertEqual(quote["execution_price_source"], "auction_reference:test auction")
 
-    def test_hard_stop_has_priority(self):
+    def test_fixed_percentage_loss_does_not_trigger_exit(self):
         pos = {
             "qty": 1000,
             "avg_cost": 10.0,
             "last_price": 9.35,
-            "buy_date_lots": {"2026-06-01": 1000},
+            "buy_date_lots": {"2026-06-23": 1000},
         }
         signal = trader.evaluate_sell_signal("600000", pos, "2026-06-24")
-        self.assertIsNotNone(signal)
-        self.assertEqual(signal["signal"], "hard_stop")
+        self.assertIsNone(signal)
+
+    def test_legacy_fixed_percentage_fallback_does_not_trigger_exit(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 9.5,
+            "shaofu_stop_price": 9.6,
+            "shaofu_stop_source": "fallback_pct",
+            "buy_date_lots": {"2026-06-23": 1000},
+        }
+        signal = trader.evaluate_sell_signal("600000", pos, "2026-06-24")
+        self.assertIsNone(signal)
 
     def test_buy_strategy_classifier_drops_legacy_b1_aliases(self):
         self.assertEqual(trader.classify_buy_strategy("超级B1放量破位洗盘"), "super_b1")
@@ -1562,6 +1573,8 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("temperature", captured["payload"])
         self.assertIn("当前激活策略来源：预设文字策略", prompt)
         self.assertIn("系统底线风控", prompt)
+        self.assertNotIn("-4%硬止损", prompt)
+        self.assertNotIn("止损-4%", prompt)
         self.assertIn("Z哥买入战法和卖出风控不作为本轮新增仓依据", prompt)
         self.assertIn("预设文字策略（当前激活）", prompt)
         self.assertIn("用户原文：\n只做主线强趋势回踩\n跌破5日线离场", prompt)
@@ -1959,8 +1972,8 @@ class SellStrategyRuleTests(unittest.TestCase):
 
         state = make_state()
         executed = trader.check_auto_exits(state, datetime(2026, 6, 24, 9, 30))
-        self.assertEqual(len(executed), 1)
-        self.assertEqual(executed[0]["exit_signal"], "hard_stop")
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
 
     def test_dashboard_payload_does_not_trigger_auto_exits(self):
         state = {

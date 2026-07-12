@@ -349,7 +349,6 @@ def default_trade_discipline_text(
     max_new_buys_per_decision: int = 2,
     position_limit_desc: str = "无固定百分比硬限制",
     adaptive_label: str = "中性",
-    adaptive_stop_loss_pct: float = -4.0,
     adaptive_position_mult: float = 1.0,
 ) -> str:
     position_limit_desc = str(position_limit_desc or "无固定百分比硬限制")
@@ -365,13 +364,13 @@ def default_trade_discipline_text(
         "- 全局情报包是每次决策的必读输入：盘面监控、隔夜美股、指数/期货、板块涨跌、行业资金、热门股、消息面预检、当前仓位和现金状态都必须影响BUY/SELL/HOLD与shares。",
         "- 当前账户JSON里的 strategy_mark/buy_strategy/entry_reason/last_exit_rule 是既有持仓的策略标记；后续加仓、减仓、清仓必须读取这些标记，按原入场策略的时间纪律和卖出规则处理，不能把 B3、B2、趋势回踩、李大霄等不同策略混同。",
         "- 对已有持仓再次输出 BUY 表示加仓/补仓，shares 是本次新增股数而不是目标总股数；只允许顺势确认加仓，不能为了摊低亏损成本而越跌越买，今日新买且T+1锁仓的票原则上不再日内加仓。",
-        "- 系统底线风控：买入K线/前低止损、-4%硬止损、持仓超25日退出；防卖飞、卤煮、S1/S2/S3、出货五式、白线/黄线等归属于下方 Z哥卖出风控",
+        "- 系统底线风控：买入K线/前低结构止损、持仓超25日退出；防卖飞、卤煮、S1/S2/S3、出货五式、白线/黄线等归属于下方 Z哥卖出风控",
         "- 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出",
         "- 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场",
         "- 同板块持仓不超过2只（避免集中风险）",
         "- 必须按候选自带的“基准”判断是否达标；未达各自基准只能观察，不能因为裸分接近8就买",
         "- 策略共识只能用于排序，不能突破持仓数、T+1、现金不能为负、交易窗口等执行规则。",
-        f"- 当前自适应模式：{adaptive_label}（止损{adaptive_stop_loss_pct:g}%，仓位系数{adaptive_position_mult:g}x，仅作为你决定 shares 的参考）",
+        f"- 当前自适应模式：{adaptive_label}（仓位系数{adaptive_position_mult:g}x，仅作为你决定 shares 的参考）",
         "- 盈亏比过滤：优先选盈亏比≥2:1的票（上涨空间/下跌空间），盈亏比<1.5自动标记风险",
         "- 波动率提示：20日波动>3.5%时应倾向缩小你输出的 shares，波动<1.5%时可酌情提高 shares",
         "- 融资+大宗信号：优先买入融资净买入+大宗溢价的票，谨慎对待融资偿还+大宗折价的票",

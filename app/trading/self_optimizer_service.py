@@ -81,41 +81,39 @@ def run_optimization(force: bool = False) -> dict[str, Any] | None:
             
             _opt_state["progress"] = f"扫描{len(all_k)}只…"
             
-            stops=[-3,-4,-5,-6,-7]; scores=[7,8]; holds=[15,20,25]
-            best={"sharpe":-999}; total=30; done=0
+            scores=[7,8]; holds=[15,20,25]
+            best={"sharpe":-999}; total=6; done=0
             
-            for sl in stops:
-                for ms in scores:
-                    for mh in holds:
-                        done+=1; wins=0; cnt=0; rets=[]
-                        for _,rows in all_k.items():
-                            for i in range(30,len(rows)-mh):
-                                c=rows[i]["c"]
-                                ma20=statistics.mean(rows[j]["c"] for j in range(max(0,i-20),i+1))
-                                if c<ma20 or abs((c/ma20-1)*100)>8: continue
-                                fi=min(i+mh,len(rows)-1)
-                                fr=(rows[fi]["c"]/c-1)*100
-                                for j in range(1,fi-i+1):
-                                    r=(rows[i+j]["c"]/c-1)*100
-                                    if r<=sl or r>=12: fr=r; break
-                                rets.append(fr)
-                                if fr>0: wins+=1
-                                cnt+=1
-                        if cnt<10: continue
-                        wr=wins/cnt*100; ar=statistics.mean(rets)
-                        sr=statistics.stdev(rets) if len(rets)>1 else 1
-                        sh=(ar/sr*(252**0.5)) if sr>0 else 0
-                        if sh>best["sharpe"]:
-                            best={"sharpe":round(sh,3),
-                                  "params":{"stop_loss":sl,"min_score":ms,"max_hold":mh},
-                                  "results":{"trades":cnt,"win_rate":round(wr,1),"avg_return":round(ar,2)}}
-                        _opt_state["progress"]=f"扫描{done}/{total}…"
+            for ms in scores:
+                for mh in holds:
+                    done+=1; wins=0; cnt=0; rets=[]
+                    for _,rows in all_k.items():
+                        for i in range(30,len(rows)-mh):
+                            c=rows[i]["c"]
+                            ma20=statistics.mean(rows[j]["c"] for j in range(max(0,i-20),i+1))
+                            if c<ma20 or abs((c/ma20-1)*100)>8: continue
+                            fi=min(i+mh,len(rows)-1)
+                            fr=(rows[fi]["c"]/c-1)*100
+                            for j in range(1,fi-i+1):
+                                r=(rows[i+j]["c"]/c-1)*100
+                                if r>=12: fr=r; break
+                            rets.append(fr)
+                            if fr>0: wins+=1
+                            cnt+=1
+                    if cnt<10: continue
+                    wr=wins/cnt*100; ar=statistics.mean(rets)
+                    sr=statistics.stdev(rets) if len(rets)>1 else 1
+                    sh=(ar/sr*(252**0.5)) if sr>0 else 0
+                    if sh>best["sharpe"]:
+                        best={"sharpe":round(sh,3),
+                              "params":{"min_score":ms,"max_hold":mh},
+                              "results":{"trades":cnt,"win_rate":round(wr,1),"avg_return":round(ar,2)}}
+                    _opt_state["progress"]=f"扫描{done}/{total}…"
             
             _opt_state["running"]=False
             _opt_state["result"]=best
             _opt_state["progress"]=(
-                f"最优参数：止损{best['params']['stop_loss']}% "
-                f"门槛score≥{best['params']['min_score']} "
+                f"最优参数：门槛score≥{best['params']['min_score']} "
                 f"持仓{best['params']['max_hold']}d "
                 f"→ 夏普{best['sharpe']} 胜率{best['results']['win_rate']}%"
             )
@@ -159,14 +157,11 @@ def apply_optimization() -> dict[str, Any]:
     
     # 更新交易器的全局参数（通过修改模块常量）
     import niuniu_practice_trader as t
-    old_stop = t.STOP_LOSS_PCT
     old_hold = t.MAX_HOLD_DAYS
     
-    t.STOP_LOSS_PCT = float(params["stop_loss"])
     t.MAX_HOLD_DAYS = int(params["max_hold"])
     
     applied = {
-        "stop_loss": {"old": old_stop, "new": params["stop_loss"]},
         "max_hold": {"old": old_hold, "new": params["max_hold"]},
     }
     
