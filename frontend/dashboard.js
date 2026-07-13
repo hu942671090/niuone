@@ -76,6 +76,8 @@ let practiceCalendarSelectedDate = '';
 let practiceLoadSeq = 0;
 let practiceFullSnapshotStatus = 'idle';
 let practiceFullRequest = null;
+let practiceManualCycleData = {running:false, stage:'idle', stage_label:'', error:''};
+let practiceManualCyclePollTimer = null;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const actionFetch = (url, options = {}) => fetch(url, {
@@ -994,6 +996,7 @@ async function loadPracticePage() {
   // Start every source together. The fast portfolio no longer waits for the
   // candidate scan, while the full snapshot hydrates richer historical data.
   const candidatesPromise = fetchJson('/api/practice_candidates');
+  const manualCyclePromise = fetchJson('/api/niuniu_practice/manual-cycle', {cache: 'no-store'});
   const fastPracticePromise = fetchJson(
     '/api/niuniu_practice?fast=1&calendar_schema=1',
     {cache: 'no-cache'},
@@ -1017,6 +1020,14 @@ async function loadPracticePage() {
     saveViewState();
   };
   const tasks = [
+    manualCyclePromise.then(payload => {
+      if (seq !== practiceLoadSeq) return;
+      practiceManualCycleData = payload || practiceManualCycleData;
+      renderPracticeUpdate();
+      if (practiceManualCycleData.running) schedulePracticeManualCyclePoll();
+    }).catch(error => {
+      if (seq === practiceLoadSeq) console.error('practice manual cycle status error', error);
+    }),
     candidatesPromise.then(candidatePayload => {
       if (seq !== practiceLoadSeq) return;
       const candidateItems = candidatePayload.items || candidatePayload.candidates || [];
@@ -2513,8 +2524,21 @@ function renderPracticePanel() {
   const decisionModel = String(p.decision_model || '').trim();
   const missingModelLabel = practiceFullSnapshotStatus === 'error' ? '未知' : '加载中';
   const ruleMeta = [`模型：${esc(decisionModel || missingModelLabel)}`, quoteNote].filter(Boolean).join('｜');
+  const manualCycle = practiceManualCycleData || {};
+  const manualRunning = !!manualCycle.running;
+  const manualButtonText = manualRunning ? (manualCycle.stage_label || '本轮执行中…') : '手动执行选股及买卖策略';
+  const marketContext = p.market_decision_context || {};
+  const marketGuidance = Array.isArray(marketContext.guidance_lines) ? marketContext.guidance_lines.slice(0, 2) : [];
+  const marketEvaluation = marketContext.available || marketContext.tone_label
+    ? `<div class="practice-market-evaluation"><span class="practice-market-evaluation-label">盘面评价 · ${esc(marketContext.tone_label || '中性')}</span><span>${esc(marketGuidance.join('；') || marketContext.source_title || '已更新')}</span><time>${esc((marketContext.source_time || marketContext.context_as_of || '').slice(5, 16))}</time></div>`
+    : '';
   return `<section class="sector-cloud" style="margin-bottom:18px">
-    <h3>模拟账户</h3>
+    <div class="practice-account-head">
+      <h3>模拟账户</h3>
+      <button type="button" class="practice-manual-cycle-btn" onclick="triggerPracticeManualCycle()" ${manualRunning ? 'disabled aria-busy="true"' : ''}>${manualRunning ? '⏳ ' : '▶ '}${esc(manualButtonText)}</button>
+    </div>
+    ${marketEvaluation}
+    ${manualCycle.error ? `<div class="practice-manual-cycle-error">本轮执行失败：${esc(manualCycle.error)}</div>` : ''}
     ${p.trading_paused ? `<div style=\"background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);border-radius:12px;padding:10px 14px;margin:10px 0;display:flex;justify-content:space-between;align-items:center\">
       <span style=\"color:#fbbf24;font-size:13px\">⏸️ 交易已暂停：${esc(p.pause_reason||'风控触发')}（${esc((p.pause_since||'').slice(11,16))}起）</span>
       <button onclick=\"actionFetch('/api/niuniu_practice/resume').then(r=>r.json()).then(d=>{if(d.resumed)location.reload()})\" style=\"background:rgba(52,211,153,.18);color:#34d399;border:1px solid rgba(52,211,153,.35);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600\">🔄 强制恢复交易</button>
@@ -2810,6 +2834,40 @@ async function refreshPracticeCandidates() {
     setTimeout(() => load().catch(console.error), 1200);
   } catch (err) {
     practiceCandidatesData = {...practiceCandidatesData, running:false, error:String(err)};
+    renderPracticePage();
+  }
+}
+function schedulePracticeManualCyclePoll() {
+  if (practiceManualCyclePollTimer) return;
+  practiceManualCyclePollTimer = setTimeout(async () => {
+    practiceManualCyclePollTimer = null;
+    try {
+      const response = await fetch('/api/niuniu_practice/manual-cycle', {cache:'no-store'});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const previousRunning = !!practiceManualCycleData.running;
+      practiceManualCycleData = await response.json();
+      if (activeCategory === 'practice') renderPracticePage();
+      if (practiceManualCycleData.running) schedulePracticeManualCyclePoll();
+      else if (previousRunning) await loadPracticePage();
+    } catch (error) {
+      console.error('practice manual cycle poll error', error);
+      if (practiceManualCycleData.running) schedulePracticeManualCyclePoll();
+    }
+  }, 1500);
+}
+async function triggerPracticeManualCycle() {
+  if (practiceManualCycleData.running) return;
+  practiceManualCycleData = {...practiceManualCycleData, running:true, stage:'starting', stage_label:'正在启动', error:''};
+  renderPracticePage();
+  try {
+    const response = await actionFetch('/api/niuniu_practice/manual-cycle');
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    practiceManualCycleData = payload;
+    renderPracticePage();
+    schedulePracticeManualCyclePoll();
+  } catch (error) {
+    practiceManualCycleData = {...practiceManualCycleData, running:false, stage:'error', stage_label:'启动失败', error:String(error)};
     renderPracticePage();
   }
 }

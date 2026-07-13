@@ -33,6 +33,15 @@
     .card { padding:18px; overflow:hidden; background:linear-gradient(135deg, rgba(16,19,26,.92) 0%, rgba(21,26,36,.88) 100%); }
     .sector-cloud { min-width:0; overflow:hidden; background:linear-gradient(180deg, rgba(15,23,42,.92), rgba(6,10,18,.96)); border:1px solid rgba(148,163,184,.14); border-radius:18px; padding:18px; box-shadow:0 18px 70px rgba(0,0,0,.24), inset 0 1px 0 rgba(255,255,255,.035); }
     .sector-cloud h3 { margin:0 0 10px; font-size:16px; color:#dbeafe; font-weight:850; letter-spacing:-.01em; }
+    .practice-account-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .practice-account-head h3 { margin:0; }
+    .practice-manual-cycle-btn { border:1px solid rgba(52,211,153,.38); border-radius:9px; background:rgba(16,185,129,.14); color:#a7f3d0; padding:7px 12px; font-size:12px; font-weight:850; cursor:pointer; transition:.16s ease; }
+    .practice-manual-cycle-btn:hover:not(:disabled) { border-color:rgba(110,231,183,.7); background:rgba(16,185,129,.22); transform:translateY(-1px); }
+    .practice-manual-cycle-btn:disabled { cursor:not-allowed; opacity:.68; }
+    .practice-market-evaluation { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; padding:8px 10px; border:1px solid rgba(96,165,250,.2); border-radius:9px; background:rgba(30,64,175,.09); color:#aebdd1; font-size:12px; line-height:1.45; }
+    .practice-market-evaluation-label { color:#bfdbfe; font-weight:850; }
+    .practice-market-evaluation time { margin-left:auto; color:#718096; }
+    .practice-manual-cycle-error { margin-top:8px; color:#f87171; font-size:12px; }
     .sector-columns { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px; align-items:start; }
     .sector-column { min-width:0; }
     .sector-grid { min-width:0; display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:8px; }

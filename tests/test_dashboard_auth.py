@@ -152,7 +152,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard_js.do_GET()
         admin_js = FakeHandler(path='/static/admin.js')
         admin_js.do_GET()
-        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=20')
+        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=21')
         versioned_dashboard_js.do_GET()
 
         self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
@@ -160,8 +160,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
-        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=10">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=20" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=11">', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=21" defer></script>', DASHBOARD_FRONTEND)
         self.assertNotIn('document.title', DASHBOARD_FRONTEND)
         self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
         self.assertIn('max-age=31536000', dashboard_js.header('Cache-Control'))
@@ -672,6 +672,74 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertTrue(mark_done)
         self.assertEqual(entry['market_decision_context']['tone'], 'balanced')
         self.assertEqual(entry['decision']['market_guidance']['source_title'], 'B1定时选股实时盘面')
+
+    def test_manual_practice_cycle_stays_locked_until_trade_decision_finishes(self):
+        scan_started = threading.Event()
+        allow_scan_finish = threading.Event()
+        allow_decision_finish = threading.Event()
+        calls = []
+
+        def fake_scan(force=False, decision_mode='async', **_kwargs):
+            calls.append(('scan', force, decision_mode))
+            scan_started.set()
+            allow_scan_finish.wait(2)
+            return {
+                'items': [{'code': '000001'}],
+                'count': 1,
+                'generated_at': '2026-07-13 10:00:00',
+                'market_snapshot': {'sample_count': 3000},
+            }
+
+        def fake_decision(payload, record_start=False):
+            calls.append(('decision', payload['items'][0]['code'], record_start))
+            allow_decision_finish.wait(2)
+            return {'executed': [{'action': 'BUY'}]}
+
+        original_scan = dashboard.trigger_b1_scan
+        original_decision = dashboard.run_practice_decision_logged
+        original_lock = dashboard.PRACTICE_MANUAL_CYCLE_LOCK
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        try:
+            dashboard.trigger_b1_scan = fake_scan
+            dashboard.run_practice_decision_logged = fake_decision
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {'running': False, 'stage': 'idle'}
+
+            first = dashboard.start_practice_manual_cycle()
+            self.assertTrue(first['accepted'])
+            self.assertTrue(scan_started.wait(1))
+            duplicate_during_scan = dashboard.start_practice_manual_cycle()
+            self.assertFalse(duplicate_during_scan['accepted'])
+            self.assertTrue(duplicate_during_scan['running'])
+
+            allow_scan_finish.set()
+            for _ in range(100):
+                if dashboard.practice_manual_cycle_status().get('stage') == 'trading':
+                    break
+                threading.Event().wait(0.01)
+            duplicate_during_trade = dashboard.start_practice_manual_cycle()
+            self.assertFalse(duplicate_during_trade['accepted'])
+            self.assertTrue(duplicate_during_trade['running'])
+
+            allow_decision_finish.set()
+            for _ in range(100):
+                if not dashboard.practice_manual_cycle_status().get('running'):
+                    break
+                threading.Event().wait(0.01)
+            status = dashboard.practice_manual_cycle_status()
+            self.assertEqual(status['stage'], 'completed')
+            self.assertEqual(status['candidate_count'], 1)
+            self.assertEqual(calls, [
+                ('scan', True, 'none'),
+                ('decision', '000001', True),
+            ])
+        finally:
+            allow_scan_finish.set()
+            allow_decision_finish.set()
+            dashboard.trigger_b1_scan = original_scan
+            dashboard.run_practice_decision_logged = original_decision
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
 
     def test_fast_practice_payload_derives_daily_calendar_points_from_intraday_history(self):
         class TraderStub:
@@ -1338,6 +1406,11 @@ console.log(JSON.stringify(result));
         self.assertNotIn('function renderB1Screen', DASHBOARD_FRONTEND)
         self.assertNotIn("fetchJson('/api/b1_screen')", DASHBOARD_FRONTEND)
         self.assertNotIn("actionFetch('/api/b1_screen/trigger')", DASHBOARD_FRONTEND)
+        self.assertIn("actionFetch('/api/niuniu_practice/manual-cycle')", DASHBOARD_FRONTEND)
+        self.assertIn("fetch('/api/niuniu_practice/manual-cycle', {cache:'no-store'})", DASHBOARD_FRONTEND)
+        self.assertIn('手动执行选股及买卖策略', DASHBOARD_FRONTEND)
+        self.assertIn('盘面评价 · ${esc(marketContext.tone_label', DASHBOARD_FRONTEND)
+        self.assertIn("disabled aria-busy=\"true\"", DASHBOARD_FRONTEND)
 
     def test_index_snapshot_merge_handles_business_errors_and_stale_full_responses(self):
         start = DASHBOARD_FRONTEND.index('function mergePracticeTimedRows')

@@ -153,6 +153,15 @@ TRADER_SELL_SIGNALS_FILE = SCRIPT_DIR / "trading" / "sell_signals.py"
 TRADER_SELL_SIGNALS_MTIME = 0.0
 TRADER_MODULE_LOCK = threading.Lock()
 PRACTICE_DECISION_KEYS: set[str] = set()
+PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
+PRACTICE_MANUAL_CYCLE_STATE_LOCK = threading.RLock()
+PRACTICE_MANUAL_CYCLE_STATE: dict[str, Any] = {
+    "running": False,
+    "stage": "idle",
+    "started_at": "",
+    "finished_at": "",
+    "error": "",
+}
 BENCHMARK_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 BENCHMARK_TTL_SECONDS = 20
 CN_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -195,6 +204,7 @@ ENV_FILE_WRITE_LOCK = threading.RLock()
 PRACTICE_CANDIDATES_CACHE_KEY = "practice_candidates"
 PRACTICE_CANDIDATES_API_PATHS = frozenset({"/api/practice_candidates", "/api/b1_screen"})
 PRACTICE_CANDIDATES_REFRESH_API_PATHS = frozenset({"/api/practice_candidates/refresh", "/api/b1_screen/trigger"})
+PRACTICE_MANUAL_CYCLE_API_PATH = "/api/niuniu_practice/manual-cycle"
 API_TTLS = {
     "messages": 10,
     "practice_candidates": int(
@@ -1478,6 +1488,75 @@ def trigger_b1_scan(
         return {"error": f"扫描超时（{B1_SCAN_TIMEOUT_SECONDS}s）", "items": [], "count": 0, "generated_at": "", "running": False}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}", "items": [], "count": 0, "generated_at": "", "running": False}
+
+
+def practice_manual_cycle_status() -> dict[str, Any]:
+    with PRACTICE_MANUAL_CYCLE_STATE_LOCK:
+        return dict(PRACTICE_MANUAL_CYCLE_STATE)
+
+
+def _set_practice_manual_cycle_state(**updates: Any) -> dict[str, Any]:
+    with PRACTICE_MANUAL_CYCLE_STATE_LOCK:
+        PRACTICE_MANUAL_CYCLE_STATE.update(updates)
+        return dict(PRACTICE_MANUAL_CYCLE_STATE)
+
+
+def _run_practice_manual_cycle() -> None:
+    try:
+        _set_practice_manual_cycle_state(stage="screening", stage_label="正在选股并生成盘面评价")
+        cache = trigger_b1_scan(force=True, decision_mode="none")
+        if cache.get("error"):
+            raise RuntimeError(str(cache.get("error")))
+
+        _set_practice_manual_cycle_state(
+            stage="trading",
+            stage_label="正在执行买卖策略",
+            candidate_count=int(cache.get("count") or 0),
+            generated_at=str(cache.get("generated_at") or ""),
+        )
+        decision_result = run_practice_decision_logged(cache, record_start=True)
+        _set_practice_manual_cycle_state(
+            running=False,
+            stage="completed",
+            stage_label="本轮选股及买卖已完成",
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            decision_result=decision_result,
+            error="",
+        )
+    except Exception as exc:
+        _set_practice_manual_cycle_state(
+            running=False,
+            stage="error",
+            stage_label="本轮执行失败",
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        invalidate_api_cache(PRACTICE_CANDIDATES_CACHE_KEY, "niuniu_practice", PRACTICE_FAST_CACHE_KEY)
+        PRACTICE_MANUAL_CYCLE_LOCK.release()
+
+
+def start_practice_manual_cycle() -> dict[str, Any]:
+    if not PRACTICE_MANUAL_CYCLE_LOCK.acquire(blocking=False):
+        return {**practice_manual_cycle_status(), "accepted": False}
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status = _set_practice_manual_cycle_state(
+        running=True,
+        stage="starting",
+        stage_label="正在启动",
+        started_at=started_at,
+        finished_at="",
+        generated_at="",
+        candidate_count=0,
+        decision_result=None,
+        error="",
+    )
+    threading.Thread(
+        target=_run_practice_manual_cycle,
+        name="niuniu-practice-manual-cycle",
+        daemon=True,
+    ).start()
+    return {**status, "accepted": True}
 
 
 def b1_cache_generated_for_slot(slot_key: str) -> bool:
@@ -3445,7 +3524,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
-        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS | {"/api/niuniu_practice/resume", "/api/self_optimize/apply"}:
+        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS | {PRACTICE_MANUAL_CYCLE_API_PATH, "/api/niuniu_practice/resume", "/api/self_optimize/apply"}:
             self.send_response(405)
             self.send_header("Allow", "POST")
             self.send_header("Cache-Control", "no-store")
@@ -3550,6 +3629,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS:
             self.send_method_not_allowed("POST")
+            return
+        if parsed.path == PRACTICE_MANUAL_CYCLE_API_PATH:
+            self.send_json_uncached(practice_manual_cycle_status())
             return
         if parsed.path == "/api/niuniu_practice":
             params = parse_qs(parsed.query)
@@ -3689,6 +3771,15 @@ class Handler(BaseHTTPRequestHandler):
             self.write_response(payload)
             return
         legacy_force_path = parsed.path == "/api/b1_screen"
+        if parsed.path == PRACTICE_MANUAL_CYCLE_API_PATH:
+            if not self.require_admin():
+                return
+            if not self.require_action_request():
+                return
+            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
+                return
+            self.send_json_uncached(start_practice_manual_cycle())
+            return
         if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS or legacy_force_path:
             params = parse_qs(parsed.query)
             if legacy_force_path and params.get("force", ["0"])[0].lower() not in {"1", "true", "yes"}:
