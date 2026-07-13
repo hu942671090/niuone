@@ -169,19 +169,28 @@ function renderNotificationSettings(items) {
   var options = ["<option value=''>选择通知渠道</option>"];
   var cards = (adminConfig.notification_channels || []).map(function(channel) {
     var enabled = byName[channel.enabled_name] || {};
-    var selected = isTruthy(enabled.effective || enabled.file_value || '0');
-    if (selected) selectedCount += 1;
-    options.push("<option value='" + escapeHtml(channel.id) + "'" + (selected ? ' hidden disabled' : '') + '>' + escapeHtml(channel.label) + '</option>');
+    var active = isTruthy(enabled.effective || enabled.file_value || '0');
+    var configured = active || String(enabled.file_value || '').trim() !== '' || (channel.field_names || []).some(function(name) {
+      var item = byName[name] || {};
+      var state = String(item.current_state || '').trim();
+      return String(item.file_value || '').trim() !== '' || (state !== '' && state !== '未设置');
+    });
+    if (configured) selectedCount += 1;
+    options.push("<option value='" + escapeHtml(channel.id) + "'" + (configured ? ' hidden disabled' : '') + '>' + escapeHtml(channel.label) + '</option>');
     var fields = (channel.field_names || []).filter(function(name) { return byName[name]; }).map(function(name) {
       return renderNotificationField(byName[name], false);
     }).join('');
     return "<article class='notification-channel-card' data-notification-channel-card='" + escapeHtml(channel.id) + "'" +
-      (selected ? '' : ' hidden') + " aria-hidden='" + (selected ? 'false' : 'true') + "'>" +
-      "<input type='hidden' name='env__" + escapeHtml(channel.enabled_name) + "' value='" + (selected ? '1' : '0') + "' data-notification-channel-enabled>" +
+      " data-notification-channel-added='" + (configured ? '1' : '0') + "' data-notification-channel-active='" + (active ? 'true' : 'false') + "'" +
+      (configured ? '' : ' hidden') + " aria-hidden='" + (configured ? 'false' : 'true') + "'>" +
+      "<input type='hidden' name='env__" + escapeHtml(channel.enabled_name) + "' value='" + (active ? '1' : '0') + "' data-notification-channel-enabled>" +
+      "<input type='hidden' name='notification_remove__" + escapeHtml(channel.id) + "' value='0' data-notification-channel-removed>" +
       "<div class='notification-channel-card-head'><div><div class='notification-channel-name' id='notification-channel-name-" + escapeHtml(channel.id) + "'>" +
       escapeHtml(channel.label) + "</div><div class='notification-channel-desc'>" + escapeHtml(channel.description || '') +
-      "</div></div><button type='button' class='notification-channel-remove' data-notification-channel-remove='" + escapeHtml(channel.id) + "'>移除</button></div>" +
-      "<fieldset class='notification-channel-fields' data-notification-channel-fields" + (selected ? '' : ' disabled') +
+      "</div></div><div class='notification-channel-head-actions'><button type='button' class='notification-channel-activation" + (active ? ' is-active' : '') +
+      "' data-notification-channel-activation aria-pressed='" + (active ? 'true' : 'false') + "'>" + (active ? '启用' : '关闭') +
+      "</button><button type='button' class='notification-channel-remove' data-notification-channel-remove='" + escapeHtml(channel.id) + "'>移除</button></div></div>" +
+      "<fieldset class='notification-channel-fields' data-notification-channel-fields" + (configured ? '' : ' disabled') +
       " aria-labelledby='notification-channel-name-" + escapeHtml(channel.id) + "'>" + fields + "</fieldset>" +
       "<div class='notification-channel-actions'><button type='button' class='notification-channel-test' data-notification-channel-test='" +
       escapeHtml(channel.id) + "' aria-describedby='notification-test-status-" + escapeHtml(channel.id) + "'>发送测试通知</button>" +
@@ -190,10 +199,10 @@ function renderNotificationSettings(items) {
   }).join('');
   return "<div class='notification-settings' data-notification-channels><div class='notification-block'>" +
     "<div class='notification-block-head'><div><div class='notification-block-title'>基础设置</div>" +
-    "<div class='notification-block-note'>总开关用于临时暂停全部渠道，不会删除任何渠道配置。</div></div></div>" +
+    "<div class='notification-block-note'>总开关用于临时关闭全部渠道，不会删除任何渠道配置。</div></div></div>" +
     "<div class='notification-general-grid'>" + general + "</div></div><div class='notification-block'>" +
     "<div class='notification-block-head'><div><div class='notification-block-title'>通知渠道</div>" +
-    "<div class='notification-block-note'>按需添加渠道；移除并保存后会清除该渠道的全部配置。</div></div></div>" +
+    "<div class='notification-block-note'>每个渠道可单独启用或关闭；关闭会保留配置，移除并保存后才会清除配置。</div></div></div>" +
     "<div class='notification-channel-add-row'><select data-notification-channel-picker aria-label='选择通知渠道'>" + options.join('') +
     "</select><button type='button' class='notification-channel-add' data-notification-channel-add disabled>添加渠道</button></div>" +
     "<div class='notification-channel-empty' data-notification-channel-empty" + (selectedCount ? ' hidden' : '') + ">尚未添加通知渠道</div>" +
@@ -337,10 +346,28 @@ function setNotificationChannelVisibility(card, active) {
   if (!card) return;
   var enabledInput = card.querySelector('[data-notification-channel-enabled]');
   var fields = card.querySelector('[data-notification-channel-fields]');
-  if (enabledInput) enabledInput.value = active ? '1' : '0';
+  card.setAttribute('data-notification-channel-added', active ? '1' : '0');
   card.hidden = !active;
   card.setAttribute('aria-hidden', active ? 'false' : 'true');
+  if (enabledInput) enabledInput.disabled = !active;
   if (fields) fields.disabled = !active;
+}
+function setNotificationChannelActivation(card, active) {
+  if (!card) return;
+  var enabledInput = card.querySelector('[data-notification-channel-enabled]');
+  var button = card.querySelector('[data-notification-channel-activation]');
+  if (enabledInput) enabledInput.value = active ? '1' : '0';
+  card.setAttribute('data-notification-channel-active', active ? 'true' : 'false');
+  if (button) {
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    button.textContent = active ? '启用' : '关闭';
+  }
+}
+function setNotificationChannelRemoved(card, removed) {
+  if (!card) return;
+  var removedInput = card.querySelector('[data-notification-channel-removed]');
+  if (removedInput) removedInput.value = removed ? '1' : '0';
 }
 function syncNotificationChannelSettings() {
   var root = document.querySelector('[data-notification-channels]');
@@ -352,14 +379,16 @@ function syncNotificationChannelSettings() {
   root.querySelectorAll('[data-notification-channel-card]').forEach(function(card) {
     var enabledInput = card.querySelector('[data-notification-channel-enabled]');
     var active = !!enabledInput && enabledInput.value === '1';
+    var added = card.getAttribute('data-notification-channel-added') === '1';
     var channelId = card.getAttribute('data-notification-channel-card') || '';
-    setNotificationChannelVisibility(card, active);
-    if (active) activeCount += 1;
+    setNotificationChannelVisibility(card, added);
+    setNotificationChannelActivation(card, active);
+    if (added) activeCount += 1;
     if (picker) {
       Array.prototype.forEach.call(picker.options, function(option) {
         if (option.value !== channelId) return;
-        option.hidden = active;
-        option.disabled = active;
+        option.hidden = added;
+        option.disabled = added;
       });
     }
   });
@@ -530,8 +559,8 @@ function applyEnvConfigState(form, config) {
 function clearRemovedNotificationChannelFields(form) {
   if (!form) return;
   form.querySelectorAll('[data-notification-channel-card]').forEach(function(card) {
-    var enabledInput = card.querySelector('[data-notification-channel-enabled]');
-    if (enabledInput && enabledInput.value === '1') return;
+    var removedInput = card.querySelector('[data-notification-channel-removed]');
+    if (!removedInput || removedInput.value !== '1') return;
     card.querySelectorAll('[data-notification-channel-fields] input, [data-notification-channel-fields] select, [data-notification-channel-fields] textarea').forEach(function(field) {
       field.value = '';
     });
@@ -626,6 +655,14 @@ window.addEventListener('beforeunload', function(event) {
 document.addEventListener('click', function(event) {
   var target = event.target;
   if (!target || !target.closest) return;
+  var notificationActivationButton = target.closest('[data-notification-channel-activation]');
+  if (notificationActivationButton) {
+    var activationCard = notificationActivationButton.closest('[data-notification-channel-card]');
+    var activationInput = activationCard ? activationCard.querySelector('[data-notification-channel-enabled]') : null;
+    setNotificationChannelActivation(activationCard, !activationInput || activationInput.value !== '1');
+    resetEnvSaveIfDirty(notificationActivationButton.closest('form'));
+    return;
+  }
   var notificationTestButton = target.closest('[data-notification-channel-test]');
   if (notificationTestButton) {
     event.preventDefault();
@@ -667,6 +704,8 @@ document.addEventListener('click', function(event) {
     }
     if (!card) return;
     setNotificationChannelVisibility(card, true);
+    setNotificationChannelActivation(card, true);
+    setNotificationChannelRemoved(card, false);
     if (picker) picker.value = '';
     syncNotificationChannelSettings();
     resetEnvSaveIfDirty(notificationAddButton.closest('form'));
@@ -679,6 +718,8 @@ document.addEventListener('click', function(event) {
     var notificationCard = notificationRemoveButton.closest('[data-notification-channel-card]');
     var notificationForm = notificationRemoveButton.closest('form');
     setNotificationChannelVisibility(notificationCard, false);
+    setNotificationChannelActivation(notificationCard, false);
+    setNotificationChannelRemoved(notificationCard, true);
     syncNotificationChannelSettings();
     resetEnvSaveIfDirty(notificationForm);
     var notificationPicker = notificationForm ? notificationForm.querySelector('[data-notification-channel-picker]') : null;

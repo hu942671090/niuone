@@ -2460,7 +2460,7 @@ ADMIN_GROUP_NOTES = {
     "牛牛美股": "集中管理 X/推文监控、美股买入评级和隔夜美股盘面总结使用的 Grok 配置。长度默认：上下文 128000 tokens，最大输出 4096 tokens；关闭时隐藏 X/评级相关设置，隔夜美股总结仍会读取已配置的 Grok 参数。",
     "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。长度默认：上下文 128000 tokens，最大输出 4096 tokens。模型和密钥留空则跳过。",
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
-    "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；移除渠道并保存后会清除该渠道配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
+    "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
     "选股与买卖设置": "配置候选池展示与进入买卖决策的数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
     "选股策略": "选择一套独立策略；基础策略、Z哥、李大霄和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
@@ -2474,10 +2474,10 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
         "icon": "安全",
     },
     {
-        "slug": "us-market",
-        "name": "牛牛美股",
-        "summary": "配置美股功能、Grok 接入、推文监控与评级任务。",
-        "icon": "美股",
+        "slug": "notifications",
+        "name": "交易通知",
+        "summary": "管理成交通知总开关，以及飞书、钉钉等推送渠道。",
+        "icon": "通知",
     },
     {
         "slug": "news-precheck",
@@ -2492,12 +2492,6 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
         "icon": "决策",
     },
     {
-        "slug": "notifications",
-        "name": "交易通知",
-        "summary": "管理成交通知总开关，以及飞书、钉钉等推送渠道。",
-        "icon": "通知",
-    },
-    {
         "slug": "decision-times",
         "name": "选股与买卖设置",
         "summary": "配置候选数量，以及选股、买卖决策和离场时间。",
@@ -2508,6 +2502,12 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
         "name": "选股策略",
         "summary": "选择内置策略或维护自定义预设文字策略。",
         "icon": "策略",
+    },
+    {
+        "slug": "us-market",
+        "name": "牛牛美股",
+        "summary": "配置美股功能、Grok 接入、推文监控与评级任务。",
+        "icon": "美股",
     },
     {
         "slug": "market-monitoring",
@@ -2578,18 +2578,16 @@ NOTIFICATION_PRESENCE_STATE_NAMES = frozenset(
 )
 
 
-def removed_notification_config_names(updates: dict[str, str]) -> set[str]:
+def removed_notification_config_names(channel_ids: set[str] | list[str] | tuple[str, ...]) -> set[str]:
     """Return channel fields that must be deleted when a channel is removed."""
 
     clear_names: set[str] = set()
-    for channel in NOTIFICATION_CHANNEL_SETTINGS:
-        enabled_name = str(channel["enabled_name"])
-        if enabled_name not in updates:
+    for channel_id in channel_ids:
+        channel = NOTIFICATION_CHANNEL_BY_ID.get(str(channel_id or "").strip().lower())
+        if channel is None:
             continue
-        enabled = str(updates.get(enabled_name) or "").strip().lower() in TRUTHY_VALUES
-        if not enabled:
-            clear_names.add(enabled_name)
-            clear_names.update(str(name) for name in channel.get("field_names", ()))
+        clear_names.add(str(channel["enabled_name"]))
+        clear_names.update(str(name) for name in channel.get("field_names", ()))
     return clear_names
 
 
@@ -3925,11 +3923,17 @@ class Handler(BaseHTTPRequestHandler):
                     for key, value in form.items()
                     if key.startswith("env__") and key[len("env__"):] in visible_names
                 }
+                removed_notification_channels = {
+                    key[len("notification_remove__"):]
+                    for key, value in form.items()
+                    if key.startswith("notification_remove__")
+                    and str(value or "").strip().lower() in TRUTHY_VALUES
+                } if not group_slug or group_slug == "notifications" else set()
                 updates = normalize_business_updates(updates)
                 validate_business_updates(updates)
                 result = persist_and_sync_business_updates(
                     updates,
-                    clear_names=removed_notification_config_names(updates),
+                    clear_names=removed_notification_config_names(removed_notification_channels),
                 )
                 result["reauth_required"] = "DASHBOARD_ADMIN_PASSWORD" in set(result.get("changed_names") or [])
                 if result.get("changed"):

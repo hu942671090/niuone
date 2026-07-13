@@ -92,8 +92,8 @@ class TradeNotificationSettingsTests(unittest.TestCase):
             )
         for name in NOTIFICATION_ENV_NAMES:
             self.assertIn(name, items)
-        self.assertIn("(selected ? '' : ' hidden')", ADMIN_JS)
-        self.assertIn("(selected ? '' : ' disabled')", ADMIN_JS)
+        self.assertIn("(configured ? '' : ' hidden')", ADMIN_JS)
+        self.assertIn("(configured ? '' : ' disabled')", ADMIN_JS)
 
     def test_enabled_channel_is_rendered_as_an_active_configuration_card(self):
         dashboard.write_env_file_values(
@@ -120,7 +120,10 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         page = ADMIN_JS
 
         self.assertIn("function setNotificationChannelVisibility", page)
+        self.assertIn("function setNotificationChannelActivation", page)
+        self.assertIn("function setNotificationChannelRemoved", page)
         self.assertIn("function syncNotificationChannelSettings", page)
+        self.assertIn("target.closest('[data-notification-channel-activation]')", page)
         self.assertIn("target.closest('[data-notification-channel-add]')", page)
         self.assertIn("target.closest('[data-notification-channel-remove]')", page)
         self.assertIn("target.closest('[data-notification-channel-test]')", page)
@@ -131,10 +134,13 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         self.assertIn("function applyEnvConfigState", page)
         self.assertIn("applyEnvConfigState(form, payload.config)", page)
         self.assertIn("function clearRemovedNotificationChannelFields", page)
-        self.assertIn("if (enabledInput && enabledInput.value === '1') return;", page)
+        self.assertIn("if (!removedInput || removedInput.value !== '1') return;", page)
         self.assertIn("field.value = '';", page)
         self.assertIn("clearRemovedNotificationChannelFields(form);", page)
+        self.assertIn("enabledInput.disabled = !active", page)
         self.assertIn("fields.disabled = !active", page)
+        self.assertIn("button.textContent = active ? '启用' : '关闭';", page)
+        self.assertIn("setNotificationChannelRemoved(notificationCard, true);", page)
         self.assertIn("resetEnvSaveIfDirty(notificationAddButton.closest('form'))", page)
 
         apply_state_at = page.index("applyEnvConfigState(form, payload.config);")
@@ -236,7 +242,7 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         self.assertEqual(blank_timeout["channel"], "wecom")
         self.assertIn("不能为空", blank_timeout["error"])
 
-    def test_disabled_channel_updates_clear_exactly_that_channels_fields(self):
+    def test_removed_channels_clear_exactly_their_own_fields(self):
         expected_by_channel = {
             str(channel["id"]): {
                 str(channel["enabled_name"]),
@@ -246,14 +252,13 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         }
         for channel in dashboard.NOTIFICATION_CHANNEL_SETTINGS:
             channel_id = str(channel["id"])
-            enabled_name = str(channel["enabled_name"])
             with self.subTest(channel=channel_id):
                 self.assertEqual(
-                    dashboard.removed_notification_config_names({enabled_name: "0"}),
+                    dashboard.removed_notification_config_names({channel_id}),
                     expected_by_channel[channel_id],
                 )
                 self.assertEqual(
-                    dashboard.removed_notification_config_names({enabled_name: "1"}),
+                    dashboard.removed_notification_config_names(set()),
                     set(),
                 )
 
@@ -266,18 +271,12 @@ class TradeNotificationSettingsTests(unittest.TestCase):
                 "DASHBOARD_TELEGRAM_CHAT_ID",
             },
         )
-        disabled_updates = {
-            str(channel["enabled_name"]): "0"
-            for channel in dashboard.NOTIFICATION_CHANNEL_SETTINGS
-        }
         self.assertEqual(
-            dashboard.removed_notification_config_names(disabled_updates),
+            dashboard.removed_notification_config_names(set(expected_by_channel)),
             set().union(*expected_by_channel.values()),
         )
         self.assertEqual(
-            dashboard.removed_notification_config_names(
-                {"DASHBOARD_TELEGRAM_CHAT_ID": "-1001234567890"}
-            ),
+            dashboard.removed_notification_config_names({"not-a-channel"}),
             set(),
         )
 
@@ -286,14 +285,14 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         result = dashboard.write_env_file_values(
             disabled_updates,
             self.env_path,
-            clear_names=dashboard.removed_notification_config_names(disabled_updates),
+            clear_names=dashboard.removed_notification_config_names({"telegram"}),
         )
 
         self.assertFalse(result["changed"])
         self.assertEqual(result["changed_names"], [])
         self.assertFalse(self.env_path.exists())
 
-    def test_disabling_channels_clears_saved_credentials_from_file_and_process_env(self):
+    def test_deactivating_channels_preserves_saved_credentials(self):
         credentials = {
             "DASHBOARD_FEISHU_WEBHOOK_URL": "https://open.feishu.cn/open-apis/bot/v2/hook/private-feishu",
             "DASHBOARD_FEISHU_SIGNING_SECRET": "private-feishu-signing",
@@ -319,15 +318,17 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         result = dashboard.write_env_file_values(
             disabled_updates,
             self.env_path,
-            clear_names=dashboard.removed_notification_config_names(disabled_updates),
+            clear_names=dashboard.removed_notification_config_names(set()),
         )
         dashboard.sync_business_runtime_settings(result["changed_names"])
 
         values = dashboard.parse_env_file(self.env_path, include_container_overrides=False)
-        for name in {*enabled_updates, *credentials}:
-            self.assertNotIn(name, values)
-            self.assertNotIn(name, os.environ)
-            self.assertIn(name, result["changed_names"])
+        for name in enabled_updates:
+            self.assertEqual(values[name], "0")
+            self.assertEqual(os.environ.get(name), "0")
+        for name, value in credentials.items():
+            self.assertEqual(values[name], value)
+            self.assertEqual(os.environ.get(name), value)
 
     def test_removed_telegram_rerenders_with_unset_state_for_the_next_add(self):
         saved = dashboard.write_env_file_values(
@@ -343,7 +344,7 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         removed = dashboard.write_env_file_values(
             disabled_updates,
             self.env_path,
-            clear_names=dashboard.removed_notification_config_names(disabled_updates),
+            clear_names=dashboard.removed_notification_config_names({"telegram"}),
         )
         dashboard.sync_business_runtime_settings(removed["changed_names"])
 
@@ -354,7 +355,7 @@ class TradeNotificationSettingsTests(unittest.TestCase):
         self.assertEqual(items["DASHBOARD_TELEGRAM_BOT_TOKEN"]["file_value"], "")
         self.assertEqual(items["DASHBOARD_TELEGRAM_CHAT_ID"]["file_value"], "")
         self.assertIn("placeholder='" , ADMIN_JS)
-        self.assertIn("(selected ? '' : ' hidden')", ADMIN_JS)
+        self.assertIn("(configured ? '' : ' hidden')", ADMIN_JS)
 
     def test_configured_telegram_chat_id_uses_presence_state_in_payload_and_page(self):
         chat_id = "-1001234567890"
@@ -477,8 +478,10 @@ class TradeNotificationSettingsTests(unittest.TestCase):
             "https://core.telegram.org/bots",
         ):
             self.assertIn(official_url, readme)
-        self.assertIn("移除”会先停用并收起该渠道", readme)
-        self.assertIn("删除该渠道已经保存的 Webhook、Bot Token、Chat ID 和签名密钥", readme)
+        self.assertIn("“关闭”只停止该渠道的成交通知", readme)
+        self.assertIn("不会删除 Webhook、Bot Token、Chat ID 或签名密钥", readme)
+        self.assertIn("“移除”会关闭并收起该渠道", readme)
+        self.assertIn("删除该渠道已经保存的全部配置", readme)
         self.assertIn("再次添加时状态为“未设置”", readme)
         self.assertIn("如果在保存前重新添加渠道，原配置不会被删除", readme)
         self.assertIn("发送测试通知", readme)

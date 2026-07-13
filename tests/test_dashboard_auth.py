@@ -129,7 +129,8 @@ class DashboardAuthTests(unittest.TestCase):
         admin.do_GET()
         self.assertEqual(admin.status, 200)
         admin_body = admin.wfile.getvalue().decode('utf-8')
-        self.assertIn('<script src="/static/admin.js?v=7" defer></script>', admin_body)
+        self.assertIn('<link rel="stylesheet" href="/static/admin.css?v=3">', admin_body)
+        self.assertIn('<script src="/static/admin.js?v=10" defer></script>', admin_body)
         self.assertNotIn('name="admin_password"', admin_body)
         self.assertNotIn("name='env__DASHBOARD_GROK_API_KEY'", admin_body)
         self.assertIn("fetch('/api/admin/config'", ADMIN_FRONTEND)
@@ -1680,7 +1681,7 @@ process.stdout.write(JSON.stringify({
         unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
         unlocked_page.do_GET()
         self.assertEqual(unlocked_page.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=7" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=10" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
 
         unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
         unlocked_api.do_GET()
@@ -2257,7 +2258,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(handler.status, 200)
         self.assertEqual(len(payload['groups']), 10)
         self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        self.assertIn('<script src="/static/admin.js?v=7" defer></script>', index_body)
+        self.assertIn('<script src="/static/admin.js?v=10" defer></script>', index_body)
         self.assertNotIn("name='env__", index_body)
         self.assertIn('function renderSettingsIndex()', ADMIN_FRONTEND)
         self.assertIn('function renderSettingsGroup(slug)', ADMIN_FRONTEND)
@@ -2281,10 +2282,12 @@ process.stdout.write(JSON.stringify({
             route = FakeHandler(path=f'/admin/settings/{slug}')
             route.do_GET()
             self.assertEqual(route.status, 200)
-            self.assertIn('<script src="/static/admin.js?v=7" defer></script>', route.wfile.getvalue().decode('utf-8'))
+            self.assertIn('<script src="/static/admin.js?v=10" defer></script>', route.wfile.getvalue().decode('utf-8'))
 
         self.assertEqual(len(groups), 10)
         self.assertEqual(len(slugs), len(set(slugs)))
+        self.assertEqual(slugs[:2], ['access-control', 'notifications'])
+        self.assertEqual(slugs.index('us-market'), slugs.index('stock-strategy') + 1)
         self.assertEqual(grouped_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
         self.assertIn("data-save-endpoint='/api/admin/config/env/", ADMIN_FRONTEND)
         self.assertIn("settingsGroupSlug()", ADMIN_FRONTEND)
@@ -2313,7 +2316,7 @@ process.stdout.write(JSON.stringify({
         locked.do_GET()
         locked_body = locked.wfile.getvalue().decode('utf-8')
         self.assertEqual(locked.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=7" defer></script>', locked_body)
+        self.assertIn('<script src="/static/admin.js?v=10" defer></script>', locked_body)
         self.assertNotIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", locked_body)
 
         cookie = self.admin_cookie()
@@ -2337,7 +2340,7 @@ process.stdout.write(JSON.stringify({
         )
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        self.assertIn('<script src="/static/admin.js?v=7" defer></script>', missing.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=10" defer></script>', missing.wfile.getvalue().decode('utf-8'))
         self.assertIn('未找到该设置分组', ADMIN_FRONTEND)
 
     def test_group_save_ignores_fields_from_other_settings_groups(self):
@@ -3033,6 +3036,7 @@ process.stdout.write(JSON.stringify({
             dashboard.RATE_LIMIT_ADMIN = 100
             body = urllib.parse.urlencode({
                 'env__DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED': '0',
+                'notification_remove__telegram': '1',
             }).encode('utf-8')
             handler = FakeHandler(
                 path='/api/admin/config/env',
@@ -3076,6 +3080,70 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(stored['DASHBOARD_FEISHU_WEBHOOK_URL'], feishu_webhook)
         self.assertEqual(config_by_name['DASHBOARD_TELEGRAM_BOT_TOKEN']['current_state'], '未设置')
         self.assertEqual(config_by_name['DASHBOARD_TELEGRAM_CHAT_ID']['current_state'], '未设置')
+
+    def test_admin_config_api_deactivating_notification_channel_preserves_its_config(self):
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        names = (
+            'DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED',
+            'DASHBOARD_TELEGRAM_BOT_TOKEN',
+            'DASHBOARD_TELEGRAM_CHAT_ID',
+        )
+        original_env_values = {name: dashboard.os.environ.get(name) for name in names}
+        telegram_token = '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghi'
+        try:
+            for name in names:
+                dashboard.os.environ.pop(name, None)
+            dashboard.write_env_file_values({
+                'DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED': '1',
+                'DASHBOARD_TELEGRAM_BOT_TOKEN': telegram_token,
+                'DASHBOARD_TELEGRAM_CHAT_ID': '-1001234567890',
+            })
+            dashboard.os.environ.update({
+                'DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED': '1',
+                'DASHBOARD_TELEGRAM_BOT_TOKEN': telegram_token,
+                'DASHBOARD_TELEGRAM_CHAT_ID': '-1001234567890',
+            })
+            dashboard.RATE_LIMIT_ADMIN = 100
+            body = urllib.parse.urlencode({
+                'env__DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED': '0',
+                'notification_remove__telegram': '0',
+            }).encode('utf-8')
+            handler = FakeHandler(
+                path='/api/admin/config/env/notifications',
+                method='POST',
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            handler.do_POST()
+            response_text = handler.wfile.getvalue().decode('utf-8')
+            response = json.loads(response_text)
+            stored = dashboard.parse_env_file(
+                dashboard.DASHBOARD_ENV_FILE,
+                include_container_overrides=False,
+            )
+            runtime_after_deactivation = {name: dashboard.os.environ.get(name) for name in names}
+        finally:
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            for name, value in original_env_values.items():
+                if value is None:
+                    dashboard.os.environ.pop(name, None)
+                else:
+                    dashboard.os.environ[name] = value
+
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(response['ok'])
+        self.assertNotIn(telegram_token, response_text)
+        self.assertEqual(stored['DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED'], '0')
+        self.assertEqual(stored['DASHBOARD_TELEGRAM_BOT_TOKEN'], telegram_token)
+        self.assertEqual(stored['DASHBOARD_TELEGRAM_CHAT_ID'], '-1001234567890')
+        self.assertEqual(runtime_after_deactivation['DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED'], '0')
+        self.assertEqual(runtime_after_deactivation['DASHBOARD_TELEGRAM_BOT_TOKEN'], telegram_token)
+        self.assertEqual(runtime_after_deactivation['DASHBOARD_TELEGRAM_CHAT_ID'], '-1001234567890')
 
     def test_settings_page_omits_contest_panel_and_config(self):
         payload = dashboard.build_admin_config_payload()
