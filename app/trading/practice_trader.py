@@ -1811,6 +1811,9 @@ PERIODIC_MARKET_MIN_SAMPLE = 1000
 PERIODIC_MARKET_MIN_COVERAGE = 0.80
 PERIODIC_MARKET_MIN_ACTIVE_RATIO = 0.20
 PERIODIC_MARKET_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
+MARKET_HARD_STOP_CONFIRMATIONS = 2
+MARKET_HARD_STOP_RECOVERY_CONFIRMATIONS = 2
+MARKET_HARD_STOP_LIQUIDITY_RATE_RATIO = 0.75
 DECISION_INTELLIGENCE_ENABLED = env_bool("DASHBOARD_DECISION_INTELLIGENCE_ENABLED", True)
 DECISION_INTELLIGENCE_TTL_SECONDS = max(15, env_int("DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", 75))
 DECISION_INTELLIGENCE_MAX_ITEMS = max(1, min(8, env_int("DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS", 5)))
@@ -2274,9 +2277,118 @@ def derive_market_strategy_context(reports: list[dict[str, Any]] | None, now: da
     return ctx
 
 
+def _market_session_elapsed_minutes(source_dt: datetime) -> int:
+    minute = source_dt.hour * 60 + source_dt.minute
+    morning_start = 9 * 60 + 30
+    morning_end = 11 * 60 + 30
+    afternoon_start = 13 * 60
+    if minute <= morning_start:
+        return 1
+    if minute <= morning_end:
+        return minute - morning_start
+    if minute < afternoon_start:
+        return 120
+    return min(240, 120 + minute - afternoon_start)
+
+
+def evaluate_market_hard_stop(
+    snapshot: dict[str, Any],
+    previous_snapshot: dict[str, Any] | None,
+    source_dt: datetime,
+) -> dict[str, Any]:
+    """Apply a confirmed composite market stop and symmetric recovery gate."""
+    result = dict(snapshot)
+    previous = previous_snapshot if isinstance(previous_snapshot, dict) else {}
+    previous_dt = parse_ts(str(previous.get("quote_time") or previous.get("captured_at") or ""))
+    same_day = previous_dt is not None and previous_dt.date() == source_dt.date()
+    same_snapshot = same_day and previous_dt == source_dt
+
+    elapsed = _market_session_elapsed_minutes(source_dt)
+    total_amount = max(0.0, _safe_float(result.get("total_amount"), 0.0))
+    amount_per_minute = total_amount / elapsed if elapsed > 0 else 0.0
+    previous_rate = _safe_float(previous.get("amount_per_minute"), 0.0) if same_day else 0.0
+    liquidity_cold = (
+        previous_rate > 0
+        and amount_per_minute <= previous_rate * MARKET_HARD_STOP_LIQUIDITY_RATE_RATIO
+    )
+
+    up = max(0, int(_safe_float(result.get("up"), 0.0)))
+    down = max(0, int(_safe_float(result.get("down"), 0.0)))
+    limit_up = max(0, int(_safe_float(result.get("limit_up"), 0.0)))
+    limit_down = max(0, int(_safe_float(result.get("limit_down"), 0.0)))
+    median_pct = _safe_float(result.get("median_change_pct"), 0.0)
+    core_count = max(0, int(_safe_float(result.get("core_index_count"), 0.0)))
+    below_count = max(0, int(_safe_float(result.get("index_below_ma20_count"), 0.0)))
+    index_average_pct = _safe_float(result.get("index_average_change_pct"), 0.0)
+
+    index_break = core_count >= 3 and below_count >= 2 and index_average_pct <= -0.5
+    breadth_break = down >= max(100, int(up * 1.5)) and median_pct <= -0.8
+    limit_down_spread = limit_down >= max(5, limit_up)
+    candidate = index_break and breadth_break and (limit_down_spread or liquidity_cold)
+    recovery_candidate = (
+        core_count >= 3
+        and below_count <= 1
+        and (up >= down or median_pct >= -0.2)
+        and limit_down <= max(3, limit_up)
+    )
+
+    state_keys = (
+        "hard_stop_candidate", "hard_stop_confirmations", "hard_stop_active",
+        "recovery_candidate", "recovery_confirmations", "hard_stop_reasons",
+    )
+    if same_snapshot:
+        for key in state_keys:
+            if key in previous:
+                result[key] = previous[key]
+    else:
+        previous_active = bool(previous.get("hard_stop_active")) if same_day else False
+        if candidate:
+            confirmations = (
+                int(previous.get("hard_stop_confirmations") or 0) + 1
+                if same_day and previous.get("hard_stop_candidate")
+                else 1
+            )
+            recovery_confirmations = 0
+            active = previous_active or confirmations >= MARKET_HARD_STOP_CONFIRMATIONS
+        elif previous_active:
+            confirmations = int(previous.get("hard_stop_confirmations") or MARKET_HARD_STOP_CONFIRMATIONS)
+            recovery_confirmations = (
+                int(previous.get("recovery_confirmations") or 0) + 1
+                if recovery_candidate and previous.get("recovery_candidate")
+                else (1 if recovery_candidate else 0)
+            )
+            active = recovery_confirmations < MARKET_HARD_STOP_RECOVERY_CONFIRMATIONS
+        else:
+            confirmations = 0
+            recovery_confirmations = 0
+            active = False
+        reasons = []
+        if index_break:
+            reasons.append(f"核心指数{below_count}/{core_count}跌破20日线")
+        if breadth_break:
+            reasons.append(f"下跌{down}家/上涨{up}家，中位数{median_pct:+.2f}%")
+        if limit_down_spread:
+            reasons.append(f"跌停{limit_down}家扩散")
+        if liquidity_cold:
+            reasons.append("成交速率较上次快照下降25%以上")
+        result.update({
+            "hard_stop_candidate": candidate,
+            "hard_stop_confirmations": confirmations,
+            "hard_stop_active": active,
+            "recovery_candidate": recovery_candidate,
+            "recovery_confirmations": recovery_confirmations,
+            "hard_stop_reasons": reasons,
+        })
+
+    result["amount_per_minute"] = round(amount_per_minute, 2)
+    result["liquidity_cold"] = liquidity_cold
+    return result
+
+
 def _periodic_market_snapshot_report(
     b1_payload: dict[str, Any] | None,
     now: datetime | None = None,
+    previous_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build a synthetic market report from the quote batch embedded in a B1 run."""
     payload = b1_payload if isinstance(b1_payload, dict) else {}
@@ -2311,6 +2423,8 @@ def _periodic_market_snapshot_report(
     if age_seconds < -60 or age_seconds > PERIODIC_MARKET_SNAPSHOT_MAX_AGE_SECONDS:
         return None
 
+    snapshot = evaluate_market_hard_stop(snapshot, previous_snapshot, source_dt)
+
     if up > down * 1.4 and limit_up >= max(limit_down * 2, 5):
         tone = "offensive"
     elif down > up * 1.3 and limit_down >= max(limit_up, 3):
@@ -2321,7 +2435,11 @@ def _periodic_market_snapshot_report(
         tone = "cautious"
 
     label = _market_tone_label(tone)
-    if tone == "offensive":
+    if snapshot.get("hard_stop_active"):
+        pace = "复合风险条件连续确认，停止新开仓，只允许卖出/持有"
+        buy = "候选股即使技术达标也不买，等待指数、广度和风险端连续修复"
+        sell = "按原策略处理破位和弱势持仓，不因市场硬停止无差别清仓"
+    elif tone == "offensive":
         pace = "主板广度和涨停端共振，可围绕确认后的主线分批试错；单轮新仓不超过2笔"
         buy = "只做板块联动、回踩承接或右侧突破确认，不因标签转强直接追高"
         sell = "强势持仓可跟随，放量滞涨或跌回关键均线时执行移动止盈"
@@ -2334,8 +2452,8 @@ def _periodic_market_snapshot_report(
         buy = "只看贴近BBI/均线且有板块承接的高确定性候选，不追高"
         sell = "弱于板块、破位或冲高回落的持仓优先降风险"
     else:
-        pace = "只卖不买；先处理破位、亏损扩大和高位退潮信号"
-        buy = "候选股即使技术达标也先观察，等待风险端和下跌广度收缩"
+        pace = "防守观察；复合风险尚未连续确认，新仓最多1笔且必须高确定性"
+        buy = "只看贴近关键支撑且有板块承接的候选，不追高、不扩仓"
         sell = "弱于板块、跌破BBI/白线或放量回落的持仓优先减仓或退出"
 
     average_pct = _safe_float(snapshot.get("average_change_pct"), 0.0)
@@ -2360,17 +2478,13 @@ def _periodic_market_snapshot_report(
             "decision_guidance": guidance,
             "refresh_mode": "b1_periodic",
             "market_snapshot": {
+                **snapshot,
                 "source": snapshot.get("source") or "b1_mainboard_quotes",
                 "universe": snapshot.get("universe") or "mainboard_non_st",
                 "quote_time": source_time,
                 "pool_count": pool_count,
                 "sample_count": sample_count,
                 "coverage": round(coverage, 4),
-                "up": up,
-                "down": down,
-                "flat": flat,
-                "limit_up": limit_up,
-                "limit_down": limit_down,
                 "average_change_pct": round(average_pct, 3),
                 "median_change_pct": round(median_pct, 3),
             },
@@ -2383,7 +2497,10 @@ def market_strategy_context_for_b1(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Use the current B1 breadth snapshot first, with archived reports as fallback."""
-    live_report = _periodic_market_snapshot_report(b1_payload, now)
+    state = load_state()
+    previous_ctx = state.get("market_decision_context") if isinstance(state.get("market_decision_context"), dict) else {}
+    previous_snapshot = previous_ctx.get("market_snapshot") if isinstance(previous_ctx.get("market_snapshot"), dict) else {}
+    live_report = _periodic_market_snapshot_report(b1_payload, now, previous_snapshot)
     if not live_report:
         return current_market_strategy_context(now)
     reports = load_today_market_monitor_reports(now)
@@ -4201,12 +4318,14 @@ def current_trade_discipline_text(position_limit_desc: str, adaptive: dict[str, 
             )
         return custom
     adaptive = adaptive or {}
+    enabled = enabled_strategy_ids(os.environ.get(PERSONA_STRATEGY_ENV), os.environ.get(STRATEGY_SOURCE_ENV))
     return default_trade_discipline_text(
         max_open_positions=MAX_OPEN_POSITIONS,
         max_new_buys_per_decision=MAX_NEW_BUYS_PER_DECISION,
         position_limit_desc=position_limit_desc or "无固定百分比硬限制",
         adaptive_label=str(adaptive.get("label") or "中性"),
         adaptive_position_mult=float(adaptive.get("position_mult", 1.0)),
+        zettaranc_enabled=any(is_zettaranc_strategy(strategy_id) for strategy_id in enabled),
     )
 
 

@@ -841,7 +841,7 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(calls["current"], 1)
         self.assertEqual(ctx["tone"], "cautious")
 
-    def test_periodic_b1_defensive_snapshot_hard_blocks_new_buys(self):
+    def test_periodic_b1_defensive_snapshot_without_composite_confirmation_only_reduces_risk(self):
         original_loader = trader.load_today_market_monitor_reports
         try:
             trader.load_today_market_monitor_reports = lambda now=None, limit=3: []
@@ -863,6 +863,90 @@ class SellStrategyRuleTests(unittest.TestCase):
             trader.load_today_market_monitor_reports = original_loader
 
         self.assertEqual(ctx["tone"], "defensive")
+        self.assertTrue(ctx["allow_new_buys"])
+        self.assertEqual(ctx["max_new_buys_per_decision"], 1)
+
+    def test_market_hard_stop_requires_two_composite_confirmations_and_two_recoveries(self):
+        risk = {
+            "quote_time": "2026-07-10 10:00:00",
+            "total_amount": 6e11,
+            "up": 600,
+            "down": 2300,
+            "limit_up": 2,
+            "limit_down": 20,
+            "median_change_pct": -1.3,
+            "core_index_count": 3,
+            "index_below_ma20_count": 2,
+            "index_average_change_pct": -1.1,
+        }
+
+        first = trader.evaluate_market_hard_stop(risk, {}, datetime(2026, 7, 10, 10, 0))
+        second_risk = {**risk, "quote_time": "2026-07-10 10:30:00", "total_amount": 8e11}
+        second = trader.evaluate_market_hard_stop(second_risk, first, datetime(2026, 7, 10, 10, 30))
+
+        self.assertTrue(first["hard_stop_candidate"])
+        self.assertFalse(first["hard_stop_active"])
+        self.assertEqual(first["hard_stop_confirmations"], 1)
+        self.assertTrue(second["hard_stop_active"])
+        self.assertEqual(second["hard_stop_confirmations"], 2)
+
+        recovery = {
+            **second_risk,
+            "quote_time": "2026-07-10 11:00:00",
+            "up": 1700,
+            "down": 1200,
+            "limit_up": 12,
+            "limit_down": 2,
+            "median_change_pct": 0.1,
+            "index_below_ma20_count": 1,
+            "index_average_change_pct": 0.2,
+            "total_amount": 1.1e12,
+        }
+        recovery_first = trader.evaluate_market_hard_stop(recovery, second, datetime(2026, 7, 10, 11, 0))
+        recovery_second_input = {**recovery, "quote_time": "2026-07-10 11:20:00", "total_amount": 1.3e12}
+        recovery_second = trader.evaluate_market_hard_stop(
+            recovery_second_input, recovery_first, datetime(2026, 7, 10, 11, 20)
+        )
+
+        self.assertTrue(recovery_first["hard_stop_active"])
+        self.assertEqual(recovery_first["recovery_confirmations"], 1)
+        self.assertFalse(recovery_second["hard_stop_active"])
+        self.assertEqual(recovery_second["recovery_confirmations"], 2)
+
+    def test_confirmed_market_hard_stop_emits_execution_block(self):
+        prior = {
+            "quote_time": "2026-07-10 10:00:00",
+            "hard_stop_candidate": True,
+            "hard_stop_confirmations": 1,
+            "hard_stop_active": False,
+            "amount_per_minute": 1e10,
+        }
+        payload = {
+            "market_snapshot": {
+                "quote_time": "2026-07-10 10:30:00",
+                "pool_count": 3000,
+                "sample_count": 3000,
+                "coverage": 1.0,
+                "up": 600,
+                "down": 2300,
+                "flat": 100,
+                "limit_up": 2,
+                "limit_down": 20,
+                "average_change_pct": -1.2,
+                "median_change_pct": -1.3,
+                "total_amount": 7e11,
+                "core_index_count": 3,
+                "index_below_ma20_count": 2,
+                "index_average_change_pct": -1.1,
+            }
+        }
+
+        report = trader._periodic_market_snapshot_report(
+            payload, datetime(2026, 7, 10, 10, 31), prior
+        )
+        ctx = trader.derive_market_strategy_context([report], datetime(2026, 7, 10, 10, 31))
+
+        self.assertTrue(report["metadata"]["market_snapshot"]["hard_stop_active"])
         self.assertFalse(ctx["allow_new_buys"])
         self.assertEqual(ctx["max_new_buys_per_decision"], 0)
 
@@ -1587,6 +1671,7 @@ class SellStrategyRuleTests(unittest.TestCase):
             trader.STRATEGY_SOURCE_ENV: os.environ.get(trader.STRATEGY_SOURCE_ENV),
             trader.PERSONA_STRATEGY_ENV: os.environ.get(trader.PERSONA_STRATEGY_ENV),
             trader.PRESET_STRATEGY_TEXT_ENV: os.environ.get(trader.PRESET_STRATEGY_TEXT_ENV),
+            trader.TRADE_DISCIPLINE_TEXT_ENV: os.environ.get(trader.TRADE_DISCIPLINE_TEXT_ENV),
         }
         originals = {
             "load_crossdesk_config": trader.load_crossdesk_config,
@@ -1601,6 +1686,7 @@ class SellStrategyRuleTests(unittest.TestCase):
             os.environ[trader.STRATEGY_SOURCE_ENV] = "preset_text"
             os.environ[trader.PERSONA_STRATEGY_ENV] = "li_daxiao_bottom"
             os.environ[trader.PRESET_STRATEGY_TEXT_ENV] = "只做主线强趋势回踩\\n跌破5日线离场"
+            os.environ.pop(trader.TRADE_DISCIPLINE_TEXT_ENV, None)
             trader.load_crossdesk_config = lambda *args, **kwargs: ("https://decision.example/v1", "key")
             trader.check_market_environment = lambda: {"bullish": True, "detail": "test"}
             trader.check_market_sentiment = lambda: {"sentiment": "neutral", "detail": "test", "hot_sectors": []}
@@ -1660,7 +1746,7 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertIn("每条 BUY/SELL 的仓位大小由你决定", prompt)
         self.assertIn("参考价或成交价 × shares ÷ 当前总权益 × 100%", prompt)
         self.assertIn("执行层不会替你补默认仓位", prompt)
-        self.assertIn("不会把过大的买入/卖出自动缩小", prompt)
+        self.assertIn("不会替你补默认仓位或自动缩量", prompt)
         self.assertIn("仓位弹性由评分、战法确定性、风险标记、盘面级别和账户状态决定", prompt)
         self.assertNotIn("单票仓位 ≤ 总资金15%", prompt)
         self.assertNotIn("总资金15%", prompt)

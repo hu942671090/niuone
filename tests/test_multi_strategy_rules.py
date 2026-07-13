@@ -42,6 +42,20 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(snapshot["quote_time"], "2026-07-10 10:00:04")
         self.assertEqual(snapshot["total_amount"], 1e9)
 
+    def test_build_index_risk_snapshot_counts_core_indices_below_ma20(self):
+        quotes = {
+            "sh000001": {"price": 9.8, "change_pct": -1.2},
+            "sz399001": {"price": 9.7, "change_pct": -1.5},
+            "sz399006": {"price": 10.2, "change_pct": -0.2},
+        }
+        rows = [{"close": 10.0} for _ in range(21)]
+
+        snapshot = screen.build_index_risk_snapshot(quotes, kline_loader=lambda symbol, count: rows)
+
+        self.assertEqual(snapshot["core_index_count"], 3)
+        self.assertEqual(snapshot["index_below_ma20_count"], 2)
+        self.assertAlmostEqual(snapshot["index_average_change_pct"], -0.967, places=3)
+
     def test_recent_b1_indices_require_core_negative_j(self):
         rows = [{"j": None, "open": 10.0, "close": 10.0} for _ in range(10)]
         rows[4]["j"] = -9.5

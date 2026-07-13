@@ -265,6 +265,48 @@ def build_market_snapshot(
     }
 
 
+CORE_INDEX_SYMBOLS = {
+    "sh": "sh000001",
+    "sz": "sz399001",
+    "cyb": "sz399006",
+}
+
+
+def build_index_risk_snapshot(
+    quotes: dict[str, dict[str, Any]],
+    *,
+    kline_loader=None,
+) -> dict[str, Any]:
+    """Build a compact core-index trend snapshot for the market risk gate."""
+    kline_loader = kline_loader or tencent_klines
+    items = []
+    for key, symbol in CORE_INDEX_SYMBOLS.items():
+        quote = quotes.get(symbol) if isinstance(quotes.get(symbol), dict) else {}
+        price = safe_float(quote.get("price"))
+        change_pct = safe_float(quote.get("change_pct"))
+        rows = kline_loader(symbol, 30) or []
+        completed_closes = [safe_float(row.get("close")) for row in rows[-21:-1]] if len(rows) >= 21 else []
+        completed_closes = [value for value in completed_closes if value is not None and value > 0]
+        ma20 = statistics.mean(completed_closes[-20:]) if len(completed_closes) >= 20 else None
+        if price is None or price <= 0 or ma20 is None:
+            continue
+        items.append({
+            "key": key,
+            "symbol": symbol,
+            "price": round(price, 3),
+            "change_pct": round(change_pct, 3) if change_pct is not None else None,
+            "ma20": round(ma20, 3),
+            "below_ma20": price < ma20,
+        })
+    changes = [item["change_pct"] for item in items if item.get("change_pct") is not None]
+    return {
+        "core_indices": items,
+        "core_index_count": len(items),
+        "index_below_ma20_count": sum(1 for item in items if item["below_ma20"]),
+        "index_average_change_pct": round(statistics.mean(changes), 3) if changes else None,
+    }
+
+
 def tencent_klines(symbol, count=120):
     url = f"{TENCENT_KLINE}?param={symbol},day,,,{count},qfq"
     req = urllib.request.Request(url, headers={"User-Agent": UA})
@@ -809,6 +851,11 @@ def main():
         quotes.update(q)
         time.sleep(0.05)
     market_snapshot = build_market_snapshot(quotes, pool_count=len(all_keys))
+    try:
+        index_quotes = tencent_batch_quote(list(CORE_INDEX_SYMBOLS.values()))
+        market_snapshot.update(build_index_risk_snapshot(index_quotes))
+    except Exception:
+        pass
 
     # Filter by liquidity
     liquid = []
