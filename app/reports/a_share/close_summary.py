@@ -30,8 +30,10 @@ from niuone_paths import get_dashboard_home
 
 if __package__ == "app":
     from .reports.a_share import common as report_common
+    from .reports.a_share.tencent_spot import fetch_tencent_spot_snapshot
 else:
     from reports.a_share import common as report_common
+    from reports.a_share.tencent_spot import fetch_tencent_spot_snapshot
 
 os.environ.setdefault("NO_PROXY", "*")
 os.environ.setdefault("no_proxy", "*")
@@ -44,6 +46,7 @@ except Exception as e:
 
 CN_TZ = dt.timezone(dt.timedelta(hours=8))
 NOW = dt.datetime.now(CN_TZ)
+DASHBOARD_HOME = Path(os.environ.get("DASHBOARD_HOME") or get_dashboard_home(Path.cwd())).expanduser()
 SCRIPT_NAME = Path(sys.argv[0]).name.lower()
 MODE = "midday" if "midday" in SCRIPT_NAME or "noon" in SCRIPT_NAME else "close"
 TITLE = "午盘总结" if MODE == "midday" else "盘后总结"
@@ -306,18 +309,33 @@ def fetch_spot():
         errors.append(f"东财分页直连: {type(e).__name__}: {e}")
 
     try:
+        rows, tencent_warning = fetch_tencent_spot_snapshot(DASHBOARD_HOME)
+        if rows:
+            issue = spot_snapshot_issue(rows, tencent_warning)
+            if not issue:
+                msg = "东财现货接口失败，已切换腾讯全市场行情：" + "；".join(errors[-2:])
+                if tencent_warning:
+                    msg += f"；{tencent_warning}"
+                return rows, msg
+            errors.append(f"腾讯全市场行情不完整: {issue}")
+        else:
+            errors.append(tencent_warning or "腾讯全市场行情返回空")
+    except Exception as e:
+        errors.append(f"腾讯全市场行情: {type(e).__name__}: {e}")
+
+    try:
         with time_limit(safe_int(os.getenv("A_SHARE_SUMMARY_SINA_TIMEOUT", "10"), 10)):
             df = quiet_call(ak.stock_zh_a_spot)
         if df is not None and len(df):
             issue = spot_snapshot_issue(extract_market(df), None)
             if not issue:
-                return df, "东财现货接口失败，已切换新浪现货：" + "；".join(errors[-2:])
+                return df, "东财与腾讯现货接口失败，已切换新浪现货：" + "；".join(errors[-3:])
             errors.append(f"stock_zh_a_spot: {issue}")
         else:
             errors.append("stock_zh_a_spot: returned empty")
     except Exception as e:
         errors.append(f"stock_zh_a_spot: {type(e).__name__}: {e}")
-    return [], "现货主接口暂不可用：" + "；".join(errors[-4:])
+    return [], "现货主接口暂不可用：" + "；".join(errors[-5:])
 
 
 def fetch_industry_fund_flow():
@@ -656,7 +674,9 @@ def build_report(*, require_complete_spot: bool = False) -> str:
         return ""
     spot, spot_err = fetch_spot()
     rows = extract_market(spot) if spot is not None else []
-    completeness_issue = spot_snapshot_issue(rows, spot_err)
+    # fetch_spot validates each successful source.  Do not let an error message
+    # from an earlier provider invalidate a complete later-provider snapshot.
+    completeness_issue = spot_snapshot_issue(rows, spot_err if not rows else None)
     if require_complete_spot and completeness_issue:
         raise SpotSnapshotUnavailable(completeness_issue)
 

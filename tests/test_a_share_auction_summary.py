@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -67,6 +69,60 @@ class AShareAuctionSummaryTests(unittest.TestCase):
 
         self.assertEqual(rows, fallback_rows)
         self.assertIn("已切换腾讯备用行情", err)
+
+    def test_scheduled_report_rejects_incomplete_snapshot_before_optional_fetches(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 2, 9, 25, tzinfo=mod.CN_TZ)
+        mod.fetch_auction_snapshot = lambda: ([], "竞价快照返回空")
+        optional_calls = []
+        mod.fetch_zt_pool = lambda: optional_calls.append("zt")
+        mod.fetch_dt_pool = lambda: optional_calls.append("dt")
+
+        with self.assertRaises(mod.AuctionSnapshotUnavailable):
+            mod.build_report(require_complete_snapshot=True)
+
+        self.assertEqual(optional_calls, [])
+
+    def test_scheduled_report_rejects_partial_snapshot(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 2, 9, 25, tzinfo=mod.CN_TZ)
+        mod.fetch_auction_snapshot = lambda: ([
+            {
+                "code": "600001",
+                "name": "测试科技",
+                "open_price": 11.0,
+                "prev_close": 10.0,
+                "auction_pct": 10.0,
+                "amount": 1000000,
+            },
+        ], None)
+        original_min_rows = os.environ.get("A_SHARE_AUCTION_SNAPSHOT_MIN_ROWS")
+        try:
+            os.environ["A_SHARE_AUCTION_SNAPSHOT_MIN_ROWS"] = "1000"
+            with self.assertRaisesRegex(mod.AuctionSnapshotUnavailable, "完整性下限"):
+                mod.build_report(require_complete_snapshot=True)
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_AUCTION_SNAPSHOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_AUCTION_SNAPSHOT_MIN_ROWS"] = original_min_rows
+
+    def test_main_exits_nonzero_so_scheduler_retries_missing_snapshot(self):
+        mod = load_module()
+        strict_values = []
+
+        def missing_report(*, require_complete_snapshot=False):
+            strict_values.append(require_complete_snapshot)
+            raise mod.AuctionSnapshotUnavailable("竞价快照为空")
+
+        mod.build_report = missing_report
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            mod.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(strict_values, [True])
+        self.assertIn("等待调度器重试", output.getvalue())
 
     def test_industry_strength_does_not_let_turnover_override_negative_open(self):
         mod = load_module()

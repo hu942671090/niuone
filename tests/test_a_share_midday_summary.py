@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 import json
+import os
 import sys
 import unittest
 from datetime import datetime
@@ -50,6 +53,31 @@ class FakeFrame:
 
 
 class AShareMiddaySummaryTests(unittest.TestCase):
+    def test_fetch_spot_uses_tencent_after_eastmoney_failures(self):
+        mod = load_module()
+        full_rows = sample_spot_rows()
+
+        class FakeAk:
+            stock_zh_a_spot_em = staticmethod(lambda: [])
+            stock_zh_a_spot = staticmethod(lambda: self.fail("Sina should not be called after Tencent succeeds"))
+
+        mod.ak = FakeAk()
+        mod.quiet_call = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+        mod.fetch_eastmoney_spot_direct = lambda: ([], "东财分页直连返回空")
+        mod.fetch_tencent_spot_snapshot = lambda _home: (full_rows, None)
+        original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "5"
+            spot, warning = mod.fetch_spot()
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = original_min_rows
+
+        self.assertIs(spot, full_rows)
+        self.assertIn("已切换腾讯全市场行情", warning)
+
     def test_fetch_eastmoney_spot_direct_pages_full_market(self):
         mod = load_module()
         items = [
@@ -147,6 +175,51 @@ class AShareMiddaySummaryTests(unittest.TestCase):
         self.assertIn("主线延续", report)
         self.assertIn("承接观察", report)
         self.assertIn("测试科技", report)
+
+    def test_scheduled_report_rejects_missing_spot_before_optional_fetches(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 2, 11, 40, tzinfo=mod.CN_TZ)
+        mod.fetch_spot = lambda: ([], "现货主接口暂不可用")
+        optional_calls = []
+        mod.fetch_industry_fund_flow = lambda: optional_calls.append("fund")
+        mod.fetch_zt_pool = lambda: optional_calls.append("zt")
+
+        with self.assertRaises(mod.SpotSnapshotUnavailable):
+            mod.build_report(require_complete_spot=True)
+
+        self.assertEqual(optional_calls, [])
+
+    def test_scheduled_report_rejects_partial_spot_snapshot(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 2, 11, 40, tzinfo=mod.CN_TZ)
+        mod.fetch_spot = lambda: (sample_spot_rows(), None)
+        original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "1000"
+            with self.assertRaisesRegex(mod.SpotSnapshotUnavailable, "完整性下限"):
+                mod.build_report(require_complete_spot=True)
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = original_min_rows
+
+    def test_main_exits_nonzero_so_scheduler_retries_missing_spot(self):
+        mod = load_module()
+        strict_values = []
+
+        def missing_report(*, require_complete_spot=False):
+            strict_values.append(require_complete_spot)
+            raise mod.SpotSnapshotUnavailable("现货快照为空")
+
+        mod.build_report = missing_report
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            mod.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(strict_values, [True])
+        self.assertIn("等待调度器重试", output.getvalue())
 
 
 if __name__ == "__main__":

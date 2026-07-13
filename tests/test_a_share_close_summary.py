@@ -54,6 +54,31 @@ class FakeFrame:
 
 
 class AShareCloseSummaryTests(unittest.TestCase):
+    def test_fetch_spot_uses_tencent_after_eastmoney_failures(self):
+        mod = load_module()
+        full_rows = sample_spot_rows()
+
+        class FakeAk:
+            stock_zh_a_spot_em = staticmethod(lambda: [])
+            stock_zh_a_spot = staticmethod(lambda: self.fail("Sina should not be called after Tencent succeeds"))
+
+        mod.ak = FakeAk()
+        mod.quiet_call = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+        mod.fetch_eastmoney_spot_direct = lambda: ([], "东财分页直连返回空")
+        mod.fetch_tencent_spot_snapshot = lambda _home: (full_rows, None)
+        original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "5"
+            spot, warning = mod.fetch_spot()
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = original_min_rows
+
+        self.assertIs(spot, full_rows)
+        self.assertIn("已切换腾讯全市场行情", warning)
+
     def test_direct_spot_retries_with_backup_endpoint(self):
         mod = load_module()
         items = [
@@ -141,6 +166,7 @@ class AShareCloseSummaryTests(unittest.TestCase):
             sample_spot_rows(),
             "东财直连只取到 6/5000 只，已按现有样本生成",
         )
+        mod.fetch_tencent_spot_snapshot = lambda _home: ([], "腾讯备用行情不可用")
         original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
         try:
             os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "5"

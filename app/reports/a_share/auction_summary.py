@@ -52,6 +52,10 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_PATH = STATE_DIR / "a_share_auction_summary.json"
 
 
+class AuctionSnapshotUnavailable(RuntimeError):
+    """Raised when a scheduled auction summary lacks a complete market snapshot."""
+
+
 def is_trading_day_guess(day: dt.date) -> bool:
     return report_common.is_trading_day_guess(day)
 
@@ -493,6 +497,25 @@ def summarize_auction_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def auction_snapshot_issue(rows: list[dict[str, Any]], snapshot_err: str | None) -> str | None:
+    """Return a retry-worthy completeness issue for the opening snapshot."""
+    if not rows:
+        return snapshot_err or "竞价快照返回空"
+    min_rows = max(1, safe_int(os.getenv("A_SHARE_AUCTION_SNAPSHOT_MIN_ROWS", "4000"), 4000))
+    unique_codes = {normalize_code(row.get("code")) for row in rows if normalize_code(row.get("code"))}
+    if len(unique_codes) < min_rows:
+        return f"唯一有效A股竞价样本仅 {len(unique_codes)} 只，低于完整性下限 {min_rows} 只"
+    if len(unique_codes) < len(rows) * 0.98:
+        return f"竞价快照重复代码过多：{len(unique_codes)}/{len(rows)}"
+    open_coverage = sum(1 for row in rows if safe_float(row.get("open_price")) > 0) / len(rows)
+    prev_close_coverage = sum(1 for row in rows if safe_float(row.get("prev_close")) > 0) / len(rows)
+    if open_coverage < 0.80:
+        return f"竞价开盘价有效覆盖率仅 {open_coverage:.1%}"
+    if prev_close_coverage < 0.80:
+        return f"竞价昨收价有效覆盖率仅 {prev_close_coverage:.1%}"
+    return None
+
+
 def top_industry_auction_stats(rows: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for r in rows:
@@ -740,11 +763,14 @@ def build_decision_guidance(
     ]
 
 
-def build_report() -> str:
+def build_report(*, require_complete_snapshot: bool = False) -> str:
     if not is_trading_day_guess(NOW.date()):
         return ""
 
     snapshot_rows, snapshot_err = fetch_auction_snapshot()
+    completeness_issue = auction_snapshot_issue(snapshot_rows, snapshot_err)
+    if require_complete_snapshot and completeness_issue:
+        raise AuctionSnapshotUnavailable(completeness_issue)
     post_open_fill = NOW.time() >= dt.time(9, 27)
     zt, zt_err = fetch_zt_pool()
     dtpool, dt_err = fetch_dt_pool()
@@ -913,7 +939,7 @@ def build_report() -> str:
 
 def main():
     try:
-        text = build_report()
+        text = build_report(require_complete_snapshot=True)
         if text:
             from a_share_grok_summary import apply_grok_to_a_share_report
             from market_report_store import store_market_report
@@ -923,6 +949,9 @@ def main():
         else:
             # Weekend/holiday silence.
             print("")
+    except AuctionSnapshotUnavailable as e:
+        print(f"牛牛大王，A股竞价快照缺失或不完整，本轮不入库，等待调度器重试：{e}")
+        sys.exit(1)
     except Exception as e:
         print(f"牛牛大王，A股竞价总结今天没有成功生成：{type(e).__name__}: {e}\n建议先手动看东方财富涨停池/行业板块，稍后我可以帮你补一版盘中总结。")
         sys.exit(1)
