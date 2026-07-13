@@ -454,6 +454,62 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(state["positions"], {})
         self.assertIn("B1核心", decision["execution_blocked_reason"])
 
+    def test_execute_actions_blocks_buy_outside_current_stock_universe(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        saved_universe = os.environ.get(trader.STOCK_UNIVERSE_ENV)
+        try:
+            os.environ[trader.STOCK_UNIVERSE_ENV] = "main_board"
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "创业测试", "source": "test"}
+            state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            decision = {
+                "actions": [{"action": "BUY", "code": "300001", "name": "创业测试", "shares": 1000}]
+            }
+            candidates = [{
+                "code": "300001",
+                "name": "创业测试",
+                "best_strategy": "b3_accelerate",
+                "best_score": 10.0,
+                "entry_threshold": 8.5,
+                "distance_pct": 1.2,
+                "actionable": True,
+                "hard_blockers": [],
+                "risk_flags": [],
+            }]
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                candidates,
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+            if saved_universe is None:
+                os.environ.pop(trader.STOCK_UNIVERSE_ENV, None)
+            else:
+                os.environ[trader.STOCK_UNIVERSE_ENV] = saved_universe
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"], {})
+        self.assertIn("不在当前选股范围", decision["execution_blocked_reason"])
+
+    def test_stock_universe_allows_st_across_supported_boards(self):
+        saved_universe = os.environ.get(trader.STOCK_UNIVERSE_ENV)
+        try:
+            os.environ[trader.STOCK_UNIVERSE_ENV] = "st"
+            self.assertTrue(trader.candidate_in_stock_universe({"code": "300001", "name": "*ST测试"}))
+            self.assertFalse(trader.candidate_in_stock_universe({"code": "300001", "name": "创业测试"}))
+        finally:
+            if saved_universe is None:
+                os.environ.pop(trader.STOCK_UNIVERSE_ENV, None)
+            else:
+                os.environ[trader.STOCK_UNIVERSE_ENV] = saved_universe
+
     def test_execute_actions_blocks_new_buy_when_position_count_limit_reached(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote

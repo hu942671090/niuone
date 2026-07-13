@@ -46,6 +46,15 @@ from collections.abc import Callable
 from typing import Any
 
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
+from screening.stock_universe import (
+    DEFAULT_STOCK_UNIVERSE,
+    STOCK_UNIVERSE_ENV,
+    friendly_stock_universe,
+    normalize_stock_universe,
+    selected_stock_universe,
+    stock_in_universe,
+    stock_universe_metadata,
+)
 from strategies.registry import (
     ACTIVE_STRATEGY_ENV,
     DISPLAY_STRATEGY_ORDER,
@@ -176,6 +185,18 @@ def active_strategy_score_profiles() -> dict[str, dict[str, Any]]:
     return enabled_strategy_score_profiles(enabled_persona_strategy_setting(), strategy_source_setting(), active_strategy_setting())
 
 
+def configured_stock_universe() -> tuple[str, ...]:
+    return selected_stock_universe(dashboard_env_value(STOCK_UNIVERSE_ENV))
+
+
+def candidate_in_configured_stock_universe(candidate: dict[str, Any]) -> bool:
+    return stock_in_universe(
+        candidate.get("code"),
+        candidate.get("name"),
+        configured_stock_universe(),
+    )
+
+
 # ========== Tencent data fetchers ==========
 
 def tencent_batch_quote(codes):
@@ -218,12 +239,13 @@ def build_market_snapshot(
     quotes: dict[str, dict[str, Any]],
     captured_at: str = "",
     pool_count: int = 0,
+    stock_universe: object | None = None,
 ) -> dict[str, Any]:
     """Summarize the full quote batch already fetched by the B1 scan.
 
     This lets every periodic scan refresh the decision label without issuing a
-    second all-market request. The universe is explicitly main-board, non-ST A
-    shares so downstream consumers do not treat it as a whole-market statistic.
+    second all-market request. The snapshot retains its configured universe so
+    downstream consumers do not treat it as a whole-market statistic.
     """
     rows: list[dict[str, float]] = []
     quote_times: list[str] = []
@@ -251,9 +273,13 @@ def build_market_snapshot(
     up = sum(1 for pct in changes if pct > 0)
     down = sum(1 for pct in changes if pct < 0)
     flat = max(0, len(changes) - up - down)
+    universe_values = selected_stock_universe(stock_universe)
+    legacy_universe = universe_values == (DEFAULT_STOCK_UNIVERSE,)
     return {
-        "source": "b1_mainboard_quotes",
-        "universe": "mainboard_non_st",
+        "source": "b1_mainboard_quotes" if legacy_universe else "b1_configured_universe_quotes",
+        "universe": "mainboard_non_st" if legacy_universe else "configured_a_share",
+        "stock_universe": list(universe_values),
+        "stock_universe_label": friendly_stock_universe(universe_values),
         "captured_at": captured_at or time.strftime("%Y-%m-%d %H:%M:%S"),
         "quote_time": max(quote_times) if quote_times else "",
         "pool_count": pool_count,
@@ -361,27 +387,32 @@ def analyze_all_strategies(symbol, tencent_key, quote: dict[str, Any] | None = N
     return analyze_enriched_rows(rows, active_strategy_scorers())
 
 
-def load_main_board_code_pool():
-    """Load沪深主板股票池，避开 ak.stock_info_a_code_name 的北交所依赖。"""
+def load_a_share_code_pool(stock_universe: object | None = None):
+    """Load the configured沪深 A-share pool without pulling Beijing-board data."""
     import akshare as ak
     candidates = []
+    selected = selected_stock_universe(stock_universe)
 
     def add(code, name):
         code = str(code or "").strip().split(".")[0].zfill(6)
         name = str(name or "").strip()
         if not code or not name:
             return
-        if not code.startswith(("600", "601", "603", "605", "000", "001", "002")):
-            return
-        if name.startswith(("ST", "*ST", "退")):
+        if "退" in name or not stock_in_universe(code, name, selected):
             return
         candidates.append((code, name))
 
     errors = []
     try:
-        sh = ak.stock_info_sh_name_code(symbol="主板A股")
-        for _, row in sh.iterrows():
-            add(row.get("证券代码"), row.get("证券简称"))
+        sh_symbols = []
+        if "main_board" in selected or "st" in selected:
+            sh_symbols.append("主板A股")
+        if "star_market" in selected or "st" in selected:
+            sh_symbols.append("科创板")
+        for symbol in sh_symbols:
+            sh = ak.stock_info_sh_name_code(symbol=symbol)
+            for _, row in sh.iterrows():
+                add(row.get("证券代码"), row.get("证券简称"))
     except Exception as exc:
         errors.append(f"SH:{type(exc).__name__}")
 
@@ -403,6 +434,11 @@ def load_main_board_code_pool():
     if errors:
         print("  Code pool partial fallback: " + ", ".join(errors), file=sys.stderr)
     return sorted(deduped.items())
+
+
+def load_main_board_code_pool():
+    """Backward-compatible legacy pool helper."""
+    return load_a_share_code_pool(DEFAULT_STOCK_UNIVERSE)
 
 
 def get_margin_signal(code: str) -> dict | None:
@@ -835,9 +871,10 @@ def write_outputs(json_str: str, generated_at: str) -> None:
 
 def main():
     print("Step 1: Loading A-share code pool...", file=sys.stderr)
-    candidates = load_main_board_code_pool()
+    stock_universe = configured_stock_universe()
+    candidates = load_a_share_code_pool(stock_universe)
 
-    print(f"  Main board (non-ST): {len(candidates)} stocks", file=sys.stderr)
+    print(f"  Configured universe ({friendly_stock_universe(stock_universe)}): {len(candidates)} stocks", file=sys.stderr)
 
     print("Step 2: Fetching real-time batch quotes...", file=sys.stderr)
     tencent_keys = {}
@@ -855,7 +892,7 @@ def main():
         q = tencent_batch_quote(batch)
         quotes.update(q)
         time.sleep(0.05)
-    market_snapshot = build_market_snapshot(quotes, pool_count=len(all_keys))
+    market_snapshot = build_market_snapshot(quotes, pool_count=len(all_keys), stock_universe=stock_universe)
     try:
         index_quotes = tencent_batch_quote(list(CORE_INDEX_SYMBOLS.values()))
         market_snapshot.update(build_index_risk_snapshot(index_quotes))
@@ -892,6 +929,7 @@ def main():
         results.append({
             "code": code,
             "name": name,
+            **stock_universe_metadata(code, name),
             "price": q.get("price"),
             "change_pct": q.get("change_pct"),
             "amount": q.get("amount"),
@@ -967,6 +1005,8 @@ def main():
     
     output = {
         "generated_at": generated_at,
+        "stock_universe": list(stock_universe),
+        "stock_universe_label": friendly_stock_universe(stock_universe),
         "items": display_candidates,
         "candidates": display_candidates,
         "count": len(display_candidates),

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -46,6 +47,77 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual((snapshot["limit_up"], snapshot["limit_down"]), (1, 1))
         self.assertEqual(snapshot["quote_time"], "2026-07-10 10:00:04")
         self.assertEqual(snapshot["total_amount"], 1e9)
+
+    def test_stock_universe_classifies_boards_and_st_as_additive_scopes(self):
+        self.assertEqual(
+            screen.normalize_stock_universe("main_board,ST,chi_next"),
+            "st,chi_next,main_board",
+        )
+        self.assertTrue(screen.stock_in_universe("600000", "浦发银行", "main_board"))
+        self.assertFalse(screen.stock_in_universe("300001", "特锐德", "main_board"))
+        self.assertTrue(screen.stock_in_universe("300001", "特锐德", "chi_next"))
+        self.assertTrue(screen.stock_in_universe("688001", "华兴源创", "star_market"))
+        self.assertFalse(screen.stock_in_universe("600001", "ST测试", "main_board"))
+        self.assertTrue(screen.stock_in_universe("600001", "ST测试", "st"))
+        self.assertTrue(screen.stock_in_universe("300002", "*ST测试", "st"))
+        with self.assertRaises(ValueError):
+            screen.normalize_stock_universe("")
+        with self.assertRaises(ValueError):
+            screen.normalize_stock_universe("beijing")
+
+    def test_market_snapshot_records_non_default_stock_universe(self):
+        snapshot = screen.build_market_snapshot(
+            {},
+            stock_universe="st,chi_next,star_market,main_board",
+        )
+
+        self.assertEqual(snapshot["universe"], "configured_a_share")
+        self.assertEqual(snapshot["stock_universe"], ["st", "chi_next", "star_market", "main_board"])
+        self.assertEqual(snapshot["stock_universe_label"], "ST、创业板、科创板、主板")
+
+    def test_code_pool_applies_configured_boards_and_st_scope(self):
+        class FakeFrame:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def iterrows(self):
+                return enumerate(self.rows)
+
+        sh_calls = []
+        fake_akshare = types.SimpleNamespace(
+            stock_info_sh_name_code=lambda symbol: (
+                sh_calls.append(symbol)
+                or FakeFrame(
+                    [{"证券代码": "600001", "证券简称": "主板测试"}]
+                    if symbol == "主板A股"
+                    else [{"证券代码": "688001", "证券简称": "科创测试"}]
+                )
+            ),
+            stock_info_sz_name_code=lambda symbol: FakeFrame([
+                {"A股代码": "000001", "A股简称": "深主板"},
+                {"A股代码": "300001", "A股简称": "创业测试"},
+                {"A股代码": "300002", "A股简称": "*ST创业"},
+                {"A股代码": "920001", "A股简称": "北交测试"},
+            ]),
+            stock_info_a_code_name=lambda: FakeFrame([]),
+        )
+        original = sys.modules.get("akshare")
+        sys.modules["akshare"] = fake_akshare
+        try:
+            pool = screen.load_a_share_code_pool("st,star_market,main_board")
+        finally:
+            if original is None:
+                sys.modules.pop("akshare", None)
+            else:
+                sys.modules["akshare"] = original
+
+        self.assertEqual(sh_calls, ["主板A股", "科创板"])
+        self.assertEqual(pool, [
+            ("000001", "深主板"),
+            ("300002", "*ST创业"),
+            ("600001", "主板测试"),
+            ("688001", "科创测试"),
+        ])
 
     def test_build_index_risk_snapshot_counts_core_indices_below_ma20(self):
         quotes = {

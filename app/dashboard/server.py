@@ -37,6 +37,14 @@ from dashboard import practice_payload as practice_payload_impl
 from dashboard import security as security_impl
 from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
+from screening.stock_universe import (
+    DEFAULT_STOCK_UNIVERSE,
+    STOCK_UNIVERSE_ENV,
+    STOCK_UNIVERSE_OPTIONS,
+    friendly_stock_universe,
+    normalize_stock_universe,
+    selected_stock_universe,
+)
 from strategies.registry import (
     ACTIVE_STRATEGY_ENV,
     PERSONA_STRATEGY_ENV,
@@ -273,6 +281,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时选股", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股与买卖设置", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
+    {"name": STOCK_UNIVERSE_ENV, "label": "选股范围", "group": "选股与买卖设置", "kind": "stock_universe", "default": DEFAULT_STOCK_UNIVERSE, "effect": "runtime"},
     {"name": "DASHBOARD_DISPLAY_CANDIDATE_LIMIT", "label": "候选池展示数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
     {"name": "DASHBOARD_TRADE_CANDIDATE_LIMIT", "label": "买卖决策候选数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
     {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股与买卖设置", "kind": "time", "default": "09:37", "effect": "runtime"},
@@ -432,6 +441,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_TELEGRAM_BOT_TOKEN",
     "DASHBOARD_TELEGRAM_CHAT_ID",
     "DASHBOARD_B1_SCHEDULE_TIMES",
+    STOCK_UNIVERSE_ENV,
     "DASHBOARD_DISPLAY_CANDIDATE_LIMIT",
     "DASHBOARD_TRADE_CANDIDATE_LIMIT",
     "DASHBOARD_B3_EXIT_TIME",
@@ -457,6 +467,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_INDICES_TTL_SECONDS",
 ]
 TRADER_RUNTIME_ENV_NAMES = {
+    STOCK_UNIVERSE_ENV,
     "DASHBOARD_NEWS_MODEL",
     "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_MAX_TOKENS",
@@ -1231,6 +1242,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
         for code, tencent_key in keys_by_code.items():
             old = previous_by_code.get(code) or {}
             name = old.get("name") or ""
+            if hasattr(scanner, "candidate_in_configured_stock_universe") and not scanner.candidate_in_configured_stock_universe(old):
+                continue
             quote = quote_map.get(tencent_key) or {}
             price = quote.get("price")
             amount = quote.get("amount") or 0
@@ -1299,6 +1312,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             return {"skipped": True, "reason": "newer_full_scan_available"}
         output = {
             **parsed,
+            "stock_universe": list(scanner.configured_stock_universe()) if hasattr(scanner, "configured_stock_universe") else parsed.get("stock_universe", []),
+            "stock_universe_label": scanner.friendly_stock_universe(scanner.configured_stock_universe()) if hasattr(scanner, "configured_stock_universe") else parsed.get("stock_universe_label", ""),
             "items": selected,
             "candidates": selected,
             "count": len(selected),
@@ -2245,6 +2260,8 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         return normalize_time_list_update(value)
     if kind == "handle_list":
         return normalize_handle_list_update(value)
+    if kind == "stock_universe":
+        return normalize_stock_universe(value)
     if kind in {"strategy_multi", "strategy_single"}:
         return normalize_strategy_list_update(value)
     if kind == "strategy_source":
@@ -2295,7 +2312,7 @@ def _write_env_file_values_unlocked(
         kind = "secret" if schema.get("kind") == "secret" or is_secret_config_key(name) else schema.get("kind", "text")
         if kind == "secret" and not str(value or "").strip():
             continue
-        if value == "" and name not in existing and kind not in {"time_list", "strategy_multi", "strategy_single"}:
+        if value == "" and name not in existing and kind not in {"time_list", "stock_universe", "strategy_multi", "strategy_single"}:
             continue
         next_value = normalize_env_update(name, value, kind)
         if existing.get(name) != next_value:
@@ -2464,7 +2481,7 @@ ADMIN_GROUP_NOTES = {
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "交易规则与风控": "约束买卖决策必须遵守的交易纪律、持仓数量、仓位比例、现金缓冲与盘面控仓规则。交易纪律 Prompt 会直接写入决策模型的必须遵守段。",
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
-    "选股与买卖设置": "配置候选池展示与进入买卖决策的数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
+    "选股与买卖设置": "配置主板、创业板、科创板和 ST 选股范围、候选数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
     "综合决策参考": "为买卖决策汇总指数、板块、资金流向、热门股票等参考数据。缓存秒数控制数据复用周期，单类参考数据上限可设置为 1～8。",
     "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
@@ -2504,7 +2521,7 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
     {
         "slug": "decision-times",
         "name": "选股与买卖设置",
-        "summary": "配置候选数量，以及选股、买卖决策和离场时间。",
+        "summary": "配置股票范围、候选数量，以及选股、买卖决策和离场时间。",
         "icon": "交易",
     },
     {
@@ -2805,6 +2822,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_env_update(name, normalized[name], "time")
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "handle_list":
             normalized[name] = normalize_handle_list_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "stock_universe":
+            normalized[name] = normalize_stock_universe(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"strategy_multi", "strategy_single"}:
             normalized[name] = normalize_strategy_list_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "strategy_source":
@@ -2850,6 +2869,8 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             normalize_env_update(name, value, "time")
         elif name == "X_WATCHLIST_ACCOUNTS":
             normalize_handle_list_update(value)
+        elif name == STOCK_UNIVERSE_ENV:
+            normalize_stock_universe(value)
         elif name == STRATEGY_SOURCE_ENV:
             normalize_strategy_source_update(value)
         elif name == PERSONA_STRATEGY_ENV:
@@ -2946,6 +2967,7 @@ def sync_business_runtime_settings(
         PRESET_STRATEGY_TEXT_ENV,
         "DASHBOARD_DISPLAY_CANDIDATE_LIMIT",
         "DASHBOARD_TRADE_CANDIDATE_LIMIT",
+        STOCK_UNIVERSE_ENV,
     }:
         B1_CANDIDATE_REFRESH_LAST_TS = 0.0
         with API_RESPONSE_LOCK:
@@ -3090,6 +3112,18 @@ def build_admin_config_payload() -> dict[str, Any]:
                 "file_state": friendly_handle_list_text(state_value),
                 "default": friendly_handle_list_text(default_value),
                 "handle_values": split_handle_values(edit_value),
+            })
+        if schema.get("kind") == "stock_universe" and not secret:
+            edit_source = env_values.get(name) if name in env_values else (fallback_value or default_value)
+            edit_value = normalize_stock_universe(edit_source)
+            state_value = env_values.get(name) if name in env_values else (fallback_value or default_value)
+            item.update({
+                "effective": friendly_stock_universe(effective),
+                "file_value": edit_value,
+                "file_state": friendly_stock_universe(state_value),
+                "default": friendly_stock_universe(default_value),
+                "stock_universe_values": list(selected_stock_universe(edit_value)),
+                "stock_universe_options": list(STOCK_UNIVERSE_OPTIONS),
             })
         if schema.get("kind") == "strategy_source" and not secret:
             edit_value = normalize_strategy_source_update(str(file_value or default_value))
@@ -3507,7 +3541,7 @@ class Handler(BaseHTTPRequestHandler):
         for key, values in parsed.items():
             env_name = key[len("env__"):] if key.startswith("env__") else ""
             schema = ENV_CONFIG_BY_NAME.get(env_name, {})
-            if schema.get("kind") in {"time_list", "handle_list", "strategy_multi", "strategy_single"}:
+            if schema.get("kind") in {"time_list", "handle_list", "stock_universe", "strategy_multi", "strategy_single"}:
                 result[key] = ",".join(v.strip() for v in values if v.strip())
             else:
                 result[key] = values[-1] if values else ""

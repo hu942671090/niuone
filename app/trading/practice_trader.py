@@ -30,6 +30,12 @@ from typing import Any
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
+from screening.stock_universe import (
+    STOCK_UNIVERSE_ENV,
+    friendly_stock_universe,
+    selected_stock_universe,
+    stock_in_universe,
+)
 from strategies.registry import (
     ACTIVE_STRATEGY_ENV,
     PRESET_STRATEGY_TEXT_ENV,
@@ -184,6 +190,7 @@ def load_dashboard_env() -> None:
         "DASHBOARD_MIN_CASH_RESERVE_PCT",
         "DASHBOARD_MARKET_GUIDANCE_ENABLED",
         "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
+        STOCK_UNIVERSE_ENV,
         STRATEGY_SOURCE_ENV,
         PERSONA_STRATEGY_ENV,
         ACTIVE_STRATEGY_ENV,
@@ -1487,6 +1494,19 @@ def candidate_is_buyable(candidate: dict[str, Any] | None) -> bool:
     return not candidate_buy_blockers(candidate)
 
 
+def current_stock_universe() -> tuple[str, ...]:
+    return selected_stock_universe(os.environ.get(STOCK_UNIVERSE_ENV))
+
+
+def candidate_in_stock_universe(candidate: dict[str, Any] | None) -> bool:
+    candidate = candidate or {}
+    return stock_in_universe(
+        candidate.get("code"),
+        candidate.get("name"),
+        current_stock_universe(),
+    )
+
+
 def add_execution_block(decision: dict[str, Any], code: str, reason: str) -> None:
     blocks = decision.setdefault("execution_blocked_reasons", [])
     text = f"{code}: {reason}" if code else reason
@@ -2461,8 +2481,9 @@ def _periodic_market_snapshot_report(
 
     average_pct = _safe_float(snapshot.get("average_change_pct"), 0.0)
     median_pct = _safe_float(snapshot.get("median_change_pct"), 0.0)
+    snapshot_universe_label = str(snapshot.get("stock_universe_label") or "主板（非ST）")
     breadth_line = (
-        f"定时重评：主板非ST样本{sample_count}只，上涨{up}、下跌{down}、平盘{flat}，"
+        f"定时重评：{snapshot_universe_label}样本{sample_count}只，上涨{up}、下跌{down}、平盘{flat}，"
         f"涨停{limit_up}、跌停{limit_down}，均值{average_pct:+.2f}%、中位数{median_pct:+.2f}%"
     )
     guidance = [
@@ -4474,6 +4495,7 @@ def call_model_decision(
 {trade_discipline_text}
 
 当前激活策略：{strategy_source_label}
+当前选股范围：{friendly_stock_universe(current_stock_universe())}
 
 【当前独立策略规则】
 {active_strategy_section}
@@ -4769,6 +4791,9 @@ def execute_actions(
             add_execution_block(decision, code, f"模型仓位{shares}股不是100股整数倍，本轮不自动取整")
             continue
         if act == "BUY":
+            if not candidate or not candidate_in_stock_universe(candidate):
+                add_execution_block(decision, code, "买入标的不在当前选股范围")
+                continue
             if not allow_market_guidance_buys:
                 add_execution_block(decision, code, f"盘面指引为{market_strategy_ctx.get('tone_label', '防守')}，暂停买入")
                 continue
@@ -5264,7 +5289,10 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     adaptive = get_adaptive_params()
     
     raw_candidates = b1_payload.get("trade_items") or b1_payload.get("items") or b1_payload.get("candidates") or []
-    candidates = [c for c in raw_candidates if isinstance(c, dict) and candidate_is_buyable(c)]
+    candidates = [
+        c for c in raw_candidates
+        if isinstance(c, dict) and candidate_in_stock_universe(c) and candidate_is_buyable(c)
+    ]
     
     # 本轮允许交易 → 清除之前的暂停标记
     if "trading_paused" in state:

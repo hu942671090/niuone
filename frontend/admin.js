@@ -105,6 +105,19 @@ function renderEnvInput(item) {
       (kind === 'time_list' ? '时间点' : '作者') + "'>+</button></div>" +
       "<div class='config-meta'>" + (kind === 'time_list' ? '北京时间' : 'X/Twitter handle') + "</div>";
   }
+  if (kind === 'stock_universe') {
+    var universeSelected = new Set(item.stock_universe_values || []);
+    return "<div class='strategy-multi-control'><input type='hidden' name='" + fieldName + "' value=''>" +
+      (item.stock_universe_options || []).map(function(option) {
+        var id = escapeHtml(option.id || '');
+        return "<label class='strategy-option' style='--strategy-color:" + escapeHtml(option.color || '#94a3b8') + "'>" +
+          "<input type='checkbox' name='" + fieldName + "' value='" + id + "'" +
+          (universeSelected.has(option.id) ? ' checked' : '') + " aria-label='" + label + '：' + escapeHtml(option.label || option.id) + "'>" +
+          "<span class='strategy-option-main'><span class='strategy-option-title'><span class='strategy-option-dot'></span>" +
+          escapeHtml(option.label || option.id) + "</span><span class='strategy-option-desc'>" + escapeHtml(option.desc || '') +
+          "</span></span></label>";
+      }).join('') + "</div><div class='config-meta'>至少选择一项；ST 为跨板块独立范围，卖出已有持仓不受此设置限制</div>";
+  }
   if (kind === 'strategy_source' || kind === 'strategy_suite') {
     var strategyOptions = kind === 'strategy_suite' ? (item.strategy_suite_options || []) : (item.strategy_source_options || []);
     return "<div class='strategy-multi-control'>" + strategyOptions.map(function(option) {

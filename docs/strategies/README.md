@@ -61,7 +61,7 @@ NiuOne 将研究流程拆分为四层：
 - 候选样本的近期消息，以及行业与市场数据的共振或背离；
 - 模拟账户现金、总仓位、持仓比例、盈亏状态和规则标记。
 
-每次实战选股会复用扫描器已经取得的主板非 ST 实时报价，按当时的上涨/下跌家数和涨跌停广度重算盘面标签；数据覆盖率不足、快照过期或仍处于 9:25 竞价阶段时，回退到最近的竞价、午盘或盘后报告。即使本轮没有候选股，也会刷新并记录盘面上下文。
+每次实战选股会复用扫描器在当前选股范围内已经取得的实时报价，按当时的上涨/下跌家数和涨跌停广度重算盘面标签；数据覆盖率不足、快照过期或仍处于 9:25 竞价阶段时，回退到最近的竞价、午盘或盘后报告。即使本轮没有候选股，也会刷新并记录盘面上下文。
 
 仓位比例按 `价格 × 数量 ÷ 当前模拟总权益` 计算。日志会记录单次变化占模拟总权益的比例，以及变化后的单项和总仓位比例。
 
@@ -89,6 +89,7 @@ NiuOne 将研究流程拆分为四层：
 |---|---|
 | `DASHBOARD_ACTIVE_STRATEGY` | 当前独立策略：`base`、`zettaranc`、`li_daxiao_bottom` 或 `preset_text` |
 | `DASHBOARD_PRESET_STRATEGY_TEXT` | 自定义预设文字规则 |
+| `DASHBOARD_STOCK_UNIVERSE` | 选股范围，多选值为 `st`、`chi_next`、`star_market`、`main_board`；默认仅主板 |
 | `DASHBOARD_TRADE_DISCIPLINE_TEXT` | 额外模拟纪律 |
 
 旧版 `DASHBOARD_STRATEGY_SOURCE` 与 `DASHBOARD_ENABLED_PERSONA_STRATEGIES` 仅用于无缝读取历史配置；新设置保存后以 `DASHBOARD_ACTIVE_STRATEGY` 为准。

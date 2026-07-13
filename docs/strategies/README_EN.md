@@ -61,7 +61,7 @@ The simulation process can compress multiple sources into a structured context a
 - Recent news about candidate samples and confirmation or divergence between industry and market data;
 - Simulated-account cash, total exposure, position weights, profit-and-loss status, and rule markers.
 
-Each practice-trading candidate scan reuses real-time quotes for non-ST stocks on the main boards that the scanner has already retrieved, then recalculates the market label from the current counts of advancing and declining stocks and the breadth of limit-up and limit-down stocks. If data coverage is insufficient, the snapshot is stale, or the market is still in the 9:25 opening-auction phase, the system falls back to the latest auction, midday, or post-close report. Even if the current scan finds no candidates, it still refreshes and records the market context.
+Each practice-trading candidate scan reuses real-time quotes already retrieved for the configured stock universe, then recalculates the market label from the current counts of advancing and declining stocks and the breadth of limit-up and limit-down stocks. If data coverage is insufficient, the snapshot is stale, or the market is still in the 9:25 opening-auction phase, the system falls back to the latest auction, midday, or post-close report. Even if the current scan finds no candidates, it still refreshes and records the market context.
 
 Position weight is calculated as `price × quantity ÷ current simulated total equity`. The log records each change as a percentage of simulated total equity, as well as the resulting individual-position and total-position percentages.
 
@@ -89,6 +89,7 @@ Prefer maintaining the active independent strategy, text rules, and simulation d
 |---|---|
 | `DASHBOARD_ACTIVE_STRATEGY` | Active independent strategy: `base`, `zettaranc`, `li_daxiao_bottom`, or `preset_text` |
 | `DASHBOARD_PRESET_STRATEGY_TEXT` | Custom preset text rules |
+| `DASHBOARD_STOCK_UNIVERSE` | Comma-separated scopes: `st`, `chi_next`, `star_market`, and `main_board`; defaults to main board only |
 | `DASHBOARD_TRADE_DISCIPLINE_TEXT` | Additional simulation discipline |
 
 Local configuration is stored in `.local-data/dashboard.env` by default. This file may contain model keys and administrative credentials and must not be committed to Git or copied into public contexts.
