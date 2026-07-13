@@ -18,16 +18,14 @@ function settingsGroupSlug() {
   return match ? match[1] : '';
 }
 
-function setAdminHeader(title, detail) {
+function setAdminHeader(title) {
   adminPageTitle.textContent = title;
   document.title = '牛牛1号';
-  adminHeaderActions.innerHTML = (detail
-    ? "<a class='toplink' href='/admin' data-settings-route>全部设置</a>"
-    : '') + "<a class='toplink' href='/'>返回首页</a>";
+  adminHeaderActions.innerHTML = "<a class='toplink' href='/'>返回首页</a>";
 }
 
 function renderAdminLogin(errorMessage) {
-  setAdminHeader('设置验证', false);
+  setAdminHeader('设置验证');
   var message = errorMessage ? "<div class='error'>" + escapeHtml(errorMessage) + "</div>" : '';
   adminApp.innerHTML = "<form class='admin-login-box' data-admin-login-form>" +
     "<h2>设置页验证</h2>" +
@@ -43,7 +41,7 @@ function renderAdminLogin(errorMessage) {
 }
 
 function renderSettingsIndex() {
-  setAdminHeader('设置', false);
+  setAdminHeader('设置');
   var groups = Array.isArray(adminConfig.groups) ? adminConfig.groups : [];
   var cards = groups.map(function(group) {
     return "<a class='settings-card' href='/admin/settings/" + escapeHtml(group.slug) + "' data-settings-route " +
@@ -216,11 +214,11 @@ function renderNotificationSettings(items) {
 function renderSettingsGroup(slug) {
   var group = (adminConfig.groups || []).find(function(entry) { return entry.slug === slug; });
   if (!group) {
-    setAdminHeader('设置分组不存在', true);
+    setAdminHeader('设置分组不存在');
     adminApp.innerHTML = "<div class='errmsg'>未找到该设置分组。<a class='toplink' href='/admin' data-settings-route>返回全部设置</a></div>";
     return;
   }
-  setAdminHeader(group.name, true);
+  setAdminHeader(group.name);
   var items = (adminConfig.items || []).filter(function(item) { return String(item.group || '其他') === group.name; });
   var toggleName = adminConfig.ui && adminConfig.ui.us_feature_toggle_name;
   var toggle = (adminConfig.items || []).find(function(item) { return item.name === toggleName; });
@@ -248,16 +246,16 @@ function renderSettingsGroup(slug) {
     }).join('') + '</div>';
     countLabel = items.length + ' 项';
   }
-  adminApp.innerHTML = "<div class='settings-detail'><nav class='settings-breadcrumbs' aria-label='面包屑'>" +
-    "<a href='/admin' data-settings-route>设置</a><span aria-hidden='true'>/</span><span aria-current='page'>" + escapeHtml(group.name) + "</span></nav>" +
+  adminApp.innerHTML = "<div class='settings-detail'><nav class='settings-breadcrumbs' aria-label='设置导航'>" +
+    "<a class='settings-back-link' href='/admin' data-settings-route><span aria-hidden='true'>←</span><span>全部设置</span></a></nav>" +
     "<form id='env-config-form' class='settings-form' data-settings-group='" + escapeHtml(slug) +
     "' data-save-endpoint='/api/admin/config/env/" + escapeHtml(slug) + "'>" +
     "<input type='hidden' name='settings_group' value='" + escapeHtml(slug) + "'>" +
     "<section class='settings-group' id='settings-" + escapeHtml(slug) + "'><div class='settings-group-head'><div><h2>" +
     escapeHtml(group.name) + "</h2>" + (group.note ? "<p class='settings-group-note'>" + escapeHtml(group.note) + "</p>" : '') +
-    "</div><span class='settings-count'>" + escapeHtml(countLabel) + "</span></div>" + body + "</section>" +
+    "</div><span class='settings-count'>" + escapeHtml(countLabel) + "</span></div>" + body +
     "<div class='settings-actions'><div class='settings-save-status' data-env-save-status role='status' aria-live='polite'></div>" +
-    "<button class='save-button' data-env-save-button type='submit'>保存本组设置</button></div></form></div>";
+    "<button class='save-button' data-env-save-button type='submit'>保存本组设置</button></div></section></form></div>";
   syncUsFeatureSettings();
   syncStrategySourceSettings();
   syncNotificationChannelSettings();
@@ -322,7 +320,7 @@ document.addEventListener('click', function(event) {
 window.addEventListener('popstate', renderAdminRoute);
 
 loadAdminConfig().catch(function(error) {
-  setAdminHeader('设置加载失败', false);
+  setAdminHeader('设置加载失败');
   adminApp.innerHTML = "<div class='errmsg'>" + escapeHtml(error && error.message ? error.message : '设置加载失败') + "</div>";
 });
 
@@ -457,21 +455,51 @@ function envFormHasUnsavedSecret(form) {
   );
 }
 var envSavedSnapshots = new WeakMap();
+var envSaveResultTimers = new WeakMap();
+function clearEnvSaveResult(form) {
+  if (!form) return;
+  var timer = envSaveResultTimers.get(form);
+  if (timer) window.clearTimeout(timer);
+  envSaveResultTimers.delete(form);
+  delete form.dataset.saveResult;
+}
+function brieflyShowEnvSaved(form) {
+  if (!form) return;
+  clearEnvSaveResult(form);
+  form.dataset.saveResult = 'ok';
+  var timer = window.setTimeout(function() {
+    envSaveResultTimers.delete(form);
+    if (form.dataset.savedState === '1' && form.dataset.saveResult === 'ok') delete form.dataset.saveResult;
+  }, 1600);
+  envSaveResultTimers.set(form, timer);
+}
 function markEnvFormSaved(form) {
   if (!form) return;
   envSavedSnapshots.set(form, envFormSnapshot(form));
   form.dataset.savedState = '1';
+  var button = form.querySelector('[data-env-save-button]');
+  if (button) {
+    if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent || '保存本组设置';
+    button.disabled = true;
+    button.classList.add('saved');
+    button.textContent = '已保存';
+  }
 }
 function resetEnvSaveIfDirty(form) {
   if (!form || form.id !== 'env-config-form' || !envSavedSnapshots.has(form)) return;
+  clearEnvSaveResult(form);
   form.dataset.editRevision = String(Number(form.dataset.editRevision || '0') + 1);
   var savedSnapshot = envSavedSnapshots.get(form);
   var currentSnapshot = envFormSnapshot(form);
   if (!currentSnapshot) return;
   if (currentSnapshot === savedSnapshot && !envFormHasUnsavedSecret(form)) {
     if (form.dataset.savedState === '0') {
-      form.dataset.savedState = '1';
-      setEnvSaveFeedback(form, '', '');
+      markEnvFormSaved(form);
+      var status = form.querySelector('[data-env-save-status]');
+      if (status) {
+        status.textContent = '';
+        status.className = 'settings-save-status';
+      }
     }
     return;
   }
@@ -497,6 +525,7 @@ function setEnvSaveFeedback(form, state, message) {
     button.classList.add('saved');
     button.textContent = '已保存';
     markEnvFormSaved(form);
+    brieflyShowEnvSaved(form);
   } else if (state === 'error') {
     button.disabled = false;
     button.classList.add('error');
@@ -524,6 +553,15 @@ document.addEventListener('change', function(event) {
   var target = event.target;
   var form = target && target.closest ? target.closest('#env-config-form') : null;
   resetEnvSaveIfDirty(form);
+});
+document.addEventListener('keydown', function(event) {
+  if (!event || String(event.key || '').toLowerCase() !== 's' || (!event.metaKey && !event.ctrlKey) || event.altKey) return;
+  var form = document.getElementById('env-config-form');
+  var button = form ? form.querySelector('[data-env-save-button]') : null;
+  if (!form || form.dataset.savedState !== '0' || !button || button.disabled) return;
+  event.preventDefault();
+  if (form.requestSubmit) form.requestSubmit(button);
+  else button.click();
 });
 function businessSaveMessage(payload) {
   if (!payload || payload.ok === false) return '保存失败';

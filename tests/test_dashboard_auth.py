@@ -129,8 +129,8 @@ class DashboardAuthTests(unittest.TestCase):
         admin.do_GET()
         self.assertEqual(admin.status, 200)
         admin_body = admin.wfile.getvalue().decode('utf-8')
-        self.assertIn('<link rel="stylesheet" href="/static/admin.css?v=5">', admin_body)
-        self.assertIn('<script src="/static/admin.js?v=12" defer></script>', admin_body)
+        self.assertIn('<link rel="stylesheet" href="/static/admin.css?v=8">', admin_body)
+        self.assertIn('<script src="/static/admin.js?v=15" defer></script>', admin_body)
         self.assertNotIn('name="admin_password"', admin_body)
         self.assertNotIn("name='env__DASHBOARD_GROK_API_KEY'", admin_body)
         self.assertIn("fetch('/api/admin/config'", ADMIN_FRONTEND)
@@ -1681,7 +1681,7 @@ process.stdout.write(JSON.stringify({
         unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
         unlocked_page.do_GET()
         self.assertEqual(unlocked_page.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=12" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=15" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
 
         unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
         unlocked_api.do_GET()
@@ -2256,15 +2256,23 @@ process.stdout.write(JSON.stringify({
         item_names = {item['name'] for item in payload['items']}
 
         self.assertEqual(handler.status, 200)
-        self.assertEqual(len(payload['groups']), 10)
+        self.assertEqual(len(payload['groups']), 12)
         self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        self.assertIn('<script src="/static/admin.js?v=12" defer></script>', index_body)
+        self.assertIn('<script src="/static/admin.js?v=15" defer></script>', index_body)
         self.assertNotIn("name='env__", index_body)
         self.assertIn('function renderSettingsIndex()', ADMIN_FRONTEND)
         self.assertIn('function renderSettingsGroup(slug)', ADMIN_FRONTEND)
         self.assertIn("data-save-endpoint='/api/admin/config/env/", ADMIN_FRONTEND)
         self.assertIn("'X-NiuOne-Action': '1'", ADMIN_FRONTEND)
         self.assertIn("window.history.pushState({}, '', link.getAttribute('href'))", ADMIN_FRONTEND)
+        self.assertIn("class='settings-back-link' href='/admin' data-settings-route", ADMIN_FRONTEND)
+        self.assertNotIn("class='toplink' href='/admin' data-settings-route>全部设置", ADMIN_FRONTEND)
+        self.assertIn("button.disabled = true;", ADMIN_FRONTEND)
+        self.assertIn("button.textContent = '已保存';", ADMIN_FRONTEND)
+        self.assertIn("</div></section></form></div>", ADMIN_FRONTEND)
+        self.assertIn('data-saved-state="0"] .settings-actions', ADMIN_FRONTEND)
+        self.assertIn('function brieflyShowEnvSaved(form)', ADMIN_FRONTEND)
+        self.assertIn("String(event.key || '').toLowerCase() !== 's'", ADMIN_FRONTEND)
         self.assertIn('function renderEnvInput(item)', ADMIN_FRONTEND)
         self.assertNotIn('HIDDEN-CODE', ADMIN_FRONTEND)
         self.assertNotIn('/admin/invite', ADMIN_FRONTEND)
@@ -2282,11 +2290,13 @@ process.stdout.write(JSON.stringify({
             route = FakeHandler(path=f'/admin/settings/{slug}')
             route.do_GET()
             self.assertEqual(route.status, 200)
-            self.assertIn('<script src="/static/admin.js?v=12" defer></script>', route.wfile.getvalue().decode('utf-8'))
+            self.assertIn('<script src="/static/admin.js?v=15" defer></script>', route.wfile.getvalue().decode('utf-8'))
 
-        self.assertEqual(len(groups), 10)
+        self.assertEqual(len(groups), 12)
         self.assertEqual(len(slugs), len(set(slugs)))
         self.assertEqual(slugs[:2], ['access-control', 'notifications'])
+        self.assertEqual(slugs.index('trading-risk'), slugs.index('decision-model') + 1)
+        self.assertEqual(slugs.index('decision-reference'), slugs.index('decision-times') + 1)
         self.assertEqual(slugs.index('us-market'), slugs.index('stock-strategy') + 1)
         self.assertEqual(grouped_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
         self.assertIn("data-save-endpoint='/api/admin/config/env/", ADMIN_FRONTEND)
@@ -2295,12 +2305,44 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(len(dashboard.admin_setting_group_env_names('us-market')), 14)
         decision_group = next(group for group in groups if group['slug'] == 'decision-times')
         self.assertEqual(decision_group['name'], '选股与买卖设置')
+        strategy_group = next(group for group in groups if group['slug'] == 'stock-strategy')
+        self.assertEqual(strategy_group['name'], '选股与交易策略')
         decision_names = dashboard.admin_setting_group_env_names('decision-times')
         self.assertIn('DASHBOARD_DISPLAY_CANDIDATE_LIMIT', decision_names)
         self.assertIn('DASHBOARD_TRADE_CANDIDATE_LIMIT', decision_names)
         config_by_name = {item['name']: item for item in dashboard.ENV_CONFIG_SCHEMA}
         self.assertEqual(config_by_name['DASHBOARD_DISPLAY_CANDIDATE_LIMIT']['default'], '10')
         self.assertEqual(config_by_name['DASHBOARD_TRADE_CANDIDATE_LIMIT']['default'], '10')
+        decision_model_names = dashboard.admin_setting_group_env_names('decision-model')
+        decision_reference_names = dashboard.admin_setting_group_env_names('decision-reference')
+        trading_risk_names = dashboard.admin_setting_group_env_names('trading-risk')
+        self.assertEqual(len(decision_model_names), 6)
+        self.assertEqual(
+            decision_reference_names,
+            {
+                'DASHBOARD_DECISION_INTELLIGENCE_ENABLED',
+                'DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS',
+                'DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS',
+            },
+        )
+        self.assertEqual(
+            config_by_name['DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS']['label'],
+            '单类参考数据上限',
+        )
+        self.assertEqual(
+            trading_risk_names,
+            {
+                'DASHBOARD_MARKET_GUIDANCE_ENABLED',
+                'DASHBOARD_TRADE_DISCIPLINE_TEXT',
+                'DASHBOARD_MAX_OPEN_POSITIONS',
+                'DASHBOARD_MAX_NEW_BUYS_PER_DECISION',
+                'DASHBOARD_MAX_SINGLE_POSITION_PCT',
+                'DASHBOARD_MAX_TOTAL_POSITION_PCT',
+                'DASHBOARD_MIN_CASH_RESERVE_PCT',
+                'DASHBOARD_MORNING_MAX_OPEN_POSITIONS',
+            },
+        )
+        self.assertNotIn('DASHBOARD_TRADE_DISCIPLINE_TEXT', decision_model_names)
 
     def test_candidate_limit_settings_require_positive_integers(self):
         dashboard.validate_business_updates({
@@ -2316,7 +2358,7 @@ process.stdout.write(JSON.stringify({
         locked.do_GET()
         locked_body = locked.wfile.getvalue().decode('utf-8')
         self.assertEqual(locked.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=12" defer></script>', locked_body)
+        self.assertIn('<script src="/static/admin.js?v=15" defer></script>', locked_body)
         self.assertNotIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", locked_body)
 
         cookie = self.admin_cookie()
@@ -2340,7 +2382,7 @@ process.stdout.write(JSON.stringify({
         )
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        self.assertIn('<script src="/static/admin.js?v=12" defer></script>', missing.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=15" defer></script>', missing.wfile.getvalue().decode('utf-8'))
         self.assertIn('未找到该设置分组', ADMIN_FRONTEND)
 
     def test_group_save_ignores_fields_from_other_settings_groups(self):

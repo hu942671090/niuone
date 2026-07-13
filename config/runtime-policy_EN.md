@@ -52,11 +52,11 @@ Recommended usage:
 | Enhanced A-share market summaries | A model compatible with `/chat/completions` | `A_SHARE_MODEL_SUMMARY_BASE_URL`, `A_SHARE_MODEL_SUMMARY_API_KEY`, `A_SHARE_MODEL_SUMMARY_MODEL`; reuse `DASHBOARD_GROK_*` when left empty |
 | News prechecks for A-share candidates | A model with real-time search capability | `DASHBOARD_NEWS_BASE_URL`, `DASHBOARD_NEWS_API_KEY`, `DASHBOARD_NEWS_MODEL` |
 | Buy and sell decisions after candidate screening | DeepSeek recommended; other compatible models may be used | `DASHBOARD_DECISION_BASE_URL`, `DASHBOARD_DECISION_API_KEY`, `DASHBOARD_DECISION_MODEL` |
-| Buy/sell decision intelligence package | Local aggregation; no additional model required | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED`, `DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS`, `DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS` |
+| Comprehensive decision reference | Local aggregation; no additional model required | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED`, `DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS`, `DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS` |
 
 X watchlist monitoring and the daily U.S. institutional-rating report are controlled by the `DASHBOARD_US_FEATURES_ENABLED` master switch. When it is disabled, the settings page hides the related configuration, and the background X daemon and scheduled U.S. rating task skip execution.
 
-The buy/sell decision intelligence package reads local market-data caches, market-message history, and simulated-account state, then writes a compressed summary to the decision log. It introduces no additional model keys, but the log may contain candidate-news summaries and must still be reviewed under this runtime-data policy before any public troubleshooting disclosure.
+The comprehensive decision reference reads local market-data caches, market-message history, and simulated-account state, then writes a compressed summary to the decision log. It introduces no additional model keys, but the log may contain candidate-news summaries and must still be reviewed under this runtime-data policy before any public troubleshooting disclosure.
 
 Model keys may be stored only in `.local-data/dashboard.env`, `.local-data/runtime/config.yaml`, or controlled system environment variables. Before committing, confirm that no new `.env`, `*.key`, `*.token`, `*.secret`, database, or backup file has been added.
 

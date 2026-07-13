@@ -103,12 +103,13 @@ class DecisionIntelligenceContextTests(unittest.TestCase):
         self.assertIn("强势板块", prompt)
         self.assertIn("资金流入", prompt)
         self.assertIn("热门榜", prompt)
+        self.assertIn("【综合决策参考】", prompt)
         self.assertIn("决策要求", prompt)
 
     def test_disabled_context_formats_as_closed(self):
         self.assertEqual(
             trader.format_decision_intelligence_context_for_prompt({"enabled": False}),
-            "【全局决策情报包】已关闭。",
+            "【综合决策参考】已关闭。",
         )
 
 

@@ -3026,10 +3026,10 @@ def _format_rank_line(rows: list[dict[str, Any]], value_key: str | None = None) 
 
 def format_decision_intelligence_context_for_prompt(ctx: dict[str, Any]) -> str:
     if not ctx.get("enabled"):
-        return "【全局决策情报包】已关闭。"
+        return "【综合决策参考】已关闭。"
     portfolio = ctx.get("portfolio") or {}
     lines = [
-        "【全局决策情报包】",
+        "【综合决策参考】",
         (
             f"账户暴露：持仓{portfolio.get('position_count', 0)}只，"
             f"总仓{portfolio.get('position_pct')}%，现金{portfolio.get('cash_pct')}%，"
@@ -3088,7 +3088,7 @@ def format_decision_intelligence_context_for_prompt(ctx: dict[str, Any]) -> str:
         )
     notes = ctx.get("decision_notes") or []
     if notes:
-        lines.append("情报约束：" + "；".join(str(note) for note in notes))
+        lines.append("决策提示：" + "；".join(str(note) for note in notes))
     source_status = ctx.get("source_status") or {}
     if source_status:
         lines.append("来源状态：" + "；".join(f"{key}={value}" for key, value in sorted(source_status.items())))
