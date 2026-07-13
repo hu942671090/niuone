@@ -20,7 +20,7 @@ function settingsGroupSlug() {
 
 function setAdminHeader(title, detail) {
   adminPageTitle.textContent = title;
-  document.title = detail ? title + ' · 牛牛1号' : '牛牛1号';
+  document.title = '牛牛1号';
   adminHeaderActions.innerHTML = (detail
     ? "<a class='toplink' href='/admin' data-settings-route>全部设置</a>"
     : '') + "<a class='toplink' href='/'>返回首页</a>";
