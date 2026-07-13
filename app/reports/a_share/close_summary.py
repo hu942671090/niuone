@@ -95,8 +95,8 @@ def normalize_code(code: Any) -> str:
     return report_common.normalize_code(code)
 
 
-def is_normal_a_share(code: str, name: str) -> bool:
-    return report_common.is_normal_a_share(code, name, code_normalizer=normalize_code)
+def is_full_market_a_share(code: str, name: str) -> bool:
+    return report_common.is_full_market_a_share(code, name, code_normalizer=normalize_code)
 
 
 def normalize_industry_name(name: str) -> str:
@@ -115,7 +115,7 @@ def extract_eastmoney_spot_rows(diff: list[dict[str, Any]]) -> list[dict[str, An
     for item in diff or []:
         code = normalize_code(item.get("f12"))
         name = str(item.get("f14") or "").strip()
-        if not is_normal_a_share(code, name):
+        if not is_full_market_a_share(code, name):
             continue
         industry = normalize_industry_name(str(item.get("f100") or "")) or "所属方向待复核"
         if industry.lower() == "nan":
@@ -176,7 +176,7 @@ def fetch_eastmoney_spot_direct() -> tuple[list[dict[str, Any]], str | None]:
             "fltt": "2",
             "invt": "2",
             "fid": "f3",
-            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
             "fields": fields,
         }
         url = endpoint + "?" + urlencode(params)
@@ -257,7 +257,7 @@ def fetch_eastmoney_spot_direct_single_page():
         "fltt": "2",
         "invt": "2",
         "fid": "f3",
-        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
         "fields": fields,
     }
     last_err: Exception | None = None
@@ -351,13 +351,39 @@ def fetch_industry_fund_flow():
         return None, f"行业资金流：{type(e).__name__}: {e}"
 
 
-def fetch_zt_pool():
-    try:
-        with time_limit(8):
-            df = ak.stock_zt_pool_em(date=NOW.strftime("%Y%m%d"))
-        return df, None
-    except Exception as e:
-        return None, f"涨停池：{type(e).__name__}: {e}"
+def fetch_limit_pools():
+    """Fetch currently sealed limit-up and limit-down pools for the report date."""
+
+    date = NOW.strftime("%Y%m%d")
+    timeout = safe_int(os.getenv("A_SHARE_SUMMARY_LIMIT_POOL_TIMEOUT", "8"), 8)
+    pools: list[Any | None] = []
+    errors: list[str] = []
+    for label, fn in (("封死涨停池", ak.stock_zt_pool_em), ("封死跌停池", ak.stock_zt_pool_dtgc_em)):
+        try:
+            with time_limit(timeout):
+                frame = quiet_call(fn, date=date)
+            if frame is None:
+                raise RuntimeError("返回空对象")
+            pools.append(frame)
+        except Exception as e:
+            pools.append(None)
+            errors.append(f"{label}：{type(e).__name__}: {e}")
+    return pools[0], pools[1], "；".join(errors) or None
+
+
+def sealed_limit_count(pool) -> int | None:
+    """Count unique stocks in an Eastmoney pool; ``None`` means unavailable."""
+
+    if pool is None:
+        return None
+    if len(pool) == 0:
+        return 0
+    code_col = first_col(pool, ["代码", "股票代码", "code"])
+    if code_col:
+        codes = {normalize_code(value) for value in pool[code_col] if normalize_code(value)}
+        if codes:
+            return len(codes)
+    return len(pool)
 
 
 def extract_market(spot):
@@ -376,7 +402,7 @@ def extract_market(spot):
     for _, r in spot.iterrows():
         code = normalize_code(r.get(code_col))
         name = str(r.get(name_col) or "").strip()
-        if not is_normal_a_share(code, name):
+        if not is_full_market_a_share(code, name):
             continue
         pct = safe_float(r.get(pct_col))
         price = safe_float(r.get(price_col)) if price_col else 0.0
@@ -489,19 +515,22 @@ def build_decision_guidance(
     mood: str,
     up: int,
     down: int,
-    limit_up: int,
-    limit_down: int,
+    limit_up: int | None,
+    limit_down: int | None,
     hot_funds: list[dict[str, Any]],
     inflow_top: list[dict[str, Any]],
 ) -> list[str]:
     top_hot = "、".join(r.get("industry", "") for r in hot_funds[:3] if r.get("industry")) or "强势板块待确认"
     top_in = "、".join(r.get("industry", "") for r in inflow_top[:3] if r.get("industry")) or top_hot
-    if "行情接口未取到有效" in mood or (up == 0 and down == 0 and limit_up == 0 and limit_down == 0):
+    limit_pair_available = limit_up is not None and limit_down is not None
+    if "行情接口未取到有效" in mood or (up == 0 and down == 0):
         risk = "数据缺失"
         pace = "盘后不生成新增仓计划；先用交易软件核对收盘涨跌家数、成交额和跌停数量"
         buy = "候选股只保留观察，不纳入次日自动执行计划"
         sell = "已有仓位按既定风控复核，破位、亏损扩大和高位退潮标的优先处理"
-    elif "空头占优" in mood or (down > up * 1.25 and limit_down >= max(limit_up, 3)):
+    elif "空头占优" in mood or (
+        limit_pair_available and down > up * 1.25 and limit_down >= max(limit_up, 3)
+    ):
         risk = "防守"
         pace = "盘后不新增计划仓；次日只卖不买优先，除非竞价强修复并放量确认"
         buy = "候选股降级为观察池，次日先看风险票是否止跌和跌停数量是否收缩"
@@ -558,8 +587,8 @@ def build_next_day_premarket_guidance(
     mood: str,
     up: int,
     down: int,
-    limit_up: int,
-    limit_down: int,
+    limit_up: int | None,
+    limit_down: int | None,
     total_amt: float,
     hot_funds: list[dict[str, Any]],
     inflow_top: list[dict[str, Any]],
@@ -586,7 +615,10 @@ def build_next_day_premarket_guidance(
     strong_names = _format_stock_brief(top_gain, include_pct=True) or "涨幅前排股"
     outflow_dirs = _join_industries([r.get("industry", "") for r in outflow_top[:3]], "流出方向待复核")
 
-    if "空头占优" in mood or (down > up * 1.25 and limit_down >= max(limit_up, 3)):
+    limit_pair_available = limit_up is not None and limit_down is not None
+    if "空头占优" in mood or (
+        limit_pair_available and down > up * 1.25 and limit_down >= max(limit_up, 3)
+    ):
         risk = "防守"
         budget = "0-1笔试错，优先卖出弱仓"
         auction = "风险票低开数量收缩、跌停不扩散，才允许从观察切到试错"
@@ -621,7 +653,13 @@ def build_next_day_premarket_guidance(
     lines.append(f"· 主线方向：`{strong_dirs}`；资金确认方向：`{money_dirs}`")
     lines.append(f"· 成交额前排：{active_names}")
     lines.append(f"· 强势验证：{strong_names}")
-    lines.append(f"· 风险观察：跌停 `{limit_down}` vs 涨停 `{limit_up}`；重点避开 `{outflow_dirs}` 的弱修复冲高")
+    if limit_pair_available:
+        lines.append(
+            f"· 风险观察：封死跌停 `{limit_down}` vs 封死涨停 `{limit_up}`；"
+            f"重点避开 `{outflow_dirs}` 的弱修复冲高"
+        )
+    else:
+        lines.append(f"· 风险观察：封板池数据暂不可用；重点避开 `{outflow_dirs}` 的弱修复冲高")
     return lines
 
 
@@ -633,6 +671,14 @@ def spot_snapshot_issue(rows: list[dict[str, Any]], spot_err: str | None) -> str
     unique_codes = {normalize_code(row.get("code")) for row in rows if normalize_code(row.get("code"))}
     if len(unique_codes) < min_rows:
         return f"唯一有效A股样本仅 {len(unique_codes)} 只，低于完整性下限 {min_rows} 只"
+    default_bse_min = 100 if min_rows >= 4000 else 0
+    min_bse_rows = max(
+        0,
+        safe_int(os.getenv("A_SHARE_SUMMARY_SPOT_MIN_BSE_ROWS", str(default_bse_min)), default_bse_min),
+    )
+    bse_codes = {code for code in unique_codes if report_common.is_bse_a_share(code)}
+    if len(bse_codes) < min_bse_rows:
+        return f"北交所A股样本仅 {len(bse_codes)} 只，低于完整性下限 {min_bse_rows} 只"
     if len(unique_codes) < len(rows) * 0.98:
         return f"现货行情重复代码过多：{len(unique_codes)}/{len(rows)}"
     partial_markers = ("只取到", "单页样本", "部分分页失败", "分页超时")
@@ -681,7 +727,7 @@ def build_report(*, require_complete_spot: bool = False) -> str:
         raise SpotSnapshotUnavailable(completeness_issue)
 
     fund_df, fund_err = fetch_industry_fund_flow()
-    zt_df, zt_err = fetch_zt_pool()
+    zt_df, dt_df, limit_pool_err = fetch_limit_pools()
     funds = extract_funds(fund_df)
     if not rows and not spot_err:
         spot_err = "现货行情返回数据缺少有效A股样本"
@@ -699,14 +745,15 @@ def build_report(*, require_complete_spot: bool = False) -> str:
         issues.append(f"现货行情：{spot_err}")
     if fund_err:
         issues.append(fund_err if str(fund_err).startswith("行业资金流") else f"行业资金流：{fund_err}")
-    if zt_err:
-        issues.append(zt_err)
+    if limit_pool_err:
+        issues.append(limit_pool_err)
 
     up = sum(1 for r in rows if r["pct"] > 0)
     down = sum(1 for r in rows if r["pct"] < 0)
     flat = max(len(rows) - up - down, 0)
-    limit_up = sum(1 for r in rows if r["pct"] >= 9.8 or (r["code"].startswith(("30", "68")) and r["pct"] >= 19.5))
-    limit_down = sum(1 for r in rows if r["pct"] <= -9.8 or (r["code"].startswith(("30", "68")) and r["pct"] <= -19.5))
+    limit_up = sealed_limit_count(zt_df)
+    limit_down = sealed_limit_count(dt_df)
+    limit_pair_available = limit_up is not None and limit_down is not None
     total_amt = sum(r["amount"] for r in rows if r["amount"] > 0)
 
     top_gain = sorted(rows, key=lambda x: (x["pct"], x["amount"]), reverse=True)[:8]
@@ -733,9 +780,9 @@ def build_report(*, require_complete_spot: bool = False) -> str:
 
     if len(rows) == 0:
         mood = "行情接口未取到有效现货数据，今天不编造盘面结论。"
-    elif up > down * 1.4 and limit_up >= max(limit_down * 2, 5):
+    elif limit_pair_available and up > down * 1.4 and limit_up >= max(limit_down * 2, 5):
         mood = "多头占优，题材/赚钱效应较活跃。"
-    elif down > up * 1.3 and limit_down >= max(limit_up, 3):
+    elif limit_pair_available and down > up * 1.3 and limit_down >= max(limit_up, 3):
         mood = "空头占优，风险端更强，优先控仓。"
     elif up > down:
         mood = "结构性偏强，但仍要看主线延续和量能。"
@@ -748,8 +795,12 @@ def build_report(*, require_complete_spot: bool = False) -> str:
     lines.append("")
     lines.append(f"📊 **市场概况** · {time_s}")
     if rows:
-        lines.append(f"样本 `{len(rows)}` 只 | 上涨 `{up}` · 下跌 `{down}` · 平盘 `{flat}`")
-        lines.append(f"涨停 `{limit_up}` · 跌停 `{limit_down}` | 成交额 `{fmt_amt_yuan(total_amt)}`")
+        lines.append(f"全A样本 `{len(rows)}` 只 | 上涨 `{up}` · 下跌 `{down}` · 平盘 `{flat}`")
+        limit_up_text = f"`{limit_up}`" if limit_up is not None else "数据缺失"
+        limit_down_text = f"`{limit_down}`" if limit_down is not None else "数据缺失"
+        lines.append(
+            f"封死涨停 {limit_up_text} · 封死跌停 {limit_down_text} | 成交额 `{fmt_amt_yuan(total_amt)}`"
+        )
     else:
         lines.append("现货行情未取到有效数据，市场广度、涨跌停和成交额暂不展示")
     lines.append(f"💬 {mood}")
@@ -836,7 +887,7 @@ def build_report(*, require_complete_spot: bool = False) -> str:
     lines.append("⚠️ **风险**")
     if down > up:
         lines.append("· 下跌家数多，仓位和追高保守")
-    if limit_down >= limit_up and limit_down > 0:
+    if limit_pair_available and limit_down >= limit_up and limit_down > 0:
         lines.append("· 跌停风险不弱，注意高位退潮")
     lines.append("· 数据为快照，以交易软件为准")
     if issues:

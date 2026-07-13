@@ -123,6 +123,29 @@ def is_normal_a_share(code: str, name: str, *, code_normalizer: Any = None) -> b
     return "ST" not in name.upper() and "退" not in name and not name.startswith("N")
 
 
+def is_full_market_a_share(code: str, name: str = "", *, code_normalizer: Any = None) -> bool:
+    """Return whether a quote belongs to the full on-exchange A-share universe.
+
+    Market-breadth reports intentionally keep ST, newly listed, and delisting-period
+    stocks because they are trading A shares and affect the day's advance/decline
+    totals.  The Beijing Stock Exchange prefixes cover both legacy NEEQ-derived
+    codes and the newer 92xxxx code range.
+    """
+
+    del name  # Kept in the signature so callers can share their existing filter shape.
+    normalizer = normalize_code if code_normalizer is None else code_normalizer
+    normalized = normalizer(code)
+    return bool(re.match(r"^(?:(?:60|68|00|30|43|83|87|88|92)\d{4})$", normalized))
+
+
+def is_bse_a_share(code: str, *, code_normalizer: Any = None) -> bool:
+    """Return whether an A-share code belongs to the Beijing Stock Exchange."""
+
+    normalizer = normalize_code if code_normalizer is None else code_normalizer
+    normalized = normalizer(code)
+    return bool(re.match(r"^(?:43|83|87|88|92)\d{4}$", normalized))
+
+
 def normalize_industry_name(name: str) -> str:
     normalized = str(name or "").strip()
     for suffix in ("行业", "板块", "概念"):

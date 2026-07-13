@@ -52,6 +52,21 @@ class FakeFrame:
             yield idx, row
 
 
+class FakePoolFrame:
+    columns = ["代码"]
+
+    def __init__(self, codes):
+        self._codes = codes
+
+    def __len__(self):
+        return len(self._codes)
+
+    def __getitem__(self, key):
+        if key != "代码":
+            raise KeyError(key)
+        return self._codes
+
+
 class AShareMiddaySummaryTests(unittest.TestCase):
     def test_fetch_spot_uses_tencent_after_eastmoney_failures(self):
         mod = load_module()
@@ -93,6 +108,7 @@ class AShareMiddaySummaryTests(unittest.TestCase):
             for i in range(250)
         ]
         seen_pages = []
+        seen_filters = []
 
         class FakeResponse:
             def __init__(self, payload):
@@ -108,8 +124,10 @@ class AShareMiddaySummaryTests(unittest.TestCase):
                 return json.dumps(self.payload).encode("utf-8")
 
         def fake_urlopen(req, timeout=0):
-            page = int(parse_qs(urlparse(req.full_url).query)["pn"][0])
+            query = parse_qs(urlparse(req.full_url).query)
+            page = int(query["pn"][0])
             seen_pages.append(page)
+            seen_filters.append(query["fs"][0])
             start = (page - 1) * 100
             payload = {"data": {"total": len(items), "diff": items[start:start + 100]}}
             return FakeResponse(payload)
@@ -131,13 +149,14 @@ class AShareMiddaySummaryTests(unittest.TestCase):
         self.assertIsNone(warning)
         self.assertEqual(set(seen_pages), {1, 2, 3})
         self.assertEqual(rows[0]["industry"], "半导体")
+        self.assertTrue(all("m:0+t:81+s:2048" in value for value in seen_filters))
 
     def test_build_report_empty_spot_does_not_render_zero_market_stats(self):
         mod = load_module()
         mod.NOW = datetime(2026, 7, 2, 11, 40, tzinfo=mod.CN_TZ)
         mod.fetch_spot = lambda: ([], "现货主接口暂不可用")
         mod.fetch_industry_fund_flow = lambda: (None, "行业资金流返回空")
-        mod.fetch_zt_pool = lambda: (None, None)
+        mod.fetch_limit_pools = lambda: (None, None, "封板池暂不可用")
 
         report = mod.build_report()
 
@@ -154,7 +173,7 @@ class AShareMiddaySummaryTests(unittest.TestCase):
         mod.fetch_industry_fund_flow = lambda: (FakeFrame([
             {"行业": "半导体", "涨跌幅": 1.2, "流入资金": 0, "流出资金": 0, "净额": 0},
         ]), None)
-        mod.fetch_zt_pool = lambda: (None, None)
+        mod.fetch_limit_pools = lambda: (None, None, "封板池暂不可用")
 
         report = mod.build_report()
 
@@ -167,7 +186,11 @@ class AShareMiddaySummaryTests(unittest.TestCase):
         mod.NOW = datetime(2026, 7, 2, 11, 40, tzinfo=mod.CN_TZ)
         mod.fetch_spot = lambda: (sample_spot_rows(), None)
         mod.fetch_industry_fund_flow = lambda: (None, "行业资金流返回空")
-        mod.fetch_zt_pool = lambda: (None, None)
+        mod.fetch_limit_pools = lambda: (
+            FakePoolFrame(["600001", "000001"]),
+            FakePoolFrame(["600002"]),
+            None,
+        )
 
         report = mod.build_report()
 
@@ -175,6 +198,7 @@ class AShareMiddaySummaryTests(unittest.TestCase):
         self.assertIn("主线延续", report)
         self.assertIn("承接观察", report)
         self.assertIn("测试科技", report)
+        self.assertIn("封死涨停 `2` · 封死跌停 `1`", report)
 
     def test_scheduled_report_rejects_missing_spot_before_optional_fetches(self):
         mod = load_module()
@@ -182,7 +206,7 @@ class AShareMiddaySummaryTests(unittest.TestCase):
         mod.fetch_spot = lambda: ([], "现货主接口暂不可用")
         optional_calls = []
         mod.fetch_industry_fund_flow = lambda: optional_calls.append("fund")
-        mod.fetch_zt_pool = lambda: optional_calls.append("zt")
+        mod.fetch_limit_pools = lambda: optional_calls.append("limit")
 
         with self.assertRaises(mod.SpotSnapshotUnavailable):
             mod.build_report(require_complete_spot=True)

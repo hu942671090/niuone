@@ -53,6 +53,21 @@ class FakeFrame:
             yield idx, row
 
 
+class FakePoolFrame:
+    columns = ["代码"]
+
+    def __init__(self, codes):
+        self._codes = codes
+
+    def __len__(self):
+        return len(self._codes)
+
+    def __getitem__(self, key):
+        if key != "代码":
+            raise KeyError(key)
+        return self._codes
+
+
 class AShareCloseSummaryTests(unittest.TestCase):
     def test_fetch_spot_uses_tencent_after_eastmoney_failures(self):
         mod = load_module()
@@ -153,6 +168,35 @@ class AShareCloseSummaryTests(unittest.TestCase):
         self.assertIn(("backup.invalid", 1), calls)
         self.assertIn(("backup.invalid", 2), calls)
 
+    def test_full_market_filter_keeps_bse_st_and_new_a_shares(self):
+        mod = load_module()
+        rows = mod.extract_eastmoney_spot_rows([
+            {"f12": "830001", "f14": "北交测试", "f2": 10, "f3": 1, "f6": 1},
+            {"f12": "600001", "f14": "ST测试", "f2": 10, "f3": -1, "f6": 1},
+            {"f12": "301001", "f14": "N测试", "f2": 10, "f3": 30, "f6": 1},
+            {"f12": "900901", "f14": "B股测试", "f2": 1, "f3": 1, "f6": 1},
+        ])
+
+        self.assertEqual({row["code"] for row in rows}, {"830001", "600001", "301001"})
+
+    def test_spot_completeness_requires_bse_coverage(self):
+        mod = load_module()
+        rows = sample_spot_rows()
+        env_names = ("A_SHARE_SUMMARY_SPOT_MIN_ROWS", "A_SHARE_SUMMARY_SPOT_MIN_BSE_ROWS")
+        original_env = {name: os.environ.get(name) for name in env_names}
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "5"
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_BSE_ROWS"] = "1"
+            issue = mod.spot_snapshot_issue(rows, None)
+        finally:
+            for name, value in original_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.assertIn("北交所A股样本仅 0 只", issue)
+
     def test_fetch_spot_continues_to_sina_after_partial_direct_snapshot(self):
         mod = load_module()
         full_rows = sample_spot_rows()
@@ -233,7 +277,7 @@ class AShareCloseSummaryTests(unittest.TestCase):
             {"行业": "通信", "涨跌幅": 1.4, "流入资金": "5亿", "流出资金": "2亿", "净额": "3亿", "领涨股": "测试通信", "领涨股-涨跌幅": 3.1},
             {"行业": "银行", "涨跌幅": -1.0, "流入资金": "1亿", "流出资金": "4亿", "净额": "-3亿", "领涨股": "测试银行", "领涨股-涨跌幅": -1.2},
         ]), None)
-        mod.fetch_zt_pool = lambda: (None, None)
+        mod.fetch_limit_pools = lambda: (None, None, "封板池暂不可用")
 
         report = mod.build_report()
 
@@ -247,12 +291,29 @@ class AShareCloseSummaryTests(unittest.TestCase):
         self.assertIn("测试科技", report)
         self.assertNotIn("今日买卖指引", report)
 
+    def test_build_report_uses_sealed_limit_pools_instead_of_pct_thresholds(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 3, 15, 30, tzinfo=mod.CN_TZ)
+        mod.fetch_spot = lambda: (sample_spot_rows(), None)
+        mod.fetch_industry_fund_flow = lambda: (None, "行业资金流返回空")
+        mod.fetch_limit_pools = lambda: (
+            FakePoolFrame(["600001", "000001", "600001"]),
+            FakePoolFrame(["600002"]),
+            None,
+        )
+
+        report = mod.build_report()
+
+        self.assertIn("全A样本 `6` 只", report)
+        self.assertIn("封死涨停 `2` · 封死跌停 `1`", report)
+        self.assertNotIn("封死涨停 `1` · 封死跌停 `0`", report)
+
     def test_build_report_empty_spot_keeps_premarket_plan_defensive(self):
         mod = load_module()
         mod.NOW = datetime(2026, 7, 2, 15, 30, tzinfo=mod.CN_TZ)
         mod.fetch_spot = lambda: ([], "现货主接口暂不可用")
         mod.fetch_industry_fund_flow = lambda: (None, "行业资金流返回空")
-        mod.fetch_zt_pool = lambda: (None, None)
+        mod.fetch_limit_pools = lambda: (None, None, "封板池暂不可用")
 
         report = mod.build_report()
 
@@ -263,13 +324,25 @@ class AShareCloseSummaryTests(unittest.TestCase):
         self.assertNotIn("涨停 `0`", report)
         self.assertNotIn("成交额 `0元`", report)
 
+    def test_build_report_marks_unavailable_limit_pools_without_estimating(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 2, 15, 30, tzinfo=mod.CN_TZ)
+        mod.fetch_spot = lambda: (sample_spot_rows(), None)
+        mod.fetch_industry_fund_flow = lambda: (None, "行业资金流返回空")
+        mod.fetch_limit_pools = lambda: (None, None, "封板池暂不可用")
+
+        report = mod.build_report()
+
+        self.assertIn("封死涨停 数据缺失 · 封死跌停 数据缺失", report)
+        self.assertNotIn("封死涨停 `0`", report)
+
     def test_scheduled_report_rejects_missing_spot_before_optional_fetches(self):
         mod = load_module()
         mod.NOW = datetime(2026, 7, 2, 15, 30, tzinfo=mod.CN_TZ)
         mod.fetch_spot = lambda: ([], "现货主接口暂不可用")
         optional_calls = []
         mod.fetch_industry_fund_flow = lambda: optional_calls.append("fund")
-        mod.fetch_zt_pool = lambda: optional_calls.append("zt")
+        mod.fetch_limit_pools = lambda: optional_calls.append("limit")
 
         with self.assertRaises(mod.SpotSnapshotUnavailable):
             mod.build_report(require_complete_spot=True)
