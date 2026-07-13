@@ -74,7 +74,7 @@ def build_strategy_prompt_sections(
 4. 超级B1：洗盘反转小仓，只赌一次；放量破位后缩量企稳、J仍负、止损空间可控才考虑，未兑现到窗口日{time_exit_hhmm}尾盘走
 
 Z哥卖出风控（属于Z哥体系）：
-- 买入K线/前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护
+- N型上移结构最近前低止损、防卖飞5分评分、卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤/ATR吊灯保护
 - B3仅在{b3_exit_hhmm}做开盘离场检查，B2/超级B1仅在{time_exit_hhmm}做尾盘离场检查""" if zettaranc_enabled else "Z哥：本轮设置页未启用，Z哥买入战法和卖出风控不作为本轮新增仓依据。"
     base_strategy_enabled = any(
         STRATEGY_DEFINITIONS.get(strategy_id, {}).get("family") == "local"

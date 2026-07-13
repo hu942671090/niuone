@@ -1389,6 +1389,51 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(saved["positions"]["001257"]["qty"], 300)
         self.assertEqual(len(saved["trade_log"]), 1)
 
+    def test_save_state_does_not_resurrect_position_after_merged_sell(self):
+        original_state_file = trader.STATE_FILE
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                buy = {
+                    "time": "2026-07-10 13:36:41", "action": "BUY", "code": "002654",
+                    "name": "万润科技", "shares": 2000, "price": 18.4, "reason": "B3中继",
+                }
+                unrelated = {
+                    "time": "2026-07-13 09:29:59", "action": "BUY", "code": "600001",
+                    "name": "其他股票", "shares": 100, "price": 10.0, "reason": "并发成交",
+                }
+                current = {
+                    "initial_cash": 100000.0,
+                    "cash": 63200.0,
+                    "positions": {"002654": {"code": "002654", "name": "万润科技", "qty": 2000, "avg_cost": 18.4}},
+                    "trade_log": [buy, unrelated],
+                    "decision_log": [],
+                    "equity_history": [],
+                }
+                trader.STATE_FILE.write_text(json.dumps(current, ensure_ascii=False))
+
+                sell = {
+                    "time": "2026-07-13 09:30:09", "action": "SELL", "code": "002654",
+                    "name": "万润科技", "shares": 2000, "price": 17.31, "reason": "止损",
+                }
+                just_sold = {
+                    "initial_cash": 100000.0,
+                    "cash": 97800.0,
+                    "positions": {},
+                    "trade_log": [buy, sell],
+                    "decision_log": [],
+                    "equity_history": [],
+                }
+
+                trader.save_state(just_sold)
+                saved = trader.load_state()
+            finally:
+                trader.STATE_FILE = original_state_file
+
+        self.assertNotIn("002654", saved["positions"])
+        self.assertEqual({row["code"] for row in saved["trade_log"]}, {"002654", "600001"})
+        self.assertTrue(any(row["action"] == "SELL" for row in saved["trade_log"]))
+
     def test_strategy_performance_splits_entry_and_exit_dimensions(self):
         state = {
             "trade_log": [
@@ -2297,6 +2342,31 @@ class SellStrategyRuleTests(unittest.TestCase):
         signal = trader.evaluate_sell_signal("600000", pos, "2026-06-24")
         self.assertIsNotNone(signal)
         self.assertEqual(signal["signal"], "shaofu_entry_stop")
+
+    def test_n_structure_stop_uses_latest_higher_swing_low(self):
+        lows = [10.4, 10.0, 9.5, 9.8, 10.5, 10.2, 10.0, 10.3, 10.8, 10.6]
+        rows = [
+            {"date": f"2026-06-{idx + 1:02d}", "low": low, "close": low + 0.2}
+            for idx, low in enumerate(lows)
+        ]
+
+        result = trader.find_n_structure_prior_low(rows, entry_idx=9)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["price"], 10.0)
+        self.assertEqual(result["date"], "2026-06-07")
+        self.assertEqual(result["previous_price"], 9.5)
+
+    def test_n_structure_stop_rejects_lower_low_pattern(self):
+        lows = [10.4, 10.0, 9.5, 9.8, 10.5, 9.4, 9.2, 9.5, 10.0, 9.8]
+        rows = [
+            {"date": f"2026-06-{idx + 1:02d}", "low": low, "close": low + 0.2}
+            for idx, low in enumerate(lows)
+        ]
+
+        result = trader.find_n_structure_prior_low(rows, entry_idx=9)
+
+        self.assertIsNone(result)
 
     def test_sell_score_three_reduces_half_once(self):
         pos = {

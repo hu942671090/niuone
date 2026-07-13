@@ -610,6 +610,72 @@ def load_state() -> dict[str, Any]:
     return base
 
 
+def reconcile_positions_with_trade_log(state: dict[str, Any]) -> list[str]:
+    """Prevent a stale snapshot from resurrecting positions already sold.
+
+    Only reconcile codes whose retained ledger starts with a BUY, so a trimmed
+    legacy log that begins mid-position cannot incorrectly remove holdings.
+    The function is deliberately one-way: it may reduce a stale position to
+    the ledger quantity, but never creates or increases a position.
+    """
+    def trade_shares(value: Any) -> int:
+        try:
+            return max(0, int(float(value or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    positions = state.get("positions") or {}
+    trades_by_code: dict[str, list[dict[str, Any]]] = {}
+    for trade in state.get("trade_log") or []:
+        if not isinstance(trade, dict):
+            continue
+        action = str(trade.get("action") or "").upper()
+        code = normalize_code(str(trade.get("code") or ""))
+        shares = trade_shares(trade.get("shares"))
+        if action not in {"BUY", "SELL"} or not code or shares <= 0:
+            continue
+        trades_by_code.setdefault(code, []).append(trade)
+
+    reconciled: list[str] = []
+    for code in list(positions):
+        ledger = sorted(
+            trades_by_code.get(normalize_code(code), []),
+            key=lambda item: str(item.get("time") or ""),
+        )
+        if not ledger or str(ledger[0].get("action") or "").upper() != "BUY":
+            continue
+        ledger_qty = 0
+        for trade in ledger:
+            shares = trade_shares(trade.get("shares"))
+            if str(trade.get("action") or "").upper() == "BUY":
+                ledger_qty += shares
+            else:
+                ledger_qty -= shares
+        ledger_qty = max(0, ledger_qty)
+        position = positions.get(code) or {}
+        current_qty = position_qty(position)
+        if ledger_qty >= current_qty:
+            continue
+        if ledger_qty <= 0:
+            positions.pop(code, None)
+        else:
+            position["qty"] = ledger_qty
+            position.pop("shares", None)
+            lots = position.get("buy_date_lots") or {}
+            excess = max(0, sum(trade_shares(qty) for qty in lots.values()) - ledger_qty)
+            for day in sorted(list(lots)):
+                if excess <= 0:
+                    break
+                use = min(trade_shares(lots.get(day)), excess)
+                lots[day] = trade_shares(lots.get(day)) - use
+                excess -= use
+                if lots[day] <= 0:
+                    lots.pop(day, None)
+        reconciled.append(code)
+    state["positions"] = positions
+    return reconciled
+
+
 def save_state(state: dict[str, Any]) -> None:
     state["updated_at"] = now_ts()
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -661,6 +727,11 @@ def save_state(state: dict[str, Any]) -> None:
             merge_list("pending_decisions", ("id",), prefer_state=True)
             merge_list("equity_history", ("time",), prefer_state=True)
             merge_list("daily_equity_history", ("time",), prefer_state=True)
+
+            # Position snapshots are mutable and can be stale even when the
+            # append-only trade merge succeeded. Re-apply the retained ledger
+            # after merging so a completed SELL cannot be resurrected.
+            reconcile_positions_with_trade_log(state)
 
             # Preserve newest B1/decision markers if an older dashboard snapshot is saving late.
             for key in ("last_b1_generated_at", "last_decision_at"):
@@ -1700,7 +1771,8 @@ S1_FAIL_CONFIRM_DAYS = 2          # 连续跌破BBI天数确认
 DONCHIAN_EXIT_LOOKBACK_DAYS = 10  # 经典趋势系统：跌破近N日低点退出
 ATR_LOOKBACK_DAYS = 20
 ATR_CHANDELIER_MULT = 3.0
-ENTRY_STOP_TICK_BUFFER = 0.03     # Z哥“只输一根K线”：买入K低点下方3分钱缓冲
+N_STRUCTURE_STOP_LOOKBACK_DAYS = 30  # N型结构前低最多回看交易日
+N_STRUCTURE_LOW_TOLERANCE_PCT = 0.02  # 后低允许比前低低不超过2%
 NO_PROGRESS_HOLD_DAYS = 3         # 买入后没涨，最少观察天数
 NO_PROGRESS_MAX_PNL_PCT = 1.0
 LUZHU_MEDIUM_YANG_PCT = 2.0       # 卤煮：连续中/大阳线的保守量化阈值
@@ -3074,6 +3146,35 @@ def _detect_s1_s2_s3(rows: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
+def find_n_structure_prior_low(
+    rows: list[dict[str, Any]],
+    entry_idx: int,
+    *,
+    lookback: int = N_STRUCTURE_STOP_LOOKBACK_DAYS,
+) -> dict[str, Any] | None:
+    """Return the latest higher swing low before entry in an N-shaped setup."""
+    if entry_idx < 3 or not rows:
+        return None
+    start = max(0, entry_idx - max(5, int(lookback)))
+    swing_lows: list[tuple[int, float]] = []
+    for idx in range(max(start + 1, 1), entry_idx):
+        low = _row_float(rows[idx], "low")
+        prev_low = _row_float(rows[idx - 1], "low")
+        next_low = _row_float(rows[idx + 1], "low") if idx + 1 < len(rows) else 0.0
+        if low > 0 and prev_low > 0 and next_low > 0 and low <= prev_low and low <= next_low:
+            swing_lows.append((idx, low))
+    for earlier, latest in zip(reversed(swing_lows[:-1]), reversed(swing_lows[1:])):
+        if latest[1] >= earlier[1] * (1 - N_STRUCTURE_LOW_TOLERANCE_PCT):
+            idx, price = latest
+            return {
+                "price": round(price, 3),
+                "date": str(rows[idx].get("date") or ""),
+                "previous_price": round(earlier[1], 3),
+                "previous_date": str(rows[earlier[0]].get("date") or ""),
+            }
+    return None
+
+
 def _sell_signal(reason: str, signal: str, sell_ratio: float = 1.0) -> dict[str, Any]:
     return _sell_signals._sell_signal(reason, signal, sell_ratio)
 
@@ -3148,7 +3249,8 @@ def evaluate_sell_signal(
         pos.get("shaofu_stop_price") or pos.get("entry_stop_price") or 0
     )
     if shaofu_stop > 0 and price < shaofu_stop:
-        return _sell_signal(f"收盘价破入场止损 (收盘{price:.2f} < 止损{shaofu_stop:.2f})", "shaofu_entry_stop")
+        stop_label = "N型结构前低" if pos.get("shaofu_stop_source") == "n_structure_low" else "入场止损"
+        return _sell_signal(f"收盘价破{stop_label} (收盘{price:.2f} < 止损{shaofu_stop:.2f})", "shaofu_entry_stop")
 
     chuhuo = pos.get("chuhuo_wushi") or {}
     if chuhuo.get("is_selling"):
@@ -3312,17 +3414,28 @@ def _refresh_position_bbi(state: dict[str, Any]) -> None:
                 if rows:
                     pos["close"] = float(rows[-1].get("close") or pos.get("close") or 0)
                     pos["last_kline_date"] = rows[-1].get("date") or ""
-                    if not pos.get("shaofu_stop_price") or pos.get("shaofu_stop_source") == "fallback_pct":
+                    if not pos.get("shaofu_stop_price") or pos.get("shaofu_stop_source") in {"fallback_pct", "entry_kline_low"}:
                         lots = pos.get("buy_date_lots") or {}
                         open_dates = sorted(date for date, qty in lots.items() if int(qty or 0) > 0)
                         entry_date = open_dates[0] if open_dates else ""
                         entry_idx = next((idx for idx, row in enumerate(rows) if str(row.get("date") or "") == entry_date), None)
                         if entry_idx is not None:
-                            entry_low = _row_float(rows[entry_idx], "low")
-                            if entry_low > 0:
-                                pos["entry_kline_low"] = round(entry_low, 3)
-                                pos["shaofu_stop_price"] = round(max(0.01, entry_low - ENTRY_STOP_TICK_BUFFER), 3)
-                                pos["shaofu_stop_source"] = "entry_kline_low"
+                            structure_low = find_n_structure_prior_low(rows, entry_idx)
+                            pos.pop("entry_kline_low", None)
+                            if structure_low:
+                                pos["n_structure_low"] = structure_low["price"]
+                                pos["n_structure_low_date"] = structure_low["date"]
+                                pos["n_structure_previous_low"] = structure_low["previous_price"]
+                                pos["n_structure_previous_low_date"] = structure_low["previous_date"]
+                                pos["shaofu_stop_price"] = structure_low["price"]
+                                pos["shaofu_stop_source"] = "n_structure_low"
+                            else:
+                                pos.pop("n_structure_low", None)
+                                pos.pop("n_structure_low_date", None)
+                                pos.pop("n_structure_previous_low", None)
+                                pos.pop("n_structure_previous_low_date", None)
+                                pos.pop("shaofu_stop_price", None)
+                                pos.pop("shaofu_stop_source", None)
                         else:
                             pos.pop("shaofu_stop_price", None)
                             pos.pop("shaofu_stop_source", None)
@@ -4122,7 +4235,7 @@ def call_model_decision(
 硬性准入规则（全部战法通用）：
 - 距BBI > 6.5% → 不买（回测显示追高胜率骤降）
 - 评分 < 8 → 不买（min_score从7提到8后，假信号减少40%+）
-- 止损使用买入K线/前低的结构失效位，不设固定百分比硬止损
+- 止损使用N型上移结构的最近回调前低，不使用买入当日K线最低价，不设固定百分比硬止损
 - 止盈设在 +12%~15%（回测显示突破确认能吃到9.6%平均盈利）
 - 仓位弹性由评分、战法确定性、风险标记、盘面级别和账户状态决定；重仓/满仓必须在reason说明集中理由，持仓数仍受静态上限和盘面动态节奏约束
 
@@ -5038,7 +5151,7 @@ def build_trade_rule_note() -> str:
         f"买入硬约束：最多{MAX_OPEN_POSITIONS}只持仓、单轮最多{MAX_NEW_BUYS_PER_DECISION}笔新仓、"
         f"午盘前默认最多{MORNING_MAX_OPEN_POSITIONS}只；仓位不再按固定百分比硬卡，"
         f"由模型结合盘面、评分、战法确定性、风险标记、现有仓位和现金状态决定，极端高确定性时可单票重仓甚至满仓，但必须写清楚集中理由。"
-        f"系统底线风控：买入K线/前低结构止损、峰值回撤/ATR吊灯保护、持仓超25日退出；"
+        f"系统底线风控：N型上移结构最近前低止损、峰值回撤/ATR吊灯保护、持仓超25日退出；"
         f"Z哥卖出风控：防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
         f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
         f"买入按万一免五计费。"
