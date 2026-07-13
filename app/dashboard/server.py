@@ -268,9 +268,11 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_MEDIA_MAX_BYTES", "label": "X 图片代理最大字节", "group": "限流与缓存", "kind": "int", "default": str(8 * 1024 * 1024), "effect": "restart"},
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时选股", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
-    {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股及买卖决策时间点", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
-    {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "09:37", "effect": "runtime"},
-    {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "14:45", "effect": "runtime"},
+    {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股与买卖设置", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
+    {"name": "DASHBOARD_DISPLAY_CANDIDATE_LIMIT", "label": "候选池展示数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
+    {"name": "DASHBOARD_TRADE_CANDIDATE_LIMIT", "label": "买卖决策候选数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
+    {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股与买卖设置", "kind": "time", "default": "09:37", "effect": "runtime"},
+    {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股与买卖设置", "kind": "time", "default": "14:45", "effect": "runtime"},
     {"name": STRATEGY_SOURCE_ENV, "label": "当前策略来源", "group": "选股策略", "kind": "strategy_source", "default": "builtin", "effect": "runtime"},
     {"name": PERSONA_STRATEGY_ENV, "label": "内置策略", "group": "选股策略", "kind": "strategy_single", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},
     {"name": PRESET_STRATEGY_TEXT_ENV, "label": "预设文字策略", "group": "选股策略", "kind": "preset_strategy_text", "default": "", "effect": "runtime"},
@@ -427,6 +429,8 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_TELEGRAM_BOT_TOKEN",
     "DASHBOARD_TELEGRAM_CHAT_ID",
     "DASHBOARD_B1_SCHEDULE_TIMES",
+    "DASHBOARD_DISPLAY_CANDIDATE_LIMIT",
+    "DASHBOARD_TRADE_CANDIDATE_LIMIT",
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
     STRATEGY_SOURCE_ENV,
@@ -488,7 +492,7 @@ ENV_GROUP_ORDER = [
     "消息面预检模型",
     "买卖决策模型",
     "交易通知",
-    "选股及买卖决策时间点",
+    "选股与买卖设置",
     "选股策略",
     "盘面监控生产时间点",
     "指数行情更新周期",
@@ -2452,7 +2456,7 @@ ADMIN_GROUP_NOTES = {
     "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。长度默认：上下文 128000 tokens，最大输出 4096 tokens。模型和密钥留空则跳过。",
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；移除渠道并保存后会清除该渠道配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
-    "选股及买卖决策时间点": "使用北京时间 HH:MM，可设置多个时间点。",
+    "选股与买卖设置": "配置候选池展示与进入买卖决策的数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
     "选股策略": "在内置策略和预设文字策略中选择一个激活；内置策略可选基础策略、Z哥或李大霄。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
@@ -2490,9 +2494,9 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
     },
     {
         "slug": "decision-times",
-        "name": "选股及买卖决策时间点",
-        "summary": "维护选股、开盘离场与尾盘离场的北京时间。",
-        "icon": "时间",
+        "name": "选股与买卖设置",
+        "summary": "配置候选数量，以及选股、买卖决策和离场时间。",
+        "icon": "交易",
     },
     {
         "slug": "stock-strategy",
@@ -2834,6 +2838,8 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
             "DASHBOARD_MAX_OPEN_POSITIONS",
             "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
+            "DASHBOARD_DISPLAY_CANDIDATE_LIMIT",
+            "DASHBOARD_TRADE_CANDIDATE_LIMIT",
         } and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
@@ -2904,7 +2910,13 @@ def sync_business_runtime_settings(
         except (TypeError, ValueError):
             pass
 
-    if changed_names & {STRATEGY_SOURCE_ENV, PERSONA_STRATEGY_ENV, PRESET_STRATEGY_TEXT_ENV}:
+    if changed_names & {
+        STRATEGY_SOURCE_ENV,
+        PERSONA_STRATEGY_ENV,
+        PRESET_STRATEGY_TEXT_ENV,
+        "DASHBOARD_DISPLAY_CANDIDATE_LIMIT",
+        "DASHBOARD_TRADE_CANDIDATE_LIMIT",
+    }:
         B1_CANDIDATE_REFRESH_LAST_TS = 0.0
         with API_RESPONSE_LOCK:
             API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)

@@ -1,11 +1,22 @@
 """Candidate eligibility and strategy-aware display selection."""
+import os
 from typing import Any
 
 from .registry import DISPLAY_STRATEGY_ORDER
 from .scoring import COMMON_MAX_BBI_DISTANCE_PCT, safe_float
 
 
-DISPLAY_HEAD_LIMIT = 8
+DISPLAY_CANDIDATE_LIMIT_ENV = "DASHBOARD_DISPLAY_CANDIDATE_LIMIT"
+TRADE_CANDIDATE_LIMIT_ENV = "DASHBOARD_TRADE_CANDIDATE_LIMIT"
+DEFAULT_DISPLAY_CANDIDATE_LIMIT = 10
+DEFAULT_TRADE_CANDIDATE_LIMIT = 10
+
+
+def configured_candidate_limit(name: str, default: int) -> int:
+    try:
+        return max(1, min(100, int(os.environ.get(name, str(default)) or default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
@@ -24,8 +35,10 @@ def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
     )
 
 
-def select_trade_candidates(results: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+def select_trade_candidates(results: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
     """Return candidates allowed to reach the trading decision model."""
+    if limit is None:
+        limit = configured_candidate_limit(TRADE_CANDIDATE_LIMIT_ENV, DEFAULT_TRADE_CANDIDATE_LIMIT)
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in results:
@@ -41,9 +54,11 @@ def select_trade_candidates(results: list[dict[str, Any]], limit: int = 8) -> li
 
 def select_display_candidates(
     results: list[dict[str, Any]],
-    limit: int = 16,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Keep top-ranked names while reserving slots for each strategy family."""
+    if limit is None:
+        limit = configured_candidate_limit(DISPLAY_CANDIDATE_LIMIT_ENV, DEFAULT_DISPLAY_CANDIDATE_LIMIT)
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -57,7 +72,8 @@ def select_display_candidates(
         seen.add(code)
 
     trade_ready = [item for item in results if candidate_is_trade_ready(item)]
-    for item in trade_ready[:DISPLAY_HEAD_LIMIT]:
+    trade_head_limit = configured_candidate_limit(TRADE_CANDIDATE_LIMIT_ENV, DEFAULT_TRADE_CANDIDATE_LIMIT)
+    for item in trade_ready[:min(limit, trade_head_limit)]:
         add(item)
 
     for strategy_id in DISPLAY_STRATEGY_ORDER:

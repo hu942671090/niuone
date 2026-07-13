@@ -123,6 +123,40 @@ class MultiStrategyRuleTests(unittest.TestCase):
 
         self.assertEqual(screen.select_trade_candidates([blocked, good]), [good])
 
+    def test_candidate_counts_follow_runtime_settings(self):
+        candidates = [
+            {
+                "code": f"600{i:03d}",
+                "best_score": 10.0 - i / 100,
+                "entry_threshold": 8.0,
+                "distance_pct": 1.0,
+                "actionable": True,
+                "hard_blockers": [],
+                "best_strategy": "shaofu_b1",
+            }
+            for i in range(20)
+        ]
+        display_name = "DASHBOARD_DISPLAY_CANDIDATE_LIMIT"
+        trade_name = "DASHBOARD_TRADE_CANDIDATE_LIMIT"
+        saved_display = os.environ.get(display_name)
+        saved_trade = os.environ.get(trade_name)
+        try:
+            os.environ[display_name] = "12"
+            os.environ[trade_name] = "5"
+            self.assertEqual(len(screen.select_display_candidates(candidates)), 12)
+            self.assertEqual(len(screen.select_trade_candidates(candidates)), 5)
+            self.assertEqual(len(screen.select_display_candidates(candidates, limit=7)), 7)
+            self.assertEqual(len(screen.select_trade_candidates(candidates, limit=3)), 3)
+        finally:
+            if saved_display is None:
+                os.environ.pop(display_name, None)
+            else:
+                os.environ[display_name] = saved_display
+            if saved_trade is None:
+                os.environ.pop(trade_name, None)
+            else:
+                os.environ[trade_name] = saved_trade
+
     def test_extract_industry_from_individual_info_rows(self):
         rows = [
             {"item": "股票简称", "value": "测试股份"},
