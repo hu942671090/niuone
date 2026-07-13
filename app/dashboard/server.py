@@ -259,7 +259,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时选股", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股及买卖决策时间点", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
-    {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "09:30", "effect": "runtime"},
+    {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "09:37", "effect": "runtime"},
     {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股及买卖决策时间点", "kind": "time", "default": "14:45", "effect": "runtime"},
     {"name": STRATEGY_SOURCE_ENV, "label": "当前策略来源", "group": "选股策略", "kind": "strategy_source", "default": "builtin", "effect": "runtime"},
     {"name": PERSONA_STRATEGY_ENV, "label": "内置策略", "group": "选股策略", "kind": "strategy_single", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},

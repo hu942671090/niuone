@@ -49,6 +49,29 @@ class MultiStrategyRuleTests(unittest.TestCase):
 
         self.assertEqual(screen.recent_b1_indices(rows, lookback=9, end_offset=1), [6])
 
+    def test_b2_confirmation_rejects_b1_older_than_three_days(self):
+        rows = [
+            {"open": 10.0, "close": 10.0, "high": 10.1, "low": 9.9, "volume": 100, "j": 20.0, "bbi": 10.0, "change_pct": 0.0}
+            for _ in range(40)
+        ]
+        rows[35]["j"] = -12.0
+        rows[-1].update({"open": 10.0, "close": 10.5, "high": 10.6, "low": 9.95, "volume": 150, "j": 40.0, "bbi": 10.0, "change_pct": 5.0})
+
+        self.assertIsNone(screen.score_b2_confirm(rows))
+
+        rows[35]["j"] = 20.0
+        rows[36]["j"] = -12.0
+        result = screen.score_b2_confirm(rows)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["days_from_b1"], 3)
+
+    def test_n_structure_filter_uses_local_swing_lows(self):
+        rising = [{"low": low} for low in [10.4, 10.0, 9.5, 9.8, 10.5, 10.2, 10.0, 10.3, 10.8]]
+        falling = [{"low": low} for low in [10.4, 10.0, 9.5, 9.8, 10.5, 9.4, 9.2, 9.5, 10.0]]
+
+        self.assertTrue(screen.n_structure_ok(rising, lookback=20))
+        self.assertFalse(screen.n_structure_ok(falling, lookback=20))
+
     def test_shaofu_b1_above_core_j_is_watch_only(self):
         payload = screen.with_strategy_profile("shaofu_b1", {
             "score": 9.0,

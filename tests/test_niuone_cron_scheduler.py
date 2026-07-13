@@ -120,7 +120,8 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
             for name in original_env_values:
                 os.environ.pop(name, None)
             self.assertEqual(b3_job.command, ("niuniu_practice_trader.py", "--auto-exits"))
-            self.assertEqual(scheduler.normalize_job_expr(b3_job, "09:30"), "30 9 * * 1-5")
+            self.assertEqual(b3_job.default_expr, "37 9 * * 1-5")
+            self.assertEqual(scheduler.normalize_job_expr(b3_job, "09:37"), "37 9 * * 1-5")
             self.assertEqual(job.command, ("niuniu_practice_trader.py", "--auto-exits"))
             self.assertEqual(scheduler.normalize_job_expr(job, "14:45"), "45 14 * * 1-5")
             self.assertEqual(

@@ -73,6 +73,7 @@ from strategies.policy import (
     strategy_position_limit_pct as _strategy_position_limit_pct,
 )
 from strategies.prompts import build_strategy_prompt_sections, format_preset_strategy_section
+from strategies.scoring.common import find_n_structure_prior_low as _find_n_structure_prior_low
 if "_sell_signals" not in globals():
     from trading import sell_signals as _sell_signals
 
@@ -1778,7 +1779,7 @@ NO_PROGRESS_MAX_PNL_PCT = 1.0
 LUZHU_MEDIUM_YANG_PCT = 2.0       # 卤煮：连续中/大阳线的保守量化阈值
 SELL_SCORE_REDUCE_THRESHOLD = 3
 SELL_SCORE_EXIT_THRESHOLD = 2
-B3_EXIT_TIME = env_hhmm("DASHBOARD_B3_EXIT_TIME", "09:30")
+B3_EXIT_TIME = env_hhmm("DASHBOARD_B3_EXIT_TIME", "09:37")
 B3_EXIT_HHMM = B3_EXIT_TIME.strftime("%H:%M")
 TIME_EXIT_TIME = env_hhmm("DASHBOARD_TIME_EXIT_TIME", os.environ.get("DASHBOARD_TIME_STOP_EXIT_TIME", "14:45") or "14:45")
 TIME_EXIT_HHMM = TIME_EXIT_TIME.strftime("%H:%M")
@@ -3153,26 +3154,75 @@ def find_n_structure_prior_low(
     lookback: int = N_STRUCTURE_STOP_LOOKBACK_DAYS,
 ) -> dict[str, Any] | None:
     """Return the latest higher swing low before entry in an N-shaped setup."""
-    if entry_idx < 3 or not rows:
+    return _find_n_structure_prior_low(
+        rows,
+        entry_idx,
+        lookback=lookback,
+        tolerance_pct=N_STRUCTURE_LOW_TOLERANCE_PCT,
+    )
+
+
+def is_zettaranc_strategy(strategy_id: str) -> bool:
+    return STRATEGY_DEFINITIONS.get(str(strategy_id or ""), {}).get("persona") == "zettaranc"
+
+
+def position_entry_strategy(pos: dict[str, Any]) -> str:
+    mark = pos.get("strategy_mark") if isinstance(pos.get("strategy_mark"), dict) else {}
+    return str(
+        pos.get("buy_strategy")
+        or pos.get("strategy_mark_id")
+        or mark.get("strategy_id")
+        or mark.get("entry_strategy_id")
+        or ""
+    )
+
+
+def zettaranc_entry_stop(rows: list[dict[str, Any]], entry_idx: int, strategy_id: str) -> dict[str, Any] | None:
+    """Resolve the canonical stop anchor for one Zettaranc entry strategy."""
+    if entry_idx < 0 or entry_idx >= len(rows):
         return None
-    start = max(0, entry_idx - max(5, int(lookback)))
-    swing_lows: list[tuple[int, float]] = []
-    for idx in range(max(start + 1, 1), entry_idx):
-        low = _row_float(rows[idx], "low")
-        prev_low = _row_float(rows[idx - 1], "low")
-        next_low = _row_float(rows[idx + 1], "low") if idx + 1 < len(rows) else 0.0
-        if low > 0 and prev_low > 0 and next_low > 0 and low <= prev_low and low <= next_low:
-            swing_lows.append((idx, low))
-    for earlier, latest in zip(reversed(swing_lows[:-1]), reversed(swing_lows[1:])):
-        if latest[1] >= earlier[1] * (1 - N_STRUCTURE_LOW_TOLERANCE_PCT):
-            idx, price = latest
-            return {
-                "price": round(price, 3),
-                "date": str(rows[idx].get("date") or ""),
-                "previous_price": round(earlier[1], 3),
-                "previous_date": str(rows[earlier[0]].get("date") or ""),
-            }
+    if strategy_id == "shaofu_b1":
+        stop = find_n_structure_prior_low(rows, entry_idx)
+        return {**stop, "source": "n_structure_low"} if stop else None
+    if strategy_id == "b2_confirm":
+        start = max(0, entry_idx - 3)
+        candidates = [(idx, _row_float(rows[idx], "low")) for idx in range(start, entry_idx)]
+        candidates = [(idx, low) for idx, low in candidates if low > 0]
+        if not candidates:
+            return None
+        idx, price = min(candidates, key=lambda item: item[1])
+        return {"price": round(price, 3), "date": str(rows[idx].get("date") or ""), "source": "b1_low"}
+    if strategy_id == "b3_accelerate":
+        entry_low = _row_float(rows[entry_idx], "low")
+        if entry_low > 0:
+            return {"price": round(entry_low, 3), "date": str(rows[entry_idx].get("date") or ""), "source": "b3_kline_low"}
+        for idx in range(entry_idx - 1, max(-1, entry_idx - 4), -1):
+            row = rows[idx]
+            if _row_float(row, "close") > _row_float(row, "open"):
+                midpoint = (_row_float(row, "open") + _row_float(row, "close")) / 2
+                if midpoint > 0:
+                    return {"price": round(midpoint, 3), "date": str(row.get("date") or ""), "source": "b2_midpoint"}
+        return None
+    if strategy_id == "super_b1":
+        start = max(0, entry_idx - 6)
+        bearish = [
+            (idx, _row_float(rows[idx], "volume"), _row_float(rows[idx], "low"))
+            for idx in range(start, entry_idx)
+            if _row_float(rows[idx], "close") < _row_float(rows[idx], "open") and _row_float(rows[idx], "low") > 0
+        ]
+        if not bearish:
+            return None
+        idx, _, price = max(bearish, key=lambda item: item[1])
+        return {"price": round(price, 3), "date": str(rows[idx].get("date") or ""), "source": "super_b1_washout_low"}
     return None
+
+
+def zettaranc_confirmed_rows(rows: list[dict[str, Any]], as_of: datetime) -> list[dict[str, Any]]:
+    """Exclude an unfinished current-day bar before the A-share close."""
+    if as_of.time() >= dtime(15, 0):
+        return rows
+    today_compact = as_of.strftime("%Y%m%d")
+    return [r for r in rows if str(r.get("date") or "").replace("-", "") != today_compact]
 
 
 def _sell_signal(reason: str, signal: str, sell_ratio: float = 1.0) -> dict[str, Any]:
@@ -3195,7 +3245,16 @@ def evaluate_sell_signal(
     tracking fields such as peak price and consecutive BBI-break days.
     """
     today = today or today_key()
-    price = float(pos.get("close") or pos.get("last_price") or pos.get("avg_cost") or 0)
+    entry_strategy = position_entry_strategy(pos)
+    zettaranc_position = is_zettaranc_strategy(entry_strategy)
+    realtime_price = float(pos.get("last_price") or pos.get("close") or pos.get("avg_cost") or 0)
+    price = float(
+        (pos.get("confirmed_close") if zettaranc_position else pos.get("close"))
+        or pos.get("close")
+        or realtime_price
+        or pos.get("avg_cost")
+        or 0
+    )
     avg_cost = float(pos.get("avg_cost") or 0)
     if price <= 0 or avg_cost <= 0:
         return None
@@ -3205,6 +3264,7 @@ def evaluate_sell_signal(
         b3_exit_allowed = time_exit_allowed
 
     pnl_pct = (price / avg_cost - 1) * 100
+    realtime_pnl_pct = (realtime_price / avg_cost - 1) * 100
     prior_high = float(pos.get("highest_price") or price)
     highest_price = max(prior_high, price)
     pos["highest_price"] = round(highest_price, 3)
@@ -3249,7 +3309,14 @@ def evaluate_sell_signal(
         pos.get("shaofu_stop_price") or pos.get("entry_stop_price") or 0
     )
     if shaofu_stop > 0 and price < shaofu_stop:
-        stop_label = "N型结构前低" if pos.get("shaofu_stop_source") == "n_structure_low" else "入场止损"
+        stop_labels = {
+            "n_structure_low": "N型结构前低",
+            "b1_low": "前置B1低点",
+            "b3_kline_low": "B3当日低点",
+            "b2_midpoint": "B2大阳线中位",
+            "super_b1_washout_low": "超级B1洗盘阴线低点",
+        }
+        stop_label = stop_labels.get(str(pos.get("shaofu_stop_source") or ""), "入场止损")
         return _sell_signal(f"收盘价破{stop_label} (收盘{price:.2f} < 止损{shaofu_stop:.2f})", "shaofu_entry_stop")
 
     chuhuo = pos.get("chuhuo_wushi") or {}
@@ -3286,12 +3353,11 @@ def evaluate_sell_signal(
 
     if max_pnl_pct > 0.8 and pnl_pct <= 0:
         return _sell_signal(f"盈转亏退出 (最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)", "profit_to_loss")
-    entry_strategy = str(pos.get("buy_strategy") or "")
     strategy_time_exit = evaluate_strategy_time_exit(
         entry_strategy=entry_strategy,
         hold_days=hold_days,
         max_pnl_pct=max_pnl_pct,
-        pnl_pct=pnl_pct,
+        pnl_pct=realtime_pnl_pct if entry_strategy == "b3_accelerate" else pnl_pct,
         time_exit_allowed=time_exit_allowed,
         b3_exit_allowed=bool(b3_exit_allowed),
         b3_exit_hhmm=B3_EXIT_HHMM,
@@ -3357,14 +3423,14 @@ def evaluate_sell_signal(
             TAKE_PROFIT_PARTIAL_RATIO,
         )
 
-    if pnl_pct >= TAKE_PROFIT_PARTIAL_PCT and pnl_pct < TAKE_PROFIT_PCT and not pos.get("partial_tp_done"):
+    if not zettaranc_position and pnl_pct >= TAKE_PROFIT_PARTIAL_PCT and pnl_pct < TAKE_PROFIT_PCT and not pos.get("partial_tp_done"):
         return _sell_signal(
             f"第一批止盈 (盈亏{pnl_pct:.1f}% ≥ {TAKE_PROFIT_PARTIAL_PCT}%，卖一半)",
             "partial_take_profit",
             TAKE_PROFIT_PARTIAL_RATIO,
         )
 
-    if pnl_pct >= TAKE_PROFIT_PCT:
+    if not zettaranc_position and pnl_pct >= TAKE_PROFIT_PCT:
         return _sell_signal(f"止盈清仓 (盈亏{pnl_pct:.1f}% ≥ {TAKE_PROFIT_PCT}%)", "take_profit")
 
     if hold_days >= MAX_HOLD_DAYS:
@@ -3377,7 +3443,7 @@ def evaluate_sell_signal(
     return None
 
 
-def _refresh_position_bbi(state: dict[str, Any]) -> None:
+def _refresh_position_bbi(state: dict[str, Any], dt: datetime | None = None) -> None:
     """Fetch daily K-lines for open positions and cache sell-rule indicators."""
     positions = state.get("positions") or {}
     if not positions:
@@ -3393,7 +3459,14 @@ def _refresh_position_bbi(state: dict[str, Any]) -> None:
             if proc.returncode != 0 or not proc.stdout.strip():
                 continue
             data = json.loads(proc.stdout)
-            closes = data.get("closes") or []
+            raw_rows = [r for r in (data.get("rows") or []) if isinstance(r, dict) and r.get("close")]
+            entry_strategy = position_entry_strategy(pos)
+            zettaranc_position = is_zettaranc_strategy(entry_strategy)
+            rows = raw_rows
+            as_of = dt or datetime.now()
+            if zettaranc_position:
+                rows = zettaranc_confirmed_rows(raw_rows, as_of)
+            closes = [float(r.get("close")) for r in rows] if rows else (data.get("closes") or [])
             if len(closes) < 24:
                 continue
             # Compute BBI from closes
@@ -3408,27 +3481,44 @@ def _refresh_position_bbi(state: dict[str, Any]) -> None:
             if bbi_val:
                 pos["bbi"] = round(bbi_val, 2)
                 pos["close"] = closes[-1]
-            rows = data.get("rows") or []
             if rows:
-                rows = [r for r in rows if isinstance(r, dict) and r.get("close")]
                 if rows:
                     pos["close"] = float(rows[-1].get("close") or pos.get("close") or 0)
+                    if zettaranc_position:
+                        pos["confirmed_close"] = pos["close"]
                     pos["last_kline_date"] = rows[-1].get("date") or ""
-                    if not pos.get("shaofu_stop_price") or pos.get("shaofu_stop_source") in {"fallback_pct", "entry_kline_low"}:
+                    desired_stop_sources = {
+                        "shaofu_b1": {"n_structure_low"},
+                        "b2_confirm": {"b1_low"},
+                        "b3_accelerate": {"b3_kline_low", "b2_midpoint"},
+                        "super_b1": {"super_b1_washout_low"},
+                    }
+                    current_source = str(pos.get("shaofu_stop_source") or "")
+                    should_refresh_z_stop = zettaranc_position and current_source not in desired_stop_sources.get(entry_strategy, set())
+                    should_refresh_legacy_stop = not zettaranc_position and (
+                        not pos.get("shaofu_stop_price") or current_source in {"fallback_pct", "entry_kline_low"}
+                    )
+                    if should_refresh_z_stop or should_refresh_legacy_stop:
                         lots = pos.get("buy_date_lots") or {}
                         open_dates = sorted(date for date, qty in lots.items() if int(qty or 0) > 0)
                         entry_date = open_dates[0] if open_dates else ""
                         entry_idx = next((idx for idx, row in enumerate(rows) if str(row.get("date") or "") == entry_date), None)
                         if entry_idx is not None:
-                            structure_low = find_n_structure_prior_low(rows, entry_idx)
+                            structure_low = (
+                                zettaranc_entry_stop(rows, entry_idx, entry_strategy)
+                                if zettaranc_position
+                                else find_n_structure_prior_low(rows, entry_idx)
+                            )
                             pos.pop("entry_kline_low", None)
                             if structure_low:
-                                pos["n_structure_low"] = structure_low["price"]
-                                pos["n_structure_low_date"] = structure_low["date"]
-                                pos["n_structure_previous_low"] = structure_low["previous_price"]
-                                pos["n_structure_previous_low_date"] = structure_low["previous_date"]
+                                if structure_low.get("source") == "n_structure_low" or not zettaranc_position:
+                                    pos["n_structure_low"] = structure_low["price"]
+                                    pos["n_structure_low_date"] = structure_low["date"]
+                                    pos["n_structure_previous_low"] = structure_low.get("previous_price")
+                                    pos["n_structure_previous_low_date"] = structure_low.get("previous_date")
                                 pos["shaofu_stop_price"] = structure_low["price"]
-                                pos["shaofu_stop_source"] = "n_structure_low"
+                                pos["shaofu_stop_source"] = str(structure_low.get("source") or "n_structure_low")
+                                pos["shaofu_stop_date"] = structure_low.get("date") or ""
                             else:
                                 pos.pop("n_structure_low", None)
                                 pos.pop("n_structure_low_date", None)
@@ -3436,6 +3526,7 @@ def _refresh_position_bbi(state: dict[str, Any]) -> None:
                                 pos.pop("n_structure_previous_low_date", None)
                                 pos.pop("shaofu_stop_price", None)
                                 pos.pop("shaofu_stop_source", None)
+                                pos.pop("shaofu_stop_date", None)
                         else:
                             pos.pop("shaofu_stop_price", None)
                             pos.pop("shaofu_stop_source", None)
@@ -3664,7 +3755,7 @@ def run_auto_exits_once(dt: datetime | None = None) -> dict[str, Any]:
     state = load_state()
     refresh_realtime_prices(state)
     refresh_position_intraday(state)
-    _refresh_position_bbi(state)
+    _refresh_position_bbi(state, dt)
     executed = check_auto_exits(state, dt)
     record_equity(state)
     save_state(state)
@@ -4094,6 +4185,20 @@ def current_trade_discipline_text(position_limit_desc: str, adaptive: dict[str, 
         # an older dashboard.env cannot reintroduce it through the model prompt.
         custom = custom.replace("、-4%硬止损", "")
         custom = re.sub(r"（止损-?4(?:\.0+)?%，仓位系数", "（仓位系数", custom)
+        enabled = enabled_strategy_ids(os.environ.get(PERSONA_STRATEGY_ENV), os.environ.get(STRATEGY_SOURCE_ENV))
+        if any(is_zettaranc_strategy(strategy_id) for strategy_id in enabled):
+            custom = custom.replace(
+                "- 仓位不按固定百分比硬卡：首次建仓、加仓、减仓比例由你结合评分、战法确定性、风险标记、盘面级别、现有仓位和盈亏状态决定；极端高确定性且风险可解释时，单票重仓甚至满仓也允许，但必须在reason写清楚为什么值得集中。",
+                "- Z哥人格仓位必须硬执行注册战法上限（单票最高10%）、总仓位≤80%、现金≥20%，高确定性也不得突破；其他人格仓位仍结合评分、风险和盘面决定。",
+            )
+            custom = custom.replace(
+                "- 注册策略仓位纪律只作为参考：无固定百分比硬限制。",
+                "- Z哥注册策略仓位上限是执行层硬限制，不是参考值。",
+            )
+            custom = custom.replace(
+                "- 系统底线风控：买入K线/前低止损、持仓超25日退出；",
+                "- 系统底线风控：Z哥按入场战法使用专属结构止损、持仓超25日退出；",
+            )
         return custom
     adaptive = adaptive or {}
     return default_trade_discipline_text(
@@ -4569,6 +4674,28 @@ def execute_actions(
             position_after_trade_value = current_position_value + requested_gross
             position_after_trade_pct = position_pct_of_equity(position_after_trade_value, total_equity)
             total_position_after_trade_pct = position_pct_of_equity(current_market_value + requested_gross, total_equity)
+            if is_zettaranc_strategy(buy_strategy):
+                single_limit_pct = strategy_position_limit_pct(buy_strategy)
+                market_total_limit_pct = float(market_strategy_ctx.get("max_total_position_pct", MAX_TOTAL_POSITION_PCT))
+                reserve_pct = max(
+                    MIN_CASH_RESERVE_PCT,
+                    float(market_strategy_ctx.get("min_cash_reserve_pct", MIN_CASH_RESERVE_PCT)),
+                )
+                total_limit_pct = min(MAX_TOTAL_POSITION_PCT, market_total_limit_pct, 100.0 - reserve_pct)
+                if position_after_trade_pct > single_limit_pct + 1e-9:
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"Z哥{buy_strategy_label(buy_strategy)}单票仓位{position_after_trade_pct:.2f}%超过{single_limit_pct:g}%硬上限",
+                    )
+                    continue
+                if total_position_after_trade_pct > total_limit_pct + 1e-9:
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"Z哥买入后总仓位{total_position_after_trade_pct:.2f}%超过{total_limit_pct:g}%硬上限（至少保留{100-total_limit_pct:g}%现金）",
+                    )
+                    continue
             qty = shares
             gross = qty * float(price)
             fees = calc_trade_fees(gross, "BUY")
@@ -4576,6 +4703,21 @@ def execute_actions(
             if total_cost > cash:
                 add_execution_block(decision, code, f"模型买入仓位{shares}股现金不足，本轮不自动缩小")
                 continue
+            if is_zettaranc_strategy(buy_strategy):
+                equity_after_fees = max(0.0, total_equity - float(fees["total_fee"]))
+                cash_after_trade = cash - total_cost
+                cash_after_trade_pct = position_pct_of_equity(cash_after_trade, equity_after_fees)
+                required_cash_pct = max(
+                    MIN_CASH_RESERVE_PCT,
+                    float(market_strategy_ctx.get("min_cash_reserve_pct", MIN_CASH_RESERVE_PCT)),
+                )
+                if cash_after_trade_pct + 1e-9 < required_cash_pct:
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"Z哥买入后现金{cash_after_trade_pct:.2f}%低于{required_cash_pct:g}%硬下限（含交易费用）",
+                    )
+                    continue
             pos = positions.setdefault(code, {"code": code, "name": name, "qty": 0, "avg_cost": 0.0, "buy_date_lots": {}, "last_price": price})
             old_cost = old_qty * float(pos.get("avg_cost") or 0)
             new_qty = old_qty + qty
@@ -5149,9 +5291,9 @@ def build_trade_rule_note() -> str:
         f"100股整数倍、T+1；模拟成交仅允许09:30-11:30、13:00-15:00，"
         f"09:15-09:25只作开盘集合竞价观察/申报参考，09:25-09:30静默期不按参考价记成交。"
         f"买入硬约束：最多{MAX_OPEN_POSITIONS}只持仓、单轮最多{MAX_NEW_BUYS_PER_DECISION}笔新仓、"
-        f"午盘前默认最多{MORNING_MAX_OPEN_POSITIONS}只；仓位不再按固定百分比硬卡，"
-        f"由模型结合盘面、评分、战法确定性、风险标记、现有仓位和现金状态决定，极端高确定性时可单票重仓甚至满仓，但必须写清楚集中理由。"
-        f"系统底线风控：N型上移结构最近前低止损、峰值回撤/ATR吊灯保护、持仓超25日退出；"
+        f"午盘前默认最多{MORNING_MAX_OPEN_POSITIONS}只；Z哥单票按战法硬限制且最高{MAX_SINGLE_POSITION_PCT:g}%，"
+        f"总仓位最高{MAX_TOTAL_POSITION_PCT:g}%并至少保留{MIN_CASH_RESERVE_PCT:g}%现金；其他人格仓位由模型结合盘面与风险决定。"
+        f"系统底线风控：峰值回撤/ATR吊灯保护、持仓超25日退出；"
         f"Z哥卖出风控：防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
         f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
         f"买入按万一免五计费。"

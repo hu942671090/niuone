@@ -275,16 +275,40 @@ def is_yin(row):
     return row["close"] < row["open"]
 
 
+def find_n_structure_prior_low(rows, end_idx=None, *, lookback=30, tolerance_pct=0.02):
+    """Return the latest rising local swing low before ``end_idx``."""
+    if not rows:
+        return None
+    end_idx = len(rows) if end_idx is None else min(len(rows), max(0, int(end_idx)))
+    if end_idx < 4:
+        return None
+    start = max(0, end_idx - max(5, int(lookback)))
+    swing_lows = []
+    for idx in range(max(1, start + 1), min(end_idx, len(rows) - 1)):
+        try:
+            low = float(rows[idx].get("low") or 0)
+            prev_low = float(rows[idx - 1].get("low") or 0)
+            next_low = float(rows[idx + 1].get("low") or 0)
+        except (TypeError, ValueError):
+            continue
+        if low > 0 and prev_low > 0 and next_low > 0 and low <= prev_low and low <= next_low:
+            swing_lows.append((idx, low))
+    for latest_pos in range(len(swing_lows) - 1, 0, -1):
+        earlier = swing_lows[latest_pos - 1]
+        latest = swing_lows[latest_pos]
+        if latest[1] >= earlier[1] * (1 - float(tolerance_pct)):
+            idx, price = latest
+            return {
+                "price": round(price, 3),
+                "date": str(rows[idx].get("date") or ""),
+                "previous_price": round(earlier[1], 3),
+                "previous_date": str(rows[earlier[0]].get("date") or ""),
+            }
+    return None
+
+
 def n_structure_ok(rows, lookback=20):
-    if len(rows) < 10:
-        return True
-    window = rows[-min(len(rows), lookback):]
-    mid = len(window) // 2
-    first = window[:mid]
-    second = window[mid:]
-    if not first or not second:
-        return True
-    return min(r["low"] for r in second) >= min(r["low"] for r in first) * 0.98
+    return find_n_structure_prior_low(rows, lookback=lookback) is not None
 
 
 def enrich_rows(rows):

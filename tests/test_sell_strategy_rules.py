@@ -501,7 +501,7 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("601999", state["positions"])
         self.assertIn("持仓已达", decision["execution_blocked_reason"])
 
-    def test_execute_actions_allows_large_position_without_percent_cap(self):
+    def test_execute_actions_blocks_zettaranc_position_over_strategy_cap(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
         try:
@@ -534,12 +534,11 @@ class SellStrategyRuleTests(unittest.TestCase):
             trader.is_a_share_execution_time = original_execution_time
             trader.execution_quote = original_quote
 
-        self.assertEqual(len(executed), 1)
-        self.assertEqual(executed[0]["shares"], 2000)
-        self.assertEqual(executed[0]["order_position_pct"], 20.0)
-        self.assertIn("600000", state["positions"])
+        self.assertEqual(executed, [])
+        self.assertNotIn("600000", state["positions"])
+        self.assertIn("单票仓位20.00%超过10%硬上限", decision["execution_blocked_reason"])
 
-    def test_execute_actions_allows_add_to_existing_position_at_open_limit(self):
+    def test_execute_actions_blocks_zettaranc_add_above_position_cap(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
         try:
@@ -588,13 +587,12 @@ class SellStrategyRuleTests(unittest.TestCase):
             trader.is_a_share_execution_time = original_execution_time
             trader.execution_quote = original_quote
 
-        self.assertEqual(len(executed), 1)
-        self.assertEqual(executed[0]["shares"], 500)
-        self.assertEqual(state["positions"]["600000"]["qty"], 1500)
-        self.assertEqual(state["positions"]["600000"]["strategy_mark_history"][-1]["source"], "BUY_ADD")
-        self.assertNotIn("盘面动态持仓已达", decision.get("execution_blocked_reason", ""))
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+        self.assertIn("单票仓位", decision["execution_blocked_reason"])
+        self.assertIn("超过10%硬上限", decision["execution_blocked_reason"])
 
-    def test_execute_actions_allows_near_full_single_position_when_cash_sufficient(self):
+    def test_execute_actions_blocks_near_full_zettaranc_position(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
         try:
@@ -627,9 +625,41 @@ class SellStrategyRuleTests(unittest.TestCase):
             trader.is_a_share_execution_time = original_execution_time
             trader.execution_quote = original_quote
 
-        self.assertEqual(len(executed), 1)
-        self.assertEqual(executed[0]["shares"], 9900)
-        self.assertEqual(executed[0]["order_position_pct"], 99.0)
+        self.assertEqual(executed, [])
+        self.assertNotIn("600000", state["positions"])
+        self.assertIn("单票仓位99.00%超过10%硬上限", decision["execution_blocked_reason"])
+
+    def test_execute_actions_blocks_zettaranc_buy_over_total_cap(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "测试股", "source": "test"}
+            state = {
+                "cash": 25000.0,
+                "positions": {
+                    "600001": {"qty": 2500, "avg_cost": 10.0, "last_price": 10.0},
+                    "600002": {"qty": 2500, "avg_cost": 10.0, "last_price": 10.0},
+                    "600003": {"qty": 2500, "avg_cost": 10.0, "last_price": 10.0},
+                },
+                "trade_log": [],
+            }
+            decision = {"actions": [{"action": "BUY", "code": "600000", "name": "测试股", "shares": 1000}]}
+            candidates = [{
+                "code": "600000", "name": "测试股", "best_strategy": "b3_accelerate",
+                "best_score": 10.0, "entry_threshold": 8.5, "distance_pct": 1.0,
+                "actionable": True, "hard_blockers": [],
+            }]
+
+            executed = trader.execute_actions(
+                state, decision, candidates, True, "连续竞价交易时段", permissive_market_context()
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(executed, [])
+        self.assertIn("总仓位85.00%超过80%硬上限", decision["execution_blocked_reason"])
 
     def test_execute_actions_blocks_non_lot_model_size_without_rounding(self):
         original_execution_time = trader.is_a_share_execution_time
@@ -1793,7 +1823,8 @@ class SellStrategyRuleTests(unittest.TestCase):
         }
 
         self.assertFalse(trader.is_b3_exit_check_time(datetime(2026, 6, 24, 9, 29)))
-        self.assertTrue(trader.is_b3_exit_check_time(datetime(2026, 6, 24, 9, 30)))
+        self.assertFalse(trader.is_b3_exit_check_time(datetime(2026, 6, 24, 9, 30)))
+        self.assertTrue(trader.is_b3_exit_check_time(datetime(2026, 6, 24, 9, 37)))
         self.assertFalse(trader.is_b3_exit_check_time(datetime(2026, 6, 24, 14, 45)))
 
         blocked = trader.evaluate_sell_signal(
@@ -1814,7 +1845,7 @@ class SellStrategyRuleTests(unittest.TestCase):
         )
         self.assertIsNotNone(opened)
         self.assertEqual(opened["signal"], "b3_next_day_no_progress")
-        self.assertIn("09:30", opened["reason"])
+        self.assertIn("09:37", opened["reason"])
         self.assertIn("开盘", opened["reason"])
 
     def test_b2_two_day_no_follow_through_exits(self):
@@ -1898,10 +1929,14 @@ class SellStrategyRuleTests(unittest.TestCase):
             }
 
         state = make_b3_state()
-        at_open = trader.check_auto_exits(state, datetime(2026, 6, 24, 9, 30))
+        before_check = trader.check_auto_exits(state, datetime(2026, 6, 24, 9, 30))
+        self.assertEqual(before_check, [])
+
+        state = make_b3_state()
+        at_open = trader.check_auto_exits(state, datetime(2026, 6, 24, 9, 37))
         self.assertEqual(len(at_open), 1)
         self.assertEqual(at_open[0]["exit_signal"], "b3_next_day_no_progress")
-        self.assertIn("09:30", at_open[0]["reason"])
+        self.assertIn("09:37", at_open[0]["reason"])
 
         state = make_b3_state()
         at_tail = trader.check_auto_exits(state, datetime(2026, 6, 24, 14, 45))
@@ -2367,6 +2402,51 @@ class SellStrategyRuleTests(unittest.TestCase):
         result = trader.find_n_structure_prior_low(rows, entry_idx=9)
 
         self.assertIsNone(result)
+
+    def test_zettaranc_entry_strategies_use_distinct_stop_anchors(self):
+        rows = [
+            {"date": "2026-06-18", "open": 10.2, "close": 10.0, "low": 9.8, "volume": 100},
+            {"date": "2026-06-19", "open": 10.0, "close": 9.8, "low": 9.5, "volume": 120},
+            {"date": "2026-06-22", "open": 9.9, "close": 10.0, "low": 9.7, "volume": 90},
+            {"date": "2026-06-23", "open": 10.0, "close": 10.6, "low": 9.9, "volume": 180},
+            {"date": "2026-06-24", "open": 10.55, "close": 10.58, "low": 10.4, "volume": 100},
+        ]
+
+        b2_stop = trader.zettaranc_entry_stop(rows, 3, "b2_confirm")
+        b3_stop = trader.zettaranc_entry_stop(rows, 4, "b3_accelerate")
+        super_b1_stop = trader.zettaranc_entry_stop(rows, 3, "super_b1")
+
+        self.assertEqual((b2_stop["source"], b2_stop["price"]), ("b1_low", 9.5))
+        self.assertEqual((b3_stop["source"], b3_stop["price"]), ("b3_kline_low", 10.4))
+        self.assertEqual((super_b1_stop["source"], super_b1_stop["price"]), ("super_b1_washout_low", 9.5))
+
+    def test_zettaranc_intraday_daily_bar_is_not_a_confirmed_close(self):
+        rows = [
+            {"date": "2026-07-10", "close": 10.2},
+            {"date": "2026-07-13", "close": 9.5},
+        ]
+
+        intraday = trader.zettaranc_confirmed_rows(rows, datetime(2026, 7, 13, 9, 37))
+        after_close = trader.zettaranc_confirmed_rows(rows, datetime(2026, 7, 13, 15, 0))
+
+        self.assertEqual([row["date"] for row in intraday], ["2026-07-10"])
+        self.assertEqual(after_close, rows)
+
+    def test_zettaranc_position_skips_fixed_percent_take_profit(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 11.3,
+            "confirmed_close": 11.3,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-23": 1000},
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000", pos, "2026-06-24", time_exit_allowed=False, b3_exit_allowed=False
+        )
+
+        self.assertIsNone(signal)
 
     def test_sell_score_three_reduces_half_once(self):
         pos = {

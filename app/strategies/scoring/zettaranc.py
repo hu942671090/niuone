@@ -134,16 +134,16 @@ def score_shaofu_b1(rows) -> dict[str, Any] | None:
 
 
 def score_b2_confirm(rows) -> dict[str, Any] | None:
-    """Z哥B2确认：B1后3-5日内放量中/大阳，J未过热，趋势确认。"""
+    """Z哥B2确认：B1后3日内放量中/大阳，J未过热，趋势确认。"""
     if len(rows) < 35:
         return None
     recent = rows[-1]
     prev = rows[-2]
-    b1_idxs = recent_b1_indices(rows, lookback=5, end_offset=1)
+    b1_idxs = recent_b1_indices(rows, lookback=3, end_offset=1)
     if not b1_idxs:
         return None
     days_from_b1 = len(rows) - 1 - b1_idxs[-1]
-    if days_from_b1 < 1 or days_from_b1 > 5:
+    if days_from_b1 < 1 or days_from_b1 > 3:
         return None
 
     change_pct = recent.get("change_pct") or pct_change(recent, prev) or 0
@@ -168,8 +168,6 @@ def score_b2_confirm(rows) -> dict[str, Any] | None:
     score = 4
     if 1 <= days_from_b1 <= 3:
         score += 1.5
-    elif days_from_b1 <= 5:
-        score += 0.5
     if vol_expand:
         score += 1.5
         if vol_ratio <= 3:
@@ -201,8 +199,6 @@ def score_b2_confirm(rows) -> dict[str, Any] | None:
         risk_flags.append("上影偏长")
     if not above_bbi:
         risk_flags.append("未站上BBI")
-    if days_from_b1 > 3:
-        risk_flags.append("B2确认偏滞后")
     if dist_bbi > 6.5:
         risk_flags.append("距BBI偏远")
 
