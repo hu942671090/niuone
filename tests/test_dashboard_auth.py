@@ -152,7 +152,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard_js.do_GET()
         admin_js = FakeHandler(path='/static/admin.js')
         admin_js.do_GET()
-        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=21')
+        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=22')
         versioned_dashboard_js.do_GET()
 
         self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
@@ -161,7 +161,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=11">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=21" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=22" defer></script>', DASHBOARD_FRONTEND)
         self.assertNotIn('document.title', DASHBOARD_FRONTEND)
         self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
         self.assertIn('max-age=31536000', dashboard_js.header('Cache-Control'))
@@ -1408,7 +1408,7 @@ console.log(JSON.stringify(result));
         self.assertNotIn("actionFetch('/api/b1_screen/trigger')", DASHBOARD_FRONTEND)
         self.assertIn("actionFetch('/api/niuniu_practice/manual-cycle')", DASHBOARD_FRONTEND)
         self.assertIn("fetch('/api/niuniu_practice/manual-cycle', {cache:'no-store'})", DASHBOARD_FRONTEND)
-        self.assertIn('手动执行选股及买卖策略', DASHBOARD_FRONTEND)
+        self.assertIn('手动触发选股及买卖策略', DASHBOARD_FRONTEND)
         self.assertIn('盘面评价 · ${esc(marketContext.tone_label', DASHBOARD_FRONTEND)
         self.assertIn("disabled aria-busy=\"true\"", DASHBOARD_FRONTEND)
 

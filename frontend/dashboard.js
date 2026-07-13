@@ -2526,7 +2526,7 @@ function renderPracticePanel() {
   const ruleMeta = [`模型：${esc(decisionModel || missingModelLabel)}`, quoteNote].filter(Boolean).join('｜');
   const manualCycle = practiceManualCycleData || {};
   const manualRunning = !!manualCycle.running;
-  const manualButtonText = manualRunning ? (manualCycle.stage_label || '本轮执行中…') : '手动执行选股及买卖策略';
+  const manualButtonText = manualRunning ? (manualCycle.stage_label || '本轮执行中…') : '手动触发选股及买卖策略';
   const marketContext = p.market_decision_context || {};
   const marketGuidance = Array.isArray(marketContext.guidance_lines) ? marketContext.guidance_lines.slice(0, 2) : [];
   const marketEvaluation = marketContext.available || marketContext.tone_label
