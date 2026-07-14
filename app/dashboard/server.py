@@ -86,6 +86,19 @@ FRONTEND_ASSETS = {
     "/static/admin.css": ("admin.css", "text/css; charset=utf-8"),
     "/static/admin.js": ("admin.js", "application/javascript; charset=utf-8"),
 }
+VERSION_PATTERN = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+CURRENT_VERSION = str(os.environ.get("NIUONE_VERSION") or "dev").strip() or "dev"
+DOCKER_HUB_REPOSITORY = "kunkundi/niuone"
+DOCKER_HUB_REPOSITORY_URL = f"https://hub.docker.com/r/{DOCKER_HUB_REPOSITORY}"
+DOCKER_HUB_TAGS_API = (
+    "https://hub.docker.com/v2/namespaces/kunkundi/repositories/niuone/tags"
+)
+VERSION_CHECK_TTL_SECONDS = 15 * 60
+VERSION_CHECK_FAILURE_TTL_SECONDS = 5 * 60
+VERSION_CHECK_MAX_PAGES = 20
+VERSION_CHECK_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+VERSION_CHECK_CACHE: dict[str, Any] = {"ts": 0.0, "ttl": 0, "payload": None}
+VERSION_CHECK_LOCK = threading.Lock()
 DASHBOARD_PAGE_PATHS = frozenset({
     "/",
     "/practice",
@@ -3305,6 +3318,86 @@ def send_notification_test(
 
 # Frontend documents and UI behavior live in frontend/.
 
+def release_version_tuple(value: str) -> tuple[int, int, int] | None:
+    match = VERSION_PATTERN.fullmatch(str(value or "").strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def fetch_latest_docker_version() -> str:
+    versions: list[tuple[tuple[int, int, int], str]] = []
+    page_count = 1
+    for page in range(1, VERSION_CHECK_MAX_PAGES + 1):
+        url = f"{DOCKER_HUB_TAGS_API}?page={page}&page_size=100"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": f"NiuOne/{CURRENT_VERSION}",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=6) as response:
+            body = response.read(VERSION_CHECK_MAX_RESPONSE_BYTES + 1)
+        if len(body) > VERSION_CHECK_MAX_RESPONSE_BYTES:
+            raise ValueError("Docker Hub response is too large")
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("Docker Hub returned an invalid tag list")
+        for item in payload["results"]:
+            name = str(item.get("name") or "") if isinstance(item, dict) else ""
+            parsed = release_version_tuple(name)
+            if parsed is not None:
+                versions.append((parsed, name))
+        if page == 1:
+            try:
+                total = max(0, int(payload.get("count") or 0))
+            except (TypeError, ValueError):
+                total = len(payload["results"])
+            page_count = max(1, min(VERSION_CHECK_MAX_PAGES, (total + 99) // 100))
+        if page >= page_count:
+            break
+    if not versions:
+        raise ValueError("Docker Hub has no strict release tags")
+    return max(versions, key=lambda item: item[0])[1]
+
+
+def build_version_status() -> dict[str, Any]:
+    checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result: dict[str, Any] = {
+        "current_version": CURRENT_VERSION,
+        "latest_version": None,
+        "update_available": None,
+        "check_ok": False,
+        "checked_at": checked_at,
+        "repository": DOCKER_HUB_REPOSITORY,
+        "repository_url": DOCKER_HUB_REPOSITORY_URL,
+    }
+    try:
+        latest_version = fetch_latest_docker_version()
+        current = release_version_tuple(CURRENT_VERSION)
+        latest = release_version_tuple(latest_version)
+        result["latest_version"] = latest_version
+        result["update_available"] = current < latest if current is not None and latest is not None else None
+        result["check_ok"] = True
+    except Exception as exc:
+        print(f"Docker Hub 版本检查失败：{type(exc).__name__}", file=sys.stderr)
+    return result
+
+
+def get_version_status() -> dict[str, Any]:
+    now = time.time()
+    with VERSION_CHECK_LOCK:
+        cached = VERSION_CHECK_CACHE.get("payload")
+        cached_at = float(VERSION_CHECK_CACHE.get("ts") or 0)
+        cached_ttl = int(VERSION_CHECK_CACHE.get("ttl") or 0)
+        if isinstance(cached, dict) and now - cached_at < cached_ttl:
+            return dict(cached)
+        payload = build_version_status()
+        ttl = VERSION_CHECK_TTL_SECONDS if payload["check_ok"] else VERSION_CHECK_FAILURE_TTL_SECONDS
+        VERSION_CHECK_CACHE.update({"ts": now, "ttl": ttl, "payload": payload})
+        return dict(payload)
+
 def admin_setting_group_env_names(group_slug: str) -> set[str]:
     group = ADMIN_SETTING_GROUP_BY_SLUG.get(str(group_slug or ""))
     if not group:
@@ -3663,6 +3756,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/"):
             if not self.enforce_rate_limit("api", self.client_ip(), RATE_LIMIT_API):
                 return
+        if parsed.path == "/api/version":
+            self.send_json_uncached(get_version_status())
+            return
         if parsed.path == "/api/dashboard/bootstrap":
             visitor_id, new_visitor = self.request_visitor_id()
             visit_stats = increment_visit_count(visitor_id)

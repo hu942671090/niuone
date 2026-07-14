@@ -153,7 +153,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard_js.do_GET()
         admin_js = FakeHandler(path='/static/admin.js')
         admin_js.do_GET()
-        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=22')
+        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=23')
         versioned_dashboard_js.do_GET()
 
         self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
@@ -161,8 +161,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
-        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=11">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=22" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=12">', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=23" defer></script>', DASHBOARD_FRONTEND)
         self.assertNotIn('document.title', DASHBOARD_FRONTEND)
         self.assertIn("document.title = '牛牛1号';", ADMIN_FRONTEND)
         self.assertNotIn("title + ' · 牛牛1号'", ADMIN_FRONTEND)
@@ -258,6 +258,67 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(payload['unique'], 1)
         self.assertIn('us_features_enabled', payload)
         self.assertTrue((bootstrap.header('Set-Cookie') or '').startswith(f'{dashboard.VISITOR_COOKIE_NAME}=nvst_'))
+
+    def test_version_status_api_is_public_and_not_browser_cached(self):
+        original = dashboard.get_version_status
+        dashboard.get_version_status = lambda: {
+            'current_version': 'v1.2.3',
+            'latest_version': 'v1.2.4',
+            'update_available': True,
+            'check_ok': True,
+        }
+        try:
+            handler = FakeHandler(path='/api/version')
+            handler.do_GET()
+        finally:
+            dashboard.get_version_status = original
+
+        payload = json.loads(handler.wfile.getvalue().decode('utf-8'))
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.header('Cache-Control'), 'no-store')
+        self.assertTrue(payload['update_available'])
+
+    def test_docker_version_check_uses_highest_strict_semver_tag(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit=-1):
+                return json.dumps({
+                    'count': 7,
+                    'results': [
+                        {'name': 'latest'},
+                        {'name': '1.9.0'},
+                        {'name': 'v1.9.0'},
+                        {'name': 'v1.10.0'},
+                        {'name': 'v2.0.0-rc.1'},
+                        {'name': 'v01.0.0'},
+                        {'name': 'v2.0.0'},
+                    ],
+                }).encode('utf-8')
+
+        original = dashboard.urllib.request.urlopen
+        requests = []
+        dashboard.urllib.request.urlopen = lambda request, timeout=0: requests.append((request, timeout)) or Response()
+        try:
+            latest = dashboard.fetch_latest_docker_version()
+        finally:
+            dashboard.urllib.request.urlopen = original
+
+        self.assertEqual(latest, 'v2.0.0')
+        self.assertEqual(dashboard.release_version_tuple('v10.2.3'), (10, 2, 3))
+        self.assertIsNone(dashboard.release_version_tuple('v1.2.3-rc.1'))
+        self.assertIn('/v2/namespaces/kunkundi/repositories/niuone/tags', requests[0][0].full_url)
+        self.assertEqual(requests[0][1], 6)
+
+    def test_dashboard_starts_version_check_on_every_page_load(self):
+        self.assertIn('id="versionStatus"', DASHBOARD_FRONTEND)
+        self.assertIn("fetch('/api/version'", DASHBOARD_FRONTEND)
+        self.assertIn('loadVersionStatus();', DASHBOARD_FRONTEND)
+        self.assertIn("status.dataset.state = 'update';", DASHBOARD_FRONTEND)
 
     def test_visit_stats_reinitializes_database_replaced_at_same_path(self):
         replacement = dashboard.STATS_DB.with_name('replacement_stats.db')

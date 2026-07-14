@@ -105,11 +105,14 @@ kunkundi/niuone:latest
 
 ## 7. 构建内容
 
-GitHub Actions 使用仓库根目录作为构建上下文，并使用根目录的 `Dockerfile`。当前没有传入额外 build args，因此使用 `Dockerfile` 中的默认值：
+GitHub Actions 使用仓库根目录作为构建上下文，并使用根目录的 `Dockerfile`。Python 基础镜像使用默认版本，同时把发布 Tag 注入镜像作为页面显示的当前版本：
 
 ```text
 PYTHON_VERSION=3.11
+NIUONE_VERSION=v1.2.3
 ```
+
+看板每次打开都会请求本机的 `/api/version`；服务端定期查询 Docker Hub 的严格 SemVer 标签，并在页面顶部显示当前版本和可用更新。Docker Hub 暂时不可用不会影响其他看板功能。
 
 `.dockerignore` 默认排除整个仓库，只允许构建所需的以下内容进入上下文：
 

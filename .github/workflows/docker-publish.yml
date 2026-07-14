@@ -120,6 +120,8 @@ jobs:
           pull: true
           load: true
           tags: niuone:smoke
+          build-args: |
+            NIUONE_VERSION=${{ github.ref_name }}
           cache-from: type=gha,scope=niuone-release
 
       - name: Smoke test container
@@ -156,6 +158,8 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            NIUONE_VERSION=${{ github.ref_name }}
           cache-from: type=gha,scope=niuone-release
           cache-to: type=gha,scope=niuone-release,mode=max
           provenance: mode=max

@@ -3,13 +3,17 @@
 ARG PYTHON_VERSION=3.11
 FROM python:${PYTHON_VERSION}-slim-bookworm
 
+ARG NIUONE_VERSION=dev
+
 LABEL org.opencontainers.image.title="NiuOne" \
       org.opencontainers.image.description="Local-first market research dashboard and automation workspace" \
+      org.opencontainers.image.version="${NIUONE_VERSION}" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Shanghai \
+    NIUONE_VERSION=${NIUONE_VERSION} \
     NIUONE_CONTAINER_DATA_DIR=/data \
     NIUONE_CONTAINER_HOST=0.0.0.0 \
     NIUONE_CONTAINER_PORT=8787

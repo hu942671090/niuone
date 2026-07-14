@@ -21,6 +21,8 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn("COPY frontend/ ./frontend/", dockerfile)
         self.assertIn("!frontend/", dockerignore)
         self.assertIn("!frontend/**", dockerignore)
+        self.assertIn("ARG NIUONE_VERSION=dev", dockerfile)
+        self.assertIn("NIUONE_VERSION=${NIUONE_VERSION}", dockerfile)
 
     def test_compose_runs_all_long_lived_processes_with_shared_storage(self):
         config = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
@@ -124,6 +126,7 @@ print(json.dumps(result))
         self.assertIn('DOCKERHUB_USERNAME" != "kunkundi', text)
         self.assertIn("linux/amd64,linux/arm64", text)
         self.assertIn("docker.io/${{ vars.DOCKERHUB_USERNAME }}/niuone", text)
+        self.assertEqual(text.count("NIUONE_VERSION=${{ github.ref_name }}"), 2)
 
 
 if __name__ == "__main__":

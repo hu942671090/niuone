@@ -105,11 +105,14 @@ As a result, publishing again or rerunning a lower version cannot roll `latest` 
 
 ## 7. Build Contents
 
-GitHub Actions uses the repository root as the build context and the root-level `Dockerfile`. No additional build arguments are currently passed, so the default value in the `Dockerfile` is used:
+GitHub Actions uses the repository root as the build context and the root-level `Dockerfile`. The Python base image keeps its default version, while the release tag is injected into the image for the dashboard's current-version display:
 
 ```text
 PYTHON_VERSION=3.11
+NIUONE_VERSION=v1.2.3
 ```
+
+Every dashboard page load requests the local `/api/version` endpoint. The server periodically checks strict SemVer tags on Docker Hub and shows the current version and any available update in the header. A temporary Docker Hub failure does not affect other dashboard features.
 
 By default, `.dockerignore` excludes the entire repository and allows only the following files required for the build into the context:
 

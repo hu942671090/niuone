@@ -4227,6 +4227,47 @@ document.addEventListener('keydown', event => {
     zoomXImageViewer(-0.25);
   }
 });
+async function loadVersionStatus() {
+  const status = $('versionStatus');
+  const value = $('versionValue');
+  if (!status || !value) return;
+  try {
+    const response = await fetch('/api/version', {
+      credentials: 'same-origin',
+      cache: 'no-store'
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const current = String(payload.current_version || 'dev');
+    const latest = payload.latest_version ? String(payload.latest_version) : '';
+    const currentLabel = current === 'dev' ? '开发版' : current;
+    if (payload.check_ok !== true) {
+      value.textContent = currentLabel;
+      status.dataset.state = 'error';
+      status.title = `当前版本 ${currentLabel}；Docker Hub 最新版本检查失败`;
+    } else if (payload.update_available === true && latest) {
+      value.textContent = `${currentLabel} → ${latest}`;
+      status.dataset.state = 'update';
+      status.title = `发现新版本 ${latest}，点击查看 Docker Hub`;
+    } else if (payload.update_available === false) {
+      value.textContent = currentLabel;
+      status.dataset.state = 'current';
+      status.title = `当前版本 ${currentLabel}，已是最新版本`;
+    } else {
+      value.textContent = latest ? `${currentLabel} · 最新 ${latest}` : currentLabel;
+      status.dataset.state = 'checking';
+      status.title = latest
+        ? `当前为${currentLabel}，Docker Hub 最新版本为 ${latest}`
+        : `当前版本 ${currentLabel}`;
+    }
+    status.setAttribute('aria-label', status.title);
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.title = '版本信息加载失败，点击查看 Docker Hub';
+    status.setAttribute('aria-label', status.title);
+    console.error('Version check failed', error);
+  }
+}
 async function loadDashboardBootstrap() {
   try {
     const response = await fetch('/api/dashboard/bootstrap', {
@@ -4243,6 +4284,7 @@ async function loadDashboardBootstrap() {
 
 async function startDashboard() {
   restoreViewState();
+  loadVersionStatus();
   const categoryBeforeBootstrap = activeCategory;
   const needsFeatureCheck = US_FEATURE_CATEGORIES.has(categoryBeforeBootstrap);
   const bootstrapPromise = loadDashboardBootstrap();
