@@ -4236,10 +4236,6 @@ async function loadDashboardBootstrap() {
     if (!response.ok) return;
     const payload = await response.json();
     US_FEATURES_ENABLED = payload.us_features_enabled === true;
-    const visitCount = document.getElementById('visitCount');
-    const uniqueVisitCount = document.getElementById('uniqueVisitCount');
-    if (visitCount) visitCount.textContent = Number(payload.visits || 0).toLocaleString('zh-CN');
-    if (uniqueVisitCount) uniqueVisitCount.textContent = Number(payload.unique || 0).toLocaleString('zh-CN');
   } catch (error) {
     console.error('Dashboard bootstrap failed', error);
   }
