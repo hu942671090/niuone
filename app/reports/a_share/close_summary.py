@@ -722,17 +722,17 @@ def build_report(*, require_complete_spot: bool = False) -> str:
     rows = extract_market(spot) if spot is not None else []
     # fetch_spot validates each successful source.  Do not let an error message
     # from an earlier provider invalidate a complete later-provider snapshot.
-    completeness_issue = spot_snapshot_issue(rows, spot_err if not rows else None)
-    if require_complete_spot and completeness_issue:
-        raise SpotSnapshotUnavailable(completeness_issue)
+    spot_issue = spot_snapshot_issue(rows, spot_err)
+    if require_complete_spot and spot_issue:
+        raise SpotSnapshotUnavailable(spot_issue)
 
     fund_df, fund_err = fetch_industry_fund_flow()
     zt_df, dt_df, limit_pool_err = fetch_limit_pools()
     funds = extract_funds(fund_df)
-    if not rows and not spot_err:
-        spot_err = "现货行情返回数据缺少有效A股样本"
-    elif 0 < len(rows) < 1000 and not spot_err:
-        spot_err = f"有效A股样本仅 {len(rows)} 只，可能不是全市场快照"
+    if not rows and not spot_issue:
+        spot_issue = "现货行情返回数据缺少有效A股样本"
+    elif 0 < len(rows) < 1000 and not spot_issue:
+        spot_issue = f"有效A股样本仅 {len(rows)} 只，可能不是全市场快照"
     if fund_df is not None and not fund_err:
         if not funds:
             fund_err = "行业资金流返回数据缺少有效行业/资金字段"
@@ -741,12 +741,20 @@ def build_report(*, require_complete_spot: bool = False) -> str:
             funds = []
 
     issues = []
-    if spot_err:
-        issues.append(f"现货行情：{spot_err}")
+    if spot_issue:
+        issues.append(f"现货行情不完整：{spot_issue}" if rows else "现货行情缺失或不完整")
     if fund_err:
-        issues.append(fund_err if str(fund_err).startswith("行业资金流") else f"行业资金流：{fund_err}")
+        fund_issue = "行业资金流缺失或不完整"
+        if any(marker in str(fund_err) for marker in ("返回空", "缺少有效", "净额全为0", "按配置跳过")):
+            fund_issue += f"：{fund_err}"
+        issues.append(fund_issue)
     if limit_pool_err:
-        issues.append(limit_pool_err)
+        missing_pools = []
+        if zt_df is None:
+            missing_pools.append("封死涨停池")
+        if dt_df is None:
+            missing_pools.append("封死跌停池")
+        issues.append(("、".join(missing_pools) or "涨跌停池") + "缺失或不完整")
 
     up = sum(1 for r in rows if r["pct"] > 0)
     down = sum(1 for r in rows if r["pct"] < 0)

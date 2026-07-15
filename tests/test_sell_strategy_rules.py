@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import os
 import json
+import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from datetime import datetime
@@ -1603,6 +1605,127 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("002654", saved["positions"])
         self.assertEqual({row["code"] for row in saved["trade_log"]}, {"002654", "600001"})
         self.assertTrue(any(row["action"] == "SELL" for row in saved["trade_log"]))
+
+    def test_save_state_preserves_newer_decision_error_during_stale_refresh(self):
+        original_state_file = trader.STATE_FILE
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                failure_error = "ValueError: 模型回复JSON解析失败"
+                failure = {
+                    "time": "2026-07-15 11:34:03",
+                    "b1_generated_at": "2026-07-15 11:31:29",
+                    "trade_allowed": False,
+                    "trade_reason": "午间休市",
+                    "decision": {
+                        "summary": "模型决策失败，本轮不交易",
+                        "actions": [],
+                        "model": "deepseek-v4-pro",
+                        "error": failure_error,
+                    },
+                    "executed": [],
+                }
+                trader.STATE_FILE.write_text(json.dumps({
+                    "initial_cash": 100000.0,
+                    "cash": 100000.0,
+                    "positions": {},
+                    "trade_log": [],
+                    "decision_log": [failure],
+                    "equity_history": [],
+                    "last_decision_at": failure["time"],
+                    "last_error": failure_error,
+                }, ensure_ascii=False))
+
+                stale_refresh = {
+                    "initial_cash": 100000.0,
+                    "cash": 100000.0,
+                    "positions": {},
+                    "trade_log": [],
+                    "decision_log": [],
+                    "equity_history": [],
+                    "last_decision_at": "2026-07-15 11:31:54",
+                    "last_error": "",
+                }
+                trader.save_state(stale_refresh)
+                saved = trader.load_state()
+            finally:
+                trader.STATE_FILE = original_state_file
+
+        self.assertEqual(saved["last_decision_at"], "2026-07-15 11:34:03")
+        self.assertEqual(saved["last_error"], failure_error)
+        self.assertTrue(any(row.get("time") == failure["time"] for row in saved["decision_log"]))
+
+    def test_state_file_write_lock_blocks_another_process(self):
+        original_state_file = trader.STATE_FILE
+        with tempfile.TemporaryDirectory() as td:
+            state_file = Path(td) / "portfolio.json"
+            ready_file = Path(td) / "child-ready"
+            acquired_file = Path(td) / "child-acquired"
+            env = os.environ.copy()
+            env["DASHBOARD_HOME"] = td
+            env["DASHBOARD_PORTFOLIO_STATE"] = str(state_file)
+            env["PYTHONPATH"] = os.pathsep.join([str(SRC), str(COMPAT), env.get("PYTHONPATH", "")])
+            child_code = (
+                "from pathlib import Path\n"
+                "import niuniu_practice_trader as trader\n"
+                f"Path({str(ready_file)!r}).write_text('ready')\n"
+                "with trader.state_file_write_lock():\n"
+                f"    Path({str(acquired_file)!r}).write_text('acquired')\n"
+            )
+            proc = None
+            try:
+                trader.STATE_FILE = state_file
+                with trader.state_file_write_lock():
+                    proc = subprocess.Popen(
+                        [sys.executable, "-c", child_code],
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    for _ in range(250):
+                        if ready_file.exists():
+                            break
+                        if proc.poll() is not None:
+                            break
+                        time.sleep(0.02)
+                    self.assertTrue(ready_file.exists())
+                    time.sleep(0.1)
+                    self.assertFalse(acquired_file.exists())
+                stdout, stderr = proc.communicate(timeout=10)
+                self.assertEqual(proc.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
+                self.assertTrue(acquired_file.exists())
+            finally:
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+                trader.STATE_FILE = original_state_file
+
+    def test_request_chat_json_object_retries_truncated_response_with_more_tokens(self):
+        original_request = trader.request_chat_content
+        payloads = []
+        responses = iter([
+            '{"summary":"截断", "actions":[{"action":"HOLD"',
+            '{"summary":"重试成功","actions":[]}',
+        ])
+        try:
+            def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+                payloads.append(dict(payload))
+                return next(responses)
+
+            trader.request_chat_content = fake_request
+            result = trader.request_chat_json_object(
+                "https://decision.example/v1",
+                "key",
+                {"model": "deepseek-v4-pro", "messages": [], "max_tokens": 4096},
+                "deepseek-v4-pro",
+                timeout=180,
+            )
+        finally:
+            trader.request_chat_content = original_request
+
+        self.assertEqual(result["summary"], "重试成功")
+        self.assertEqual([payload["max_tokens"] for payload in payloads], [4096, 8192])
 
     def test_strategy_performance_splits_entry_and_exit_dimensions(self):
         state = {

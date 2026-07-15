@@ -24,6 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any
@@ -621,6 +622,40 @@ def load_state() -> dict[str, Any]:
     return base
 
 
+_STATE_FILE_THREAD_LOCK = threading.RLock()
+
+
+@contextmanager
+def state_file_write_lock():
+    """Serialize portfolio state read/merge/write cycles across threads and processes."""
+    lock_file = STATE_FILE.with_name(f"{STATE_FILE.name}.lock")
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with _STATE_FILE_THREAD_LOCK:
+        with lock_file.open("a+b") as handle:
+            if os.name == "nt":  # pragma: no cover - exercised on Windows deployments
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def reconcile_positions_with_trade_log(state: dict[str, Any]) -> list[str]:
     """Prevent a stale snapshot from resurrecting positions already sold.
 
@@ -688,14 +723,14 @@ def reconcile_positions_with_trade_log(state: dict[str, Any]) -> list[str]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    state["updated_at"] = now_ts()
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with state_file_write_lock():
+        state["updated_at"] = now_ts()
 
-    # Merge append-only logs with the on-disk copy before replacing the file.
-    # Dashboard refreshes can load an older state, spend time refreshing quotes,
-    # then save after the background B1 decision process has appended a new log.
-    # Without this merge, the later dashboard save can erase that decision entry.
-    try:
+        # Merge append-only logs with the on-disk copy before replacing the file.
+        # The lock must cover the complete read/merge/replace transaction. Atomic
+        # replace alone prevents partial JSON, but it does not prevent a slower
+        # writer that loaded stale state from replacing a newer decision record.
         if STATE_FILE.exists():
             current = json.loads(STATE_FILE.read_text())
 
@@ -744,21 +779,28 @@ def save_state(state: dict[str, Any]) -> None:
             # after merging so a completed SELL cannot be resurrected.
             reconcile_positions_with_trade_log(state)
 
-            # Preserve newest B1/decision markers if an older dashboard snapshot is saving late.
-            for key in ("last_b1_generated_at", "last_decision_at"):
-                if str(current.get(key) or "") > str(state.get(key) or ""):
-                    state[key] = current.get(key)
-    except Exception:
-        pass
+            # Preserve the newest decision marker and its error as one logical
+            # value. A stale quote refresh must not clear an error written by a
+            # newer decision; a later successful decision may clear it.
+            state_decision_at = str(state.get("last_decision_at") or "")
+            current_decision_at = str(current.get("last_decision_at") or "")
+            if current_decision_at > state_decision_at:
+                state["last_decision_at"] = current.get("last_decision_at")
+                state["last_error"] = current.get("last_error") or ""
+            elif current_decision_at == state_decision_at:
+                state["last_error"] = state.get("last_error") or current.get("last_error") or ""
 
-    prune_non_trading_day_equity_points(state)
-    prune_future_intraday_equity_points(state)
-    normalize_daily_equity_history(state)
-    sort_equity_history(state)
+            if str(current.get("last_b1_generated_at") or "") > str(state.get("last_b1_generated_at") or ""):
+                state["last_b1_generated_at"] = current.get("last_b1_generated_at")
 
-    tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
-    tmp.replace(STATE_FILE)
+        prune_non_trading_day_equity_points(state)
+        prune_future_intraday_equity_points(state)
+        normalize_daily_equity_history(state)
+        sort_equity_history(state)
+
+        tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+        tmp.replace(STATE_FILE)
 
 
 def normalize_code(code: str) -> str:
@@ -4099,6 +4141,42 @@ def request_chat_content(base_url: str, api_key: str, payload: dict, model_name:
     raise last_err or RuntimeError(f"model={model_name} request failed")
 
 
+def request_chat_json_object(
+    base_url: str,
+    api_key: str,
+    payload: dict,
+    model_name: str,
+    *,
+    max_parse_attempts: int = 3,
+    timeout: int = 60,
+) -> dict[str, Any]:
+    """Request a JSON object, retrying truncated/malformed non-empty responses."""
+    request_payload = dict(payload)
+    last_error: Exception | None = None
+    for attempt in range(max(1, max_parse_attempts)):
+        content = request_chat_content(
+            base_url,
+            api_key,
+            request_payload,
+            model_name,
+            max_retries=3,
+            timeout=timeout,
+        )
+        try:
+            result = extract_json(content)
+            if not isinstance(result, dict):
+                raise ValueError("model did not return object")
+            return result
+        except ValueError as exc:
+            last_error = exc
+            if attempt >= max_parse_attempts - 1:
+                break
+            current_max = int(request_payload.get("max_tokens") or 0)
+            if current_max > 0:
+                request_payload["max_tokens"] = min(12000, max(current_max + 2000, current_max * 2))
+    raise last_error or RuntimeError(f"model={model_name} did not return a JSON object")
+
+
 def api_call_with_retry(base_url: str, api_key: str, payload: dict, max_retries: int = 3, timeout: int = 60) -> dict:
     """带重试的 API 调用。空响应/JSON解析失败时自动重试。"""
     import time as _time
@@ -4545,11 +4623,14 @@ def call_model_decision(
         "max_tokens": DECISION_MAX_TOKENS,
     }
 
-    content = request_chat_content(base_url, api_key, payload, MODEL, max_retries=3, timeout=DECISION_REQUEST_TIMEOUT)
-
-    result = extract_json(content)
-    if not isinstance(result, dict):
-        raise RuntimeError("model did not return object")
+    result = request_chat_json_object(
+        base_url,
+        api_key,
+        payload,
+        MODEL,
+        max_parse_attempts=3,
+        timeout=DECISION_REQUEST_TIMEOUT,
+    )
     result["model"] = MODEL
     result["provider"] = PROVIDER_DISPLAY_NAME
     result["market_guidance"] = compact_market_strategy_context(market_strategy_ctx)
