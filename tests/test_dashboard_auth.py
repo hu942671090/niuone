@@ -682,17 +682,20 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual([marker['is_full_exit'] for marker in sells], [False, True, False, True])
         self.assertEqual([marker['time'] for marker in markers], sorted(marker['time'] for marker in markers))
 
-    def test_b1_payload_preserves_market_snapshot(self):
+    def test_b1_payload_preserves_market_and_sector_tide_snapshots(self):
         snapshot = {'source': 'b1_mainboard_quotes', 'sample_count': 3000, 'up': 2000, 'down': 900}
+        tide_context = {'market': {'state': 'rotation'}, 'sectors': {'半导体': {'score': 72}}}
 
         payload = dashboard.normalize_b1_payload_for_trader({
             'generated_at': '2026-07-10 10:00:05',
             'items': [],
             'market_snapshot': snapshot,
+            'sector_tide_context': tide_context,
             'schedule_slot': '2026-07-10 10:00',
         })
 
         self.assertEqual(payload['market_snapshot'], snapshot)
+        self.assertEqual(payload['sector_tide_context'], tide_context)
         self.assertEqual(payload['schedule_slot'], '2026-07-10 10:00')
 
     def test_no_candidate_b1_still_refreshes_and_logs_market_context(self):

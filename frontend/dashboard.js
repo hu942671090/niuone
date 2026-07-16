@@ -2421,6 +2421,7 @@ function renderPracticePanel() {
     shaofu_b1: '少妇B1', b2_confirm: 'B2确认',
     b3_accelerate: 'B3中继', super_b1: '超级B1',
     li_daxiao_bottom: '李大霄',
+    tide_leader: '主线领航', tide_rotation: '轮动初升', tide_recovery: '冰点修复',
     mixed: '混合买入', unknown_buy: '未识别买入',
     auto_exit: '系统退出', unknown: '其他'
   };
@@ -2428,6 +2429,7 @@ function renderPracticePanel() {
     stop_loss: '止损', take_profit: '主动止盈', profit_protection: '回撤保护',
     top_escape: '逃顶/出货', technical_break: '技术破位', sell_score: '卖出评分',
     no_progress: '信号未兑现', position_adjust: '仓位调整', model_sell: '模型卖出',
+    sector_retreat: '板块退潮', market_risk: '市场风险',
     other_exit: '其他卖出'
   };
   const dynamicStrategyMeta = (practiceCandidatesData && practiceCandidatesData.strategy_meta) || {};
@@ -2984,6 +2986,9 @@ function renderPracticePage() {
       b2_confirm:     {label:'B2确认',    color:'#22c55e'},
       b3_accelerate:  {label:'B3中继',    color:'#a78bfa'},
       super_b1:       {label:'超级B1',    color:'#fb7185'},
+      tide_leader:    {label:'主线领航',  color:'#06b6d4'},
+      tide_rotation:  {label:'轮动初升',  color:'#14b8a6'},
+      tide_recovery:  {label:'冰点修复',  color:'#22d3ee'},
     };
     const STRATEGY_META = {...fallbackStrategyMeta, ...(d.strategy_meta || {})};
     const STOCK_BOARD_LABELS = {
@@ -3028,6 +3033,8 @@ function renderPracticePage() {
       const hardBlockers = item.hard_blockers || [];
       const hardBlockerFlags = hardBlockers.map(f => `<span style="color:#fbbf24;font-size:11px;margin-left:6px">硬过滤:${esc(f)}</span>`).join('');
       const stratName = item.best_strategy || '';
+      const isSectorTide = ['tide_leader', 'tide_rotation', 'tide_recovery'].includes(stratName);
+      const tideStatusNames = {leading:'领先', improving:'改善', weakening:'转弱', lagging:'落后'};
       const sm = STRATEGY_META[stratName] || {label:stratName||'综合', color:'#94a3b8'};
       let groupBadge = '';
       const finalScore = item.best_score || item.score || 0;
@@ -3062,8 +3069,8 @@ function renderPracticePage() {
             <div style="color:#eef2ff;font-size:14px;font-weight:600">${item.best_score||item.score}/${item.score_total||10} · 基准≥${entryThreshold}</div>
           </div>
           <div style="background:rgba(2,6,23,.42);border:1px solid rgba(148,163,184,.10);border-radius:12px;padding:8px 10px;flex:1;min-width:100px">
-            <div style="color:#8da0b8;font-size:11px">BBI / 距BBI</div>
-            <div style="color:#eef2ff;font-size:14px;font-weight:600">${fmtNumber(item.bbi)} / ${esc(distStr)}</div>
+            <div style="color:#8da0b8;font-size:11px">${isSectorTide ? 'EMA20 / 距EMA20' : 'BBI / 距BBI'}</div>
+            <div style="color:#eef2ff;font-size:14px;font-weight:600">${fmtNumber(isSectorTide ? item.ema20 : item.bbi)} / ${esc(distStr)}</div>
           </div>
           <div style="background:rgba(2,6,23,.42);border:1px solid rgba(148,163,184,.10);border-radius:12px;padding:8px 10px;flex:1;min-width:100px">
             <div style="color:#8da0b8;font-size:11px">成交额</div>
@@ -3071,9 +3078,9 @@ function renderPracticePage() {
           </div>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;color:#94a3b8;font-size:12px">
-          <span>BBI上行 ${bbiUp}</span>
-          <span>站上BBI ${aboveBbi}</span>
-          <span>${esc(jInfo)}</span>
+          ${isSectorTide
+            ? `<span>市场 ${esc(item.market_regime || '--')} ${fmtNumber(item.market_score)}</span><span>行业潮位 ${esc(tideStatusNames[item.sector_status] || item.sector_status || '--')} / ${fmtNumber(item.sector_score)}</span><span>板块内排名 ${fmtNumber(item.stock_sector_rank)}</span><span>结构止损 ${fmtNumber(item.stop_price)} (${fmtNumber(item.stop_distance_pct)}%)</span><span>跳空缓冲 ${fmtNumber(item.gap_buffer_pct)}%</span><span>有效损失 ${fmtNumber(item.effective_loss_distance_pct)}%</span><span>单笔预算 ${fmtNumber(item.per_trade_risk_budget_pct)}%</span><span>动态仓位上限 ${fmtNumber(item.max_position_pct_by_risk)}%</span>`
+            : `<span>BBI上行 ${bbiUp}</span><span>站上BBI ${aboveBbi}</span><span>${esc(jInfo)}</span>`}
           ${scoreBasis ? `<span>${esc(scoreBasis)}</span>` : ''}
           ${tradeDiscipline ? `<span>${esc(tradeDiscipline)}</span>` : ''}
           ${hardBlockerFlags}

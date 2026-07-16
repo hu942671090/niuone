@@ -1198,6 +1198,8 @@ def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any
     payload = {"items": items, "generated_at": b1_payload.get("generated_at", "")}
     if isinstance(b1_payload.get("market_snapshot"), dict):
         payload["market_snapshot"] = b1_payload.get("market_snapshot")
+    if isinstance(b1_payload.get("sector_tide_context"), dict):
+        payload["sector_tide_context"] = b1_payload.get("sector_tide_context")
     for key in ("schedule_slot", "schedule_run_kind", "schedule_triggered_at"):
         if b1_payload.get(key):
             payload[key] = b1_payload.get(key)
@@ -1277,7 +1279,14 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 continue
             if float(amount or 0) < 8e8:
                 continue
-            multi = scanner.analyze_all_strategies(code, tencent_key)
+            multi = scanner.analyze_all_strategies(
+                code,
+                tencent_key,
+                quote=quote,
+                name=name,
+                industry=str(old.get("industry") or old.get("sector") or ""),
+                context=parsed.get("sector_tide_context") if isinstance(parsed.get("sector_tide_context"), dict) else None,
+            )
             if not multi:
                 continue
             best = multi["strategies"].get(multi["best_strategy"], {})
@@ -1313,6 +1322,34 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "time_stop": best.get("time_stop"),
                 "actionable": best.get("actionable"),
                 "hard_blockers": best.get("hard_blockers", []),
+                "industry": best.get("industry") or old.get("industry") or old.get("sector") or "",
+                "sector": best.get("industry") or old.get("sector") or old.get("industry") or "",
+                "market_regime": best.get("market_regime"),
+                "market_score": best.get("market_score"),
+                "market_hard_stop": best.get("market_hard_stop"),
+                "market_allows_buys": best.get("market_allows_buys"),
+                "sector_status": best.get("sector_status"),
+                "sector_score": best.get("sector_score"),
+                "stock_sector_rank": best.get("stock_sector_rank"),
+                "stock_market_rank": best.get("stock_market_rank"),
+                "ema20": best.get("ema20"),
+                "ema50": best.get("ema50"),
+                "atr20": best.get("atr20"),
+                "stop_price": best.get("stop_price"),
+                "stop_source": best.get("stop_source"),
+                "stop_distance_pct": best.get("stop_distance_pct"),
+                "stop_atr": best.get("stop_atr"),
+                "gap_buffer_pct": best.get("gap_buffer_pct"),
+                "execution_buffer_pct": best.get("execution_buffer_pct"),
+                "effective_loss_distance_pct": best.get("effective_loss_distance_pct"),
+                "per_trade_risk_budget_pct": best.get("per_trade_risk_budget_pct"),
+                "max_open_risk_pct": best.get("max_open_risk_pct"),
+                "max_sector_risk_pct": best.get("max_sector_risk_pct"),
+                "max_total_position_pct": best.get("max_total_position_pct"),
+                "max_sector_position_pct": best.get("max_sector_position_pct"),
+                "absolute_position_cap_pct": best.get("absolute_position_cap_pct"),
+                "max_position_pct_by_risk": best.get("max_position_pct_by_risk"),
+                "risk_ok": best.get("risk_ok"),
                 "trade_ready": scanner.candidate_is_trade_ready(best),
                 "strategies": multi["strategies"],
                 "consensus_count": multi.get("consensus_count", 0),
@@ -2564,7 +2601,7 @@ ADMIN_GROUP_NOTES = {
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
     "选股与买卖设置": "配置主板、创业板、科创板和 ST 选股范围、候选数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
     "综合决策参考": "为买卖决策汇总指数、板块、资金流向、热门股票等参考数据。缓存秒数控制数据复用周期，单类参考数据上限可设置为 1～8。",
-    "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
+    "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
 }
