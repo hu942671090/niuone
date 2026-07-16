@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
+from market_data.news_precheck import format_cached_news_record, format_cached_news_records
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
 from screening.stock_universe import (
     STOCK_UNIVERSE_ENV,
@@ -4609,10 +4610,23 @@ def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
     top_candidates = [c for c in candidates[:5] if isinstance(c, dict)]
     if not top_candidates:
         return ""
+    cached_records = [candidate.get("news_precheck") for candidate in top_candidates]
+    cached_count = sum(
+        1
+        for record in cached_records
+        if isinstance(record, dict) and record.get("checked") is True
+    )
+    if cached_count == len(top_candidates):
+        return format_cached_news_records(cached_records)
 
     news_config = load_news_precheck_config()
     if news_config is None:
-        return ""
+        available_cache = [
+            record
+            for record in cached_records
+            if isinstance(record, dict) and record.get("checked") is True
+        ]
+        return format_cached_news_records(available_cache)
     base_url, api_key, model = news_config
 
     def fetch(candidate: dict[str, Any]) -> str:
@@ -4623,12 +4637,19 @@ def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
             model=model,
         )
 
-    results: list[str] = [""] * len(top_candidates)
+    results: list[str] = [
+        format_cached_news_record(record)
+        if isinstance(record, dict) and record.get("checked") is True
+        else ""
+        for record in cached_records
+    ]
     failures: list[str] = []
-    success_count = 0
-    workers = min(NEWS_PRECHECK_CONCURRENCY, len(top_candidates))
+    success_count = cached_count
+    missing_indices = [idx for idx, result in enumerate(results) if not result]
+    workers = min(NEWS_PRECHECK_CONCURRENCY, len(missing_indices))
     if workers <= 1:
-        for idx, candidate in enumerate(top_candidates):
+        for idx in missing_indices:
+            candidate = top_candidates[idx]
             try:
                 results[idx] = fetch(candidate)
                 success_count += 1
@@ -4638,8 +4659,8 @@ def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             future_by_index = {
-                pool.submit(fetch, candidate): idx
-                for idx, candidate in enumerate(top_candidates)
+                pool.submit(fetch, top_candidates[idx]): idx
+                for idx in missing_indices
             }
             for future in concurrent.futures.as_completed(future_by_index):
                 idx = future_by_index[future]
@@ -4655,7 +4676,8 @@ def check_candidate_news_precheck(candidates: list[dict[str, Any]]) -> str:
         raise RuntimeError("全部股票消息面预检失败：" + "；".join(failures[:3]))
 
     content = "\n".join(item.strip() for item in results if item and item.strip()).strip()
-    return f"【消息面预检（实时搜索，并发{workers}）】\n{content}"
+    source_label = "扫描缓存 + 实时补齐" if cached_count else "实时搜索"
+    return f"【消息面预检（{source_label}，并发{workers}）】\n{content}"
 
 
 def current_strategy_source() -> str:
@@ -4817,6 +4839,10 @@ def call_model_decision(
                 f"有效损失:{c.get('effective_loss_distance_pct','-')}% "
                 f"单笔预算:{c.get('per_trade_risk_budget_pct','-')}% "
                 f"动态仓位上限:{c.get('max_position_pct_by_risk','-')}% "
+                f"隔夜美股:{c.get('overnight_us_tone_label','-')}/"
+                f"{c.get('overnight_us_sector') or '无行业映射'} "
+                f"消息面:{c.get('news_tone_label','未检查')} "
+                f"外部确认调整:{c.get('external_context_adjustment','-')} "
             )
         cand_lines.append(
             f"  {c.get('code')} {c.get('name')} 现价{c.get('price')} "

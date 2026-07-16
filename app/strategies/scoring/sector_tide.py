@@ -23,6 +23,11 @@ SECTOR_TIDE_MIN_MEMBERS = 3
 SECTOR_TIDE_MIN_ROWS = 55
 SECTOR_TIDE_DRAGON_TIGER_MAX_SECTOR_ADJUSTMENT = 2.5
 SECTOR_TIDE_DRAGON_TIGER_MAX_STOCK_ADJUSTMENT = 0.35
+SECTOR_TIDE_OVERNIGHT_US_MAX_SECTOR_ADJUSTMENT = 0.15
+SECTOR_TIDE_NEWS_POSITIVE_ADJUSTMENT = 0.15
+SECTOR_TIDE_NEWS_NEGATIVE_ADJUSTMENT = -0.30
+SECTOR_TIDE_EXTERNAL_ADJUSTMENT_MIN = -0.90
+SECTOR_TIDE_EXTERNAL_ADJUSTMENT_MAX = 0.60
 
 
 def _mean(values: list[float], default: float = 0.0) -> float:
@@ -204,6 +209,139 @@ def _dragon_tiger_context(
     return metadata, stock_signals, sectors
 
 
+def _industry_matches(left: Any, right: Any) -> bool:
+    left_name = _industry_name(left)
+    right_name = _industry_name(right)
+    return bool(
+        left_name
+        and right_name
+        and (left_name == right_name or left_name in right_name or right_name in left_name)
+    )
+
+
+def _overnight_us_context(
+    snapshot: Any,
+    industries: list[str],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Normalize the completed US session and explicit A-share sector mappings."""
+    source = snapshot if isinstance(snapshot, Mapping) else {}
+    mappings = source.get("sector_mappings") if isinstance(source.get("sector_mappings"), list) else []
+    available = source.get("available") is True
+    tone = str(source.get("tone") or "neutral")
+    global_adjustment = {
+        "offensive": 0.05,
+        "balanced": 0.02,
+        "neutral": 0.0,
+        "cautious": -0.08,
+        "defensive": -0.15,
+    }.get(tone, 0.0) if available else 0.0
+    matched: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    if available:
+        for raw_mapping in mappings:
+            if not isinstance(raw_mapping, Mapping):
+                continue
+            targets = raw_mapping.get("a_share_mapping") or []
+            if isinstance(targets, str):
+                targets = [part for part in re.split(r"[、,，/]+", targets) if part]
+            change_pct = safe_float(raw_mapping.get("change_pct"))
+            mapping_tone = str(raw_mapping.get("tone") or "neutral")
+            if change_pct is not None:
+                strength = _clamp_signed(change_pct / 2.0)
+            else:
+                strength = 0.5 if mapping_tone == "positive" else (-0.5 if mapping_tone == "negative" else 0.0)
+            for industry in industries:
+                if any(_industry_matches(industry, target) for target in targets):
+                    matched[industry].append({
+                        "strength": strength,
+                        "us_sector": str(raw_mapping.get("us_sector") or ""),
+                        "proxy": str(raw_mapping.get("proxy") or ""),
+                        "change_pct": change_pct,
+                    })
+
+    sectors: dict[str, dict[str, Any]] = {}
+    for industry, rows in matched.items():
+        strongest = max(rows, key=lambda row: abs(float(row.get("strength") or 0.0)))
+        strength = float(strongest.get("strength") or 0.0)
+        sectors[industry] = {
+            "matched": True,
+            "score": round(50 + strength * 35, 2),
+            "signal": "positive" if strength >= 0.15 else ("negative" if strength <= -0.15 else "neutral"),
+            "adjustment": round(
+                strength * SECTOR_TIDE_OVERNIGHT_US_MAX_SECTOR_ADJUSTMENT,
+                3,
+            ),
+            "us_sector": strongest.get("us_sector"),
+            "proxy": strongest.get("proxy"),
+            "change_pct": strongest.get("change_pct"),
+        }
+    metadata = {
+        "available": available,
+        "source": "overnight_us_market_summary",
+        "target_cn_date": str(source.get("target_cn_date") or ""),
+        "target_us_date": str(source.get("target_us_date") or ""),
+        "generated_at": str(source.get("generated_at") or ""),
+        "tone": tone if available else "neutral",
+        "tone_label": str(source.get("tone_label") or "中性"),
+        "summary": str(source.get("summary") or "")[:500],
+        "global_adjustment": global_adjustment,
+        "mapping_count": len(mappings),
+        "matched_sector_count": len(sectors),
+        "error": str(source.get("error") or ""),
+        "usage": "completed_us_session_context",
+    }
+    return metadata, sectors
+
+
+def _news_context(
+    snapshot: Any,
+    members: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Map bounded three-day news labels onto the shortlisted stocks only."""
+    source = snapshot if isinstance(snapshot, Mapping) else {}
+    records = source.get("records") if isinstance(source.get("records"), list) else []
+    member_codes = {_stock_code(member.get("code")) for member in members}
+    stocks: dict[str, dict[str, Any]] = {}
+    for raw_record in records:
+        if not isinstance(raw_record, Mapping):
+            continue
+        code = _stock_code(raw_record.get("code"))
+        if not code or code not in member_codes or code in stocks:
+            continue
+        checked = raw_record.get("checked") is True
+        available = raw_record.get("available") is True
+        tone = str(raw_record.get("tone") or "neutral") if available else "neutral"
+        adjustment = (
+            SECTOR_TIDE_NEWS_POSITIVE_ADJUSTMENT
+            if tone == "positive"
+            else SECTOR_TIDE_NEWS_NEGATIVE_ADJUSTMENT
+            if tone == "negative"
+            else 0.0
+        )
+        stocks[code] = {
+            "checked": checked,
+            "available": available,
+            "tone": tone,
+            "tone_label": str(raw_record.get("tone_label") or "中性"),
+            "summary": str(raw_record.get("summary") or "")[:600],
+            "fetched_at": str(raw_record.get("fetched_at") or ""),
+            "window_days": int(safe_float(raw_record.get("window_days")) or 3),
+            "adjustment": adjustment,
+            "error": str(raw_record.get("error") or ""),
+        }
+    metadata = {
+        "configured": source.get("configured") is True,
+        "available": any(record.get("available") for record in stocks.values()),
+        "fetched_at": str(source.get("fetched_at") or ""),
+        "record_count": len(records),
+        "matched_stock_count": len(stocks),
+        "available_stock_count": sum(1 for record in stocks.values() if record.get("available")),
+        "window_days": 3,
+        "error": str(source.get("error") or ""),
+        "usage": "shortlisted_candidate_confirmation",
+    }
+    return metadata, stocks
+
+
 def _return_pct(rows: list[dict[str, Any]], lookback: int) -> float | None:
     if len(rows) <= lookback:
         return None
@@ -371,6 +509,8 @@ def build_sector_tide_context(
     flow_rows: Any = None,
     previous_market: dict[str, Any] | None = None,
     dragon_tiger_snapshot: dict[str, Any] | None = None,
+    overnight_us_snapshot: dict[str, Any] | None = None,
+    news_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one immutable-style cross-sectional context for a full scan."""
     members = [metric for item in prepared_items if (metric := _member_metrics(item)) is not None]
@@ -386,6 +526,11 @@ def build_sector_tide_context(
         dragon_tiger_snapshot,
         members,
     )
+    overnight_us, overnight_us_sectors = _overnight_us_context(
+        overnight_us_snapshot,
+        list(grouped),
+    )
+    news, news_stocks = _news_context(news_snapshot, members)
 
     raw_sectors: dict[str, dict[str, Any]] = {}
     for industry, sector_members in grouped.items():
@@ -431,6 +576,7 @@ def build_sector_tide_context(
             + liquidity_percentile * 0.05
         )
         dragon_tiger_sector = dragon_tiger_sectors.get(industry) or {}
+        overnight_us_sector = overnight_us_sectors.get(industry) or {}
         dragon_tiger_adjustment = float(dragon_tiger_sector.get("adjustment") or 0.0)
         score = _clamp(base_score + dragon_tiger_adjustment)
         eligible_data = sector["member_count"] >= SECTOR_TIDE_MIN_MEMBERS
@@ -463,6 +609,13 @@ def build_sector_tide_context(
             "dragon_tiger_listed_count": int(dragon_tiger_sector.get("listed_count") or 0),
             "dragon_tiger_positive_count": int(dragon_tiger_sector.get("positive_count") or 0),
             "dragon_tiger_negative_count": int(dragon_tiger_sector.get("negative_count") or 0),
+            "overnight_us_matched": bool(overnight_us_sector.get("matched")),
+            "overnight_us_score": overnight_us_sector.get("score", 50.0),
+            "overnight_us_signal": overnight_us_sector.get("signal", "neutral"),
+            "overnight_us_adjustment": overnight_us_sector.get("adjustment", 0.0),
+            "overnight_us_sector": overnight_us_sector.get("us_sector"),
+            "overnight_us_proxy": overnight_us_sector.get("proxy"),
+            "overnight_us_change_pct": overnight_us_sector.get("change_pct"),
         }
 
     stock_context: dict[str, dict[str, Any]] = {}
@@ -475,6 +628,7 @@ def build_sector_tide_context(
             rs20_rank = _percentile(float(member["ret20"]), sector_ret20)
             dragon_tiger_stock = dragon_tiger_stocks.get(str(member["code"])) or {}
             dragon_tiger_strength = float(dragon_tiger_stock.get("strength") or 0.0)
+            news_stock = news_stocks.get(str(member["code"])) or {}
             stock_context[str(member["code"])] = {
                 "industry": industry,
                 "sector_relative_rank": round(rs20_rank * 0.6 + rs5_rank * 0.4, 2),
@@ -497,10 +651,23 @@ def build_sector_tide_context(
                 "dragon_tiger_institution_record_count": int(
                     dragon_tiger_stock.get("institution_record_count") or 0
                 ),
+                "news_precheck": {
+                    "code": str(member["code"]),
+                    "name": str(member.get("name") or ""),
+                    "checked": bool(news_stock.get("checked")),
+                    "available": bool(news_stock.get("available")),
+                    "tone": news_stock.get("tone", "neutral"),
+                    "tone_label": news_stock.get("tone_label", "中性"),
+                    "summary": news_stock.get("summary", ""),
+                    "fetched_at": news_stock.get("fetched_at", ""),
+                    "window_days": news_stock.get("window_days", 3),
+                    "error": news_stock.get("error", ""),
+                },
+                "news_adjustment": float(news_stock.get("adjustment") or 0.0),
             }
 
     return {
-        "version": 3,
+        "version": 4,
         "market": market,
         "market_ret5_pct": round(market_ret5, 2),
         "market_ret20_pct": round(market_ret20, 2),
@@ -508,6 +675,8 @@ def build_sector_tide_context(
         "mapped_stock_count": len(stock_context),
         "data_coverage": round(len(stock_context) / len(prepared_items), 4) if prepared_items else 0.0,
         "dragon_tiger": dragon_tiger,
+        "overnight_us": overnight_us,
+        "news": news,
         "sectors": sectors,
         "stocks": stock_context,
     }
@@ -523,6 +692,8 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
     stock = (context.get("stocks") or {}).get(code)
     market = context.get("market") if isinstance(context.get("market"), dict) else {}
     dragon_tiger = context.get("dragon_tiger") if isinstance(context.get("dragon_tiger"), dict) else {}
+    overnight_us = context.get("overnight_us") if isinstance(context.get("overnight_us"), dict) else {}
+    news = context.get("news") if isinstance(context.get("news"), dict) else {}
     if not isinstance(sector, dict) or not isinstance(stock, dict):
         return None
     close = safe_float(latest.get("close"))
@@ -588,7 +759,48 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         raw_dragon_tiger_adjustment > 0 and (change_pct > 7 or extension_atr > 1.5)
     )
     dragon_tiger_adjustment = 0.0 if dragon_tiger_positive_suppressed else raw_dragon_tiger_adjustment
-    composite_score = _clamp(score_before_dragon_tiger + dragon_tiger_adjustment, 0.0, 10.0)
+    raw_overnight_us_adjustment = _clamp(
+        float(overnight_us.get("global_adjustment") or 0.0)
+        + float(sector.get("overnight_us_adjustment") or 0.0),
+        -0.25,
+        0.20,
+    )
+    overnight_us_positive_suppressed = bool(
+        raw_overnight_us_adjustment > 0
+        and (
+            sector.get("status") not in {"leading", "improving"}
+            or change_pct > 7
+            or extension_atr > 1.5
+        )
+    )
+    overnight_us_adjustment = (
+        0.0 if overnight_us_positive_suppressed else raw_overnight_us_adjustment
+    )
+    raw_news_adjustment = float(stock.get("news_adjustment") or 0.0)
+    news_positive_suppressed = bool(
+        raw_news_adjustment > 0
+        and (
+            sector.get("status") not in {"leading", "improving"}
+            or change_pct > 7
+            or extension_atr > 1.5
+        )
+    )
+    news_adjustment = 0.0 if news_positive_suppressed else raw_news_adjustment
+    raw_external_context_adjustment = (
+        dragon_tiger_adjustment
+        + overnight_us_adjustment
+        + news_adjustment
+    )
+    external_context_adjustment = _clamp(
+        raw_external_context_adjustment,
+        SECTOR_TIDE_EXTERNAL_ADJUSTMENT_MIN,
+        SECTOR_TIDE_EXTERNAL_ADJUSTMENT_MAX,
+    )
+    composite_score = _clamp(
+        score_before_dragon_tiger + external_context_adjustment,
+        0.0,
+        10.0,
+    )
     return {
         "code": code,
         "industry": industry,
@@ -596,6 +808,8 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         "sector": sector,
         "stock": stock,
         "dragon_tiger": dragon_tiger,
+        "overnight_us": overnight_us,
+        "news": news,
         "close": close,
         "ema20": ema20,
         "ema50": ema50,
@@ -616,9 +830,16 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         "effective_loss_distance_pct": effective_distance_pct,
         "risk_ok": risk_ok,
         "stock_score": stock_score,
+        "score_before_external_context": score_before_dragon_tiger,
         "score_before_dragon_tiger": score_before_dragon_tiger,
         "dragon_tiger_adjustment": dragon_tiger_adjustment,
         "dragon_tiger_positive_suppressed": dragon_tiger_positive_suppressed,
+        "overnight_us_adjustment": overnight_us_adjustment,
+        "overnight_us_positive_suppressed": overnight_us_positive_suppressed,
+        "news_adjustment": news_adjustment,
+        "news_positive_suppressed": news_positive_suppressed,
+        "raw_external_context_adjustment": raw_external_context_adjustment,
+        "external_context_adjustment": external_context_adjustment,
         "composite_score": composite_score,
     }
 
@@ -635,6 +856,9 @@ def _payload(
     sector = metrics["sector"]
     stock = metrics["stock"]
     dragon_tiger = metrics["dragon_tiger"]
+    overnight_us = metrics["overnight_us"]
+    news = metrics["news"]
+    news_precheck = stock.get("news_precheck") if isinstance(stock.get("news_precheck"), dict) else {}
     budget = sector_tide_risk_budget(str(market.get("state") or ""))
     absolute_position_cap_pct = SECTOR_TIDE_ABSOLUTE_POSITION_CAP_PCT[strategy_name]
     max_position_pct_by_risk = risk_sized_position_cap_pct(
@@ -664,6 +888,12 @@ def _payload(
         "stock_sector_rank": stock.get("sector_relative_rank"),
         "stock_market_rank": stock.get("market_relative_rank"),
         "stock_score": round(metrics["stock_score"], 2),
+        "score_before_external_context": safe_round(metrics["score_before_external_context"], 3),
+        "raw_external_context_adjustment": safe_round(metrics["raw_external_context_adjustment"], 3),
+        "external_context_adjustment": safe_round(metrics["external_context_adjustment"], 3),
+        "external_context_capped": abs(
+            metrics["raw_external_context_adjustment"] - metrics["external_context_adjustment"]
+        ) > 1e-9,
         "score_before_dragon_tiger": safe_round(metrics["score_before_dragon_tiger"], 3),
         "dragon_tiger_available": bool(dragon_tiger.get("available")),
         "dragon_tiger_as_of_date": dragon_tiger.get("as_of_date"),
@@ -687,6 +917,28 @@ def _payload(
         "sector_dragon_tiger_score": sector.get("dragon_tiger_score", 50.0),
         "sector_dragon_tiger_adjustment": sector.get("dragon_tiger_adjustment", 0.0),
         "sector_dragon_tiger_listed_count": sector.get("dragon_tiger_listed_count", 0),
+        "overnight_us_available": bool(overnight_us.get("available")),
+        "overnight_us_target_date": overnight_us.get("target_us_date"),
+        "overnight_us_tone": overnight_us.get("tone", "neutral"),
+        "overnight_us_tone_label": overnight_us.get("tone_label", "中性"),
+        "overnight_us_summary": overnight_us.get("summary", ""),
+        "overnight_us_sector_matched": bool(sector.get("overnight_us_matched")),
+        "overnight_us_sector": sector.get("overnight_us_sector"),
+        "overnight_us_proxy": sector.get("overnight_us_proxy"),
+        "overnight_us_change_pct": sector.get("overnight_us_change_pct"),
+        "overnight_us_signal": sector.get("overnight_us_signal", "neutral"),
+        "overnight_us_adjustment": safe_round(metrics["overnight_us_adjustment"], 3),
+        "overnight_us_positive_suppressed": metrics["overnight_us_positive_suppressed"],
+        "news_precheck_configured": bool(news.get("configured")),
+        "news_precheck": dict(news_precheck),
+        "news_checked": bool(news_precheck.get("checked")),
+        "news_available": bool(news_precheck.get("available")),
+        "news_tone": news_precheck.get("tone", "neutral"),
+        "news_tone_label": news_precheck.get("tone_label", "中性"),
+        "news_summary": news_precheck.get("summary", ""),
+        "news_fetched_at": news_precheck.get("fetched_at", ""),
+        "news_adjustment": safe_round(metrics["news_adjustment"], 3),
+        "news_positive_suppressed": metrics["news_positive_suppressed"],
         "ema20": safe_round(metrics["ema20"], 3),
         "ema50": safe_round(metrics["ema50"], 3),
         "atr20": safe_round(metrics["atr20"], 3),
@@ -718,6 +970,14 @@ def _payload(
     }
 
 
+def _append_external_context_risks(metrics: dict[str, Any], risk_flags: list[str]) -> None:
+    if float(metrics.get("overnight_us_adjustment") or 0.0) < 0:
+        risk_flags.append("隔夜美股风险偏好或行业映射偏弱")
+    news_precheck = metrics.get("stock", {}).get("news_precheck") or {}
+    if news_precheck.get("available") and news_precheck.get("tone") == "negative":
+        risk_flags.append("近3日个股消息面偏利空")
+
+
 def score_tide_leader(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
     metrics = _entry_metrics(rows, context)
     if metrics is None:
@@ -735,6 +995,7 @@ def score_tide_leader(rows: list[dict[str, Any]], context: dict[str, Any]) -> di
         risk_flags.append("未形成突破或缩量回踩买点")
     if not metrics["risk_ok"]:
         risk_flags.append("结构止损超过1.5ATR或6%")
+    _append_external_context_risks(metrics, risk_flags)
     score = metrics["composite_score"]
     verdict = "高匹配主线领航" if score >= 8 else ("观察主线领航" if score >= 6.5 else "不匹配")
     return with_strategy_profile(
@@ -764,6 +1025,7 @@ def score_tide_rotation(rows: list[dict[str, Any]], context: dict[str, Any]) -> 
         risk_flags.append("轮动买点未确认")
     if not metrics["risk_ok"]:
         risk_flags.append("结构止损超过1.5ATR或6%")
+    _append_external_context_risks(metrics, risk_flags)
     score = metrics["composite_score"]
     verdict = "高匹配轮动初升" if score >= 8.2 else ("观察轮动初升" if score >= 6.5 else "不匹配")
     return with_strategy_profile(
@@ -791,6 +1053,7 @@ def score_tide_recovery(rows: list[dict[str, Any]], context: dict[str, Any]) -> 
         risk_flags.append("冰点修复拒绝追高")
     if not metrics["risk_ok"]:
         risk_flags.append("结构止损超过1.5ATR或6%")
+    _append_external_context_risks(metrics, risk_flags)
     score = metrics["composite_score"]
     verdict = "高匹配冰点修复" if score >= 8.5 else ("观察冰点修复" if score >= 6.5 else "不匹配")
     return with_strategy_profile(

@@ -106,6 +106,95 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(payload["error"], "archive_missing")
         self.assertEqual(payload["items"], [])
 
+    def test_sector_tide_loads_validated_overnight_us_cache(self):
+        calls = []
+        current = datetime(2026, 7, 17, 9, 30, 0)
+        payload = screen.load_sector_tide_overnight_us(
+            current,
+            summary_loader=lambda now: calls.append(now) or {
+                "available": True,
+                "source": "overnight_us_market_summary",
+                "target_cn_date": "2026-07-17",
+                "target_us_date": "2026-07-16",
+                "tone": "offensive",
+                "sector_mappings": [],
+            },
+        )
+
+        self.assertEqual(calls, [current])
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["target_us_date"], "2026-07-16")
+        self.assertEqual(payload["tone"], "offensive")
+
+    def test_sector_tide_missing_overnight_us_cache_degrades_to_neutral(self):
+        payload = screen.load_sector_tide_overnight_us(
+            datetime(2026, 7, 17, 9, 30, 0),
+            summary_loader=lambda _now: None,
+        )
+
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["error"], "cache_missing_or_stale")
+
+    def test_sector_tide_fetches_structured_news_for_at_most_five_candidates(self):
+        candidates = [
+            {"code": f"00000{index}", "name": f"测试{index}"}
+            for index in range(1, 7)
+        ]
+        config = screen.NewsPrecheckConfig(
+            base_url="https://news.example/v1",
+            api_key="secret",
+            model="search-model",
+        )
+        captured = {}
+
+        def fetcher(selected, active_config, **kwargs):
+            captured["selected"] = selected
+            captured["config"] = active_config
+            captured["kwargs"] = kwargs
+            return [
+                {
+                    "code": item["code"],
+                    "name": item["name"],
+                    "checked": True,
+                    "available": True,
+                    "tone": "neutral",
+                    "tone_label": "中性",
+                    "summary": "最近3天无明确重大消息（中性）",
+                    "fetched_at": "2026-07-17T09:30:00+08:00",
+                }
+                for item in selected
+            ]
+
+        payload = screen.fetch_sector_tide_news_precheck(
+            candidates,
+            datetime(2026, 7, 17, 9, 30, 0),
+            config=config,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual(len(captured["selected"]), 5)
+        self.assertIs(captured["config"], config)
+        self.assertEqual(captured["kwargs"]["max_candidates"], 5)
+        self.assertTrue(payload["configured"])
+        self.assertTrue(payload["available"])
+        self.assertEqual(len(payload["records"]), 5)
+
+    def test_sector_tide_news_failure_degrades_without_blocking_scan(self):
+        config = screen.NewsPrecheckConfig(
+            base_url="https://news.example/v1",
+            api_key="secret",
+            model="search-model",
+        )
+        payload = screen.fetch_sector_tide_news_precheck(
+            [{"code": "000001", "name": "平安银行"}],
+            config=config,
+            fetcher=lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError()),
+        )
+
+        self.assertTrue(payload["configured"])
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["error"], "fetch_TimeoutError")
+
     def test_stock_universe_classifies_boards_and_st_as_additive_scopes(self):
         self.assertEqual(
             screen.normalize_stock_universe("main_board,ST,chi_next"),

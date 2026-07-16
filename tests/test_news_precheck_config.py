@@ -63,6 +63,63 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         self.assertIsNone(module.load_news_precheck_config())
         self.assertEqual(module.check_candidate_news_precheck([{"code": "000001", "name": "平安银行"}]), "")
 
+    def test_news_precheck_reuses_structured_scanner_cache(self):
+        module = import_trader_with_env({})
+        candidates = [
+            {
+                "code": "000001",
+                "name": "平安银行",
+                "news_precheck": {
+                    "code": "000001",
+                    "name": "平安银行",
+                    "checked": True,
+                    "available": True,
+                    "tone": "positive",
+                    "tone_label": "利好",
+                    "summary": "- 000001 平安银行：重大项目落地（利好）",
+                    "fetched_at": "2026-07-17T09:30:00+08:00",
+                },
+            }
+        ]
+        module.load_news_precheck_config = lambda: self.fail("不应再次加载消息面配置")
+
+        result = module.check_candidate_news_precheck(candidates)
+
+        self.assertIn("扫描阶段缓存", result)
+        self.assertIn("重大项目落地（利好）", result)
+
+    def test_news_precheck_only_fetches_candidates_missing_from_scanner_cache(self):
+        module = import_trader_with_env({
+            "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
+            "DASHBOARD_NEWS_API_KEY": "news-secret",
+            "DASHBOARD_NEWS_MODEL": "search-model",
+        })
+        calls = []
+
+        def fake_request(candidate, **_kwargs):
+            calls.append(candidate["code"])
+            return f"- {candidate['code']} {candidate['name']}：最近3天无明确重大消息（中性）"
+
+        module.request_single_candidate_news_precheck = fake_request
+        result = module.check_candidate_news_precheck([
+            {
+                "code": "000001",
+                "name": "平安银行",
+                "news_precheck": {
+                    "code": "000001",
+                    "name": "平安银行",
+                    "checked": True,
+                    "available": True,
+                    "summary": "- 000001 平安银行：重大项目落地（利好）",
+                },
+            },
+            {"code": "000002", "name": "万科A"},
+        ])
+
+        self.assertEqual(calls, ["000002"])
+        self.assertIn("扫描缓存 + 实时补齐", result)
+        self.assertLess(result.index("000001"), result.index("000002"))
+
     def test_news_precheck_requires_complete_config(self):
         module = import_trader_with_env({
             "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",

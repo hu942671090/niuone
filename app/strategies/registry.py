@@ -325,7 +325,7 @@ STRATEGY_SUITES: dict[str, dict[str, Any]] = {
     "sector_tide": {
         "id": "sector_tide",
         "label": "板块潮汐",
-        "desc": "市场状态、行业轮动、板块内领涨与冰点修复",
+        "desc": "市场状态、行业轮动、隔夜美股映射、个股消息与板块内领涨",
         "color": "#06b6d4",
         "strategy_ids": strategy_ids_for_persona("sector_tide"),
     },

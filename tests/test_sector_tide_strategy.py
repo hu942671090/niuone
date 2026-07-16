@@ -173,7 +173,7 @@ class SectorTideStrategyTests(unittest.TestCase):
 
         context = build_sector_tide_context(prepared, dragon_tiger_snapshot=snapshot)
 
-        self.assertEqual(context["version"], 3)
+        self.assertEqual(context["version"], 4)
         self.assertTrue(context["dragon_tiger"]["available"])
         self.assertEqual(context["dragon_tiger"]["as_of_date"], "2026-07-16")
         self.assertEqual(context["dragon_tiger"]["matched_stock_count"], 2)
@@ -254,6 +254,80 @@ class SectorTideStrategyTests(unittest.TestCase):
         self.assertEqual(stock["dragon_tiger_signal"], "positive")
         self.assertGreater(stock["dragon_tiger_adjustment"], 0)
 
+    def test_context_maps_overnight_us_and_shortlisted_stock_news(self):
+        prepared = []
+        for sector_index, industry in enumerate(("半导体", "银行", "汽车", "医药")):
+            for member_index in range(3):
+                code = f"{600000 + sector_index * 10 + member_index:06d}"
+                prepared.append({
+                    "code": code,
+                    "name": f"测试{code}",
+                    "industry": industry,
+                    "quote": {"amount": 1.5e9},
+                    "rows": make_rows(code, industry, daily_step=0.04 - sector_index * 0.006),
+                })
+
+        context = build_sector_tide_context(
+            prepared,
+            overnight_us_snapshot={
+                "available": True,
+                "target_cn_date": "2026-07-17",
+                "target_us_date": "2026-07-16",
+                "generated_at": "2026-07-17 08:00:00",
+                "tone": "offensive",
+                "tone_label": "进攻",
+                "summary": "纳指走强，半导体映射偏正。",
+                "sector_mappings": [{
+                    "us_sector": "半导体",
+                    "proxy": "XSD",
+                    "change_pct": 1.8,
+                    "tone": "positive",
+                    "a_share_mapping": ["半导体"],
+                }, {
+                    "us_sector": "地区银行",
+                    "proxy": "KRE",
+                    "change_pct": -1.2,
+                    "tone": "negative",
+                    "a_share_mapping": ["银行"],
+                }],
+            },
+            news_snapshot={
+                "configured": True,
+                "available": True,
+                "fetched_at": "2026-07-17T10:00:00+08:00",
+                "records": [{
+                    "code": "600000",
+                    "name": "测试600000",
+                    "checked": True,
+                    "available": True,
+                    "tone": "positive",
+                    "tone_label": "利好",
+                    "summary": "订单增长（利好）",
+                    "window_days": 3,
+                    "fetched_at": "2026-07-17T10:00:00+08:00",
+                }, {
+                    "code": "600010",
+                    "name": "测试600010",
+                    "checked": True,
+                    "available": True,
+                    "tone": "negative",
+                    "tone_label": "利空",
+                    "summary": "监管立案（利空）",
+                    "window_days": 3,
+                    "fetched_at": "2026-07-17T10:00:00+08:00",
+                }],
+            },
+        )
+
+        self.assertTrue(context["overnight_us"]["available"])
+        self.assertEqual(context["overnight_us"]["target_us_date"], "2026-07-16")
+        self.assertGreater(context["sectors"]["半导体"]["overnight_us_adjustment"], 0)
+        self.assertLess(context["sectors"]["银行"]["overnight_us_adjustment"], 0)
+        self.assertEqual(context["stocks"]["600000"]["news_precheck"]["tone"], "positive")
+        self.assertEqual(context["stocks"]["600000"]["news_adjustment"], 0.15)
+        self.assertEqual(context["stocks"]["600010"]["news_adjustment"], -0.3)
+        self.assertEqual(context["news"]["matched_stock_count"], 2)
+
     def test_tide_score_applies_bounded_dragon_tiger_bonus(self):
         rows = make_rows("600000", "半导体", daily_step=0.01)
         context = {
@@ -264,6 +338,15 @@ class SectorTideStrategyTests(unittest.TestCase):
                 "as_of_date": "2026-07-16",
                 "seat_data_complete": True,
             },
+            "overnight_us": {
+                "available": True,
+                "target_us_date": "2026-07-16",
+                "tone": "offensive",
+                "tone_label": "进攻",
+                "summary": "纳指走强",
+                "global_adjustment": 0.05,
+            },
+            "news": {"configured": True, "available": True},
             "sectors": {
                 "半导体": {
                     "status": "leading", "base_score": 88, "score": 90.5,
@@ -272,6 +355,9 @@ class SectorTideStrategyTests(unittest.TestCase):
                     "breadth20": 90, "flow_net_yi": None, "flow_source": "volume_participation_fallback",
                     "dragon_tiger_score": 85, "dragon_tiger_adjustment": 2.5,
                     "dragon_tiger_listed_count": 2,
+                    "overnight_us_matched": True, "overnight_us_adjustment": 0.15,
+                    "overnight_us_signal": "positive", "overnight_us_sector": "半导体",
+                    "overnight_us_proxy": "XSD", "overnight_us_change_pct": 1.8,
                 }
             },
             "stocks": {
@@ -281,6 +367,12 @@ class SectorTideStrategyTests(unittest.TestCase):
                     "dragon_tiger_signal": "positive", "dragon_tiger_confidence": 1.0,
                     "dragon_tiger_adjustment": 0.35,
                     "dragon_tiger_net_amount_yuan": 100_000_000,
+                    "news_adjustment": 0.15,
+                    "news_precheck": {
+                        "code": "600000", "name": "测试600000", "checked": True,
+                        "available": True, "tone": "positive", "tone_label": "利好",
+                        "summary": "订单增长（利好）", "fetched_at": "2026-07-17T10:00:00+08:00",
+                    },
                 }
             },
         }
@@ -293,6 +385,10 @@ class SectorTideStrategyTests(unittest.TestCase):
         self.assertFalse(result["dragon_tiger_positive_suppressed"])
         self.assertGreater(result["dragon_tiger_adjustment"], 0)
         self.assertLessEqual(result["dragon_tiger_adjustment"], 0.45)
+        self.assertGreater(result["overnight_us_adjustment"], 0)
+        self.assertEqual(result["news_adjustment"], 0.15)
+        self.assertEqual(result["external_context_adjustment"], 0.6)
+        self.assertTrue(result["external_context_capped"])
         self.assertGreater(result["score"], result["score_before_dragon_tiger"])
 
         overextended = [dict(row) for row in rows]
@@ -317,7 +413,29 @@ class SectorTideStrategyTests(unittest.TestCase):
         self.assertIsNotNone(suppressed)
         self.assertTrue(suppressed["dragon_tiger_positive_suppressed"])
         self.assertEqual(suppressed["dragon_tiger_adjustment"], 0)
+        self.assertTrue(suppressed["overnight_us_positive_suppressed"])
+        self.assertTrue(suppressed["news_positive_suppressed"])
         self.assertEqual(suppressed["score"], round(suppressed["score_before_dragon_tiger"], 1))
+
+        context["overnight_us"].update({"tone": "defensive", "tone_label": "防守", "global_adjustment": -0.15})
+        context["sectors"]["半导体"].update({
+            "overnight_us_adjustment": -0.15,
+            "overnight_us_signal": "negative",
+        })
+        context["stocks"]["600000"].update({
+            "news_adjustment": -0.30,
+            "news_precheck": {
+                "code": "600000", "name": "测试600000", "checked": True,
+                "available": True, "tone": "negative", "tone_label": "利空",
+                "summary": "监管立案（利空）", "fetched_at": "2026-07-17T10:00:00+08:00",
+            },
+        })
+        negative = score_tide_leader(overextended, context)
+
+        self.assertIsNotNone(negative)
+        self.assertLess(negative["external_context_adjustment"], 0)
+        self.assertIn("隔夜美股风险偏好或行业映射偏弱", negative["risk_flags"])
+        self.assertIn("近3日个股消息面偏利空", negative["risk_flags"])
 
     def test_tide_scorer_consumes_shared_context(self):
         rows = make_rows("600000", "半导体")

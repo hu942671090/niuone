@@ -49,6 +49,10 @@ from collections.abc import Callable
 from typing import Any
 
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
+from market_data.news_precheck import (
+    NewsPrecheckConfig,
+    fetch_candidate_news_records,
+)
 from screening.stock_universe import (
     DEFAULT_STOCK_UNIVERSE,
     STOCK_UNIVERSE_ENV,
@@ -133,6 +137,7 @@ MULTI_STRATEGY_HISTORY = B1_OUTPUT_DIR / "multi_strategy_history"
 DISPLAY_CANDIDATE_LIMIT = 16
 DISPLAY_HEAD_LIMIT = 8
 TRADE_CANDIDATE_LIMIT = 8
+SECTOR_TIDE_NEWS_PRECHECK_LIMIT = 5
 _LOCAL_SITE_PACKAGES_READY = False
 _STOCK_INDUSTRY_MEMORY_CACHE: dict[str, str] | None = None
 _MARGIN_DETAIL_CACHE: dict[tuple[str, str], Any] = {}
@@ -533,6 +538,93 @@ def load_previous_sector_tide_dragon_tiger(
     payload["requested_date"] = previous_date
     payload["calendar_source"] = str(calendar.get("source") or "")
     return payload
+
+
+def load_sector_tide_overnight_us(
+    now: datetime | None = None,
+    *,
+    summary_loader: Callable[..., dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    """Load only the cache validated for today's completed US session."""
+    if summary_loader is None:
+        import us_market_summary
+
+        summary_loader = us_market_summary.load_cached_summary_for_today
+    try:
+        summary = summary_loader(now)
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "overnight_us_market_summary",
+            "error": f"cache_read_{type(exc).__name__}",
+        }
+    if not isinstance(summary, dict):
+        return {
+            "available": False,
+            "source": "overnight_us_market_summary",
+            "error": "cache_missing_or_stale",
+        }
+    return dict(summary)
+
+
+def fetch_sector_tide_news_precheck(
+    candidates: list[dict[str, Any]],
+    now: datetime | None = None,
+    *,
+    config: NewsPrecheckConfig | None = None,
+    fetcher: Callable[..., list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Fetch bounded structured news for the first-pass Sector Tide shortlist."""
+    selected = [item for item in candidates[:SECTOR_TIDE_NEWS_PRECHECK_LIMIT] if isinstance(item, dict)]
+    if not selected:
+        return {"configured": False, "available": False, "records": [], "error": "empty_shortlist"}
+    try:
+        active_config = config or NewsPrecheckConfig.from_mapping({
+            name: dashboard_env_value(name) or ""
+            for name in (
+                "DASHBOARD_NEWS_BASE_URL",
+                "DASHBOARD_NEWS_API_KEY",
+                "DASHBOARD_NEWS_MODEL",
+                "DASHBOARD_NEWS_TIMEOUT",
+                "DASHBOARD_NEWS_MAX_RETRIES",
+                "DASHBOARD_NEWS_CONCURRENCY",
+                "DASHBOARD_NEWS_MAX_TOKENS",
+            )
+        })
+    except ValueError as exc:
+        return {
+            "configured": True,
+            "available": False,
+            "records": [],
+            "error": str(exc).split(":", 1)[0],
+        }
+    if active_config is None:
+        return {"configured": False, "available": False, "records": [], "error": "not_configured"}
+    active_fetcher = fetcher or fetch_candidate_news_records
+    try:
+        records = active_fetcher(
+            selected,
+            active_config,
+            max_candidates=SECTOR_TIDE_NEWS_PRECHECK_LIMIT,
+            now=now,
+        )
+    except Exception as exc:
+        return {
+            "configured": True,
+            "available": False,
+            "records": [],
+            "error": f"fetch_{type(exc).__name__}",
+        }
+    return {
+        "configured": True,
+        "available": any(record.get("available") for record in records),
+        "fetched_at": next(
+            (str(record.get("fetched_at") or "") for record in records if record.get("fetched_at")),
+            "",
+        ),
+        "records": records,
+        "error": "" if any(record.get("available") for record in records) else "all_records_unavailable",
+    }
 
 
 def load_a_share_code_pool(stock_universe: object | None = None):
@@ -1112,6 +1204,11 @@ def main():
     sector_tide_context: dict[str, Any] | None = None
     prepared_by_code: dict[str, list[dict[str, Any]]] = {}
     industry_by_code: dict[str, str] = {}
+    prepared_items: list[dict[str, Any]] = []
+    sector_tide_flow_rows: dict[str, Any] = {"inflow": [], "outflow": []}
+    previous_sector_tide_market: dict[str, Any] | None = None
+    dragon_tiger_snapshot: dict[str, Any] | None = None
+    overnight_us_snapshot: dict[str, Any] | None = None
 
     if sector_tide_enabled:
         print("  Building shared market/sector tide context...", file=sys.stderr)
@@ -1120,7 +1217,6 @@ def main():
             for code, name, q in to_analyze
         ]
         annotate_candidate_industries(sector_members, max_workers=8)
-        prepared_items: list[dict[str, Any]] = []
         for index, item in enumerate(sector_members):
             code = str(item["code"])
             name = str(item["name"])
@@ -1146,22 +1242,30 @@ def main():
             if (index + 1) % 50 == 0:
                 print(f"  ... {index + 1}/{len(sector_members)} tide members prepared", file=sys.stderr)
             time.sleep(0.02)
+        sector_tide_flow_rows = fetch_sector_tide_money_flow()
+        previous_sector_tide_market = load_previous_sector_tide_market()
+        dragon_tiger_snapshot = load_previous_sector_tide_dragon_tiger()
+        overnight_us_snapshot = load_sector_tide_overnight_us()
         sector_tide_context = build_sector_tide_context(
             prepared_items,
             market_snapshot=market_snapshot,
-            flow_rows=fetch_sector_tide_money_flow(),
-            previous_market=load_previous_sector_tide_market(),
-            dragon_tiger_snapshot=load_previous_sector_tide_dragon_tiger(),
+            flow_rows=sector_tide_flow_rows,
+            previous_market=previous_sector_tide_market,
+            dragon_tiger_snapshot=dragon_tiger_snapshot,
+            overnight_us_snapshot=overnight_us_snapshot,
         )
         market = sector_tide_context.get("market") or {}
         dragon_tiger = sector_tide_context.get("dragon_tiger") or {}
+        overnight_us = sector_tide_context.get("overnight_us") or {}
         print(
             "  Tide context: "
             f"market={market.get('state')} score={market.get('score')} "
             f"sectors={sector_tide_context.get('sector_count')} "
             f"coverage={sector_tide_context.get('data_coverage')} "
             f"dragon_tiger={dragon_tiger.get('as_of_date') or 'unavailable'} "
-            f"matched={dragon_tiger.get('matched_stock_count', 0)}",
+            f"matched={dragon_tiger.get('matched_stock_count', 0)} "
+            f"overnight_us={overnight_us.get('target_us_date') or 'unavailable'} "
+            f"tone={overnight_us.get('tone', 'neutral')}",
             file=sys.stderr,
         )
 
@@ -1236,6 +1340,10 @@ def main():
             "sector_breadth20": best.get("sector_breadth20"),
             "stock_sector_rank": best.get("stock_sector_rank"),
             "stock_market_rank": best.get("stock_market_rank"),
+            "score_before_external_context": best.get("score_before_external_context"),
+            "raw_external_context_adjustment": best.get("raw_external_context_adjustment"),
+            "external_context_adjustment": best.get("external_context_adjustment"),
+            "external_context_capped": best.get("external_context_capped"),
             "score_before_dragon_tiger": best.get("score_before_dragon_tiger"),
             "dragon_tiger_available": best.get("dragon_tiger_available"),
             "dragon_tiger_as_of_date": best.get("dragon_tiger_as_of_date"),
@@ -1256,6 +1364,28 @@ def main():
             "sector_dragon_tiger_score": best.get("sector_dragon_tiger_score"),
             "sector_dragon_tiger_adjustment": best.get("sector_dragon_tiger_adjustment"),
             "sector_dragon_tiger_listed_count": best.get("sector_dragon_tiger_listed_count"),
+            "overnight_us_available": best.get("overnight_us_available"),
+            "overnight_us_target_date": best.get("overnight_us_target_date"),
+            "overnight_us_tone": best.get("overnight_us_tone"),
+            "overnight_us_tone_label": best.get("overnight_us_tone_label"),
+            "overnight_us_summary": best.get("overnight_us_summary"),
+            "overnight_us_sector_matched": best.get("overnight_us_sector_matched"),
+            "overnight_us_sector": best.get("overnight_us_sector"),
+            "overnight_us_proxy": best.get("overnight_us_proxy"),
+            "overnight_us_change_pct": best.get("overnight_us_change_pct"),
+            "overnight_us_signal": best.get("overnight_us_signal"),
+            "overnight_us_adjustment": best.get("overnight_us_adjustment"),
+            "overnight_us_positive_suppressed": best.get("overnight_us_positive_suppressed"),
+            "news_precheck_configured": best.get("news_precheck_configured"),
+            "news_precheck": best.get("news_precheck"),
+            "news_checked": best.get("news_checked"),
+            "news_available": best.get("news_available"),
+            "news_tone": best.get("news_tone"),
+            "news_tone_label": best.get("news_tone_label"),
+            "news_summary": best.get("news_summary"),
+            "news_fetched_at": best.get("news_fetched_at"),
+            "news_adjustment": best.get("news_adjustment"),
+            "news_positive_suppressed": best.get("news_positive_suppressed"),
             "ema20": best.get("ema20"),
             "ema50": best.get("ema50"),
             "atr20": best.get("atr20"),
@@ -1296,6 +1426,48 @@ def main():
         return (s, above, -dist)
 
     results.sort(key=sort_key, reverse=True)
+    if sector_tide_enabled and sector_tide_context is not None:
+        news_shortlist = [
+            item
+            for item in results
+            if str(item.get("best_strategy") or "") in SECTOR_TIDE_STRATEGY_IDS
+        ][:SECTOR_TIDE_NEWS_PRECHECK_LIMIT]
+        news_snapshot = fetch_sector_tide_news_precheck(news_shortlist)
+        sector_tide_context = build_sector_tide_context(
+            prepared_items,
+            market_snapshot=market_snapshot,
+            flow_rows=sector_tide_flow_rows,
+            previous_market=previous_sector_tide_market,
+            dragon_tiger_snapshot=dragon_tiger_snapshot,
+            overnight_us_snapshot=overnight_us_snapshot,
+            news_snapshot=news_snapshot,
+        )
+        record_codes = {
+            normalize_stock_code(record.get("code"))
+            for record in news_snapshot.get("records") or []
+            if isinstance(record, dict) and normalize_stock_code(record.get("code"))
+        }
+        source_by_code = {str(candidate[0]): candidate for candidate in to_analyze}
+        refreshed_by_code: dict[str, dict[str, Any]] = {}
+        for code in record_codes:
+            source = source_by_code.get(code)
+            refreshed = analyze_candidate(source) if source else None
+            if refreshed is not None:
+                refreshed_by_code[code] = refreshed
+        if refreshed_by_code:
+            results = [
+                refreshed_by_code.get(str(item.get("code") or ""), item)
+                for item in results
+            ]
+            results.sort(key=sort_key, reverse=True)
+        news_meta = sector_tide_context.get("news") or {}
+        print(
+            "  Tide news precheck: "
+            f"configured={news_meta.get('configured')} "
+            f"checked={news_meta.get('matched_stock_count', 0)} "
+            f"available={news_meta.get('available_stock_count', 0)}",
+            file=sys.stderr,
+        )
     display_candidates = select_display_candidates(results)
     trade_candidates = select_trade_candidates(results)
     annotate_candidate_industries(display_candidates, trade_candidates)
