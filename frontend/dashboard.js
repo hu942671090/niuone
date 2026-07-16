@@ -912,16 +912,20 @@ async function loadMarketMonitorAuxData() {
 }
 async function loadIndices() {
   try {
-    const idxPromise = fetch('/api/indices').then(r => r.ok ? r.json() : {items: []});
-    const secPromise = fetch('/api/sectors').then(r => r.ok ? r.json() : {sectors: []});
-    const usSecPromise = fetch('/api/us_sectors').then(r => r.ok ? r.json() : {items: []});
-    const hotPromise = fetch('/api/hot_stocks').then(r => r.ok ? r.json() : {items: []});
-    const mfPromise = fetch('/api/money_flow').then(r => r.ok ? r.json() : {inflow: [], outflow: []});
-    const mkfPromise = fetch('/api/market_flow').then(r => r.ok ? r.json() : {total_inflow_yi: null});
-    const idx = await idxPromise;
+    const fetchJson = (url, fallback) => fetch(url)
+      .then(r => r.ok ? r.json() : {...fallback, error: `HTTP ${r.status}`})
+      .catch(error => ({...fallback, error: String(error)}));
+    // Prioritize the index strip. Secondary rankings can fan out after the
+    // first useful paint instead of competing with the cold quote request.
+    const idx = await fetchJson('/api/indices', {items: []});
     indicesData = idx || {items: []};
     if (activeCategory === 'indices') render();
     saveViewState();
+    const secPromise = fetchJson('/api/sectors', {sectors: []});
+    const usSecPromise = fetchJson('/api/us_sectors', {items: []});
+    const hotPromise = fetchJson('/api/hot_stocks', {items: []});
+    const mfPromise = fetchJson('/api/money_flow', {inflow: [], outflow: []});
+    const mkfPromise = fetchJson('/api/market_flow', {total_inflow_yi: null});
     const [sec, usSec, hot, mf, mkf] = await Promise.all([secPromise, usSecPromise, hotPromise, mfPromise, mkfPromise]);
     sectorData = sec || sectorData || {sectors: []};
     usSectorData = usSec || usSectorData || {items: []};
@@ -2720,6 +2724,9 @@ function renderIndicesPanel() {
   const sectors = sec.sectors || sec.items || [];
   const mf = moneyFlowData;
   const errorHtml = idx.error ? `<div class="empty" style="color:#f87171;margin-bottom:12px">指数接口错误：${esc(idx.error)}</div>` : '';
+  const cacheNoticeHtml = idx.stale_cache
+    ? `<div class="indices-cache-notice" role="status"><span>正在后台更新实时行情</span><span>当前展示 ${esc(idx.generated_at || '上次成功')} 缓存</span></div>`
+    : '';
   if (!items.length && !idx.error) {
     return '<div class="loading">行情加载中...</div>';
   }
@@ -2918,7 +2925,7 @@ function renderIndicesPanel() {
   const activeHtml = activePanel === 'market'
     ? (marketHtml || `<div class="empty" style="padding:18px">${hasMarketPayload ? '暂无行情数据' : '行情加载中...'}</div>`)
     : (indexHtml || '<div class="empty" style="padding:18px">暂无指数数据</div>');
-  return `${errorHtml}<div class="indices-page">
+  return `${errorHtml}${cacheNoticeHtml}<div class="indices-page">
     <div class="indices-switch" role="group" aria-label="指数行情切换">
       <button type="button" class="indices-switch-btn ${activePanel === 'index' ? 'active' : ''}" aria-pressed="${activePanel === 'index' ? 'true' : 'false'}" onclick="setIndicesViewMode('index')">指数</button>
       <button type="button" class="indices-switch-btn ${activePanel === 'market' ? 'active' : ''}" aria-pressed="${activePanel === 'market' ? 'true' : 'false'}" onclick="setIndicesViewMode('market')">行情</button>

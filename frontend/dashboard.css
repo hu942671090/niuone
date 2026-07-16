@@ -89,6 +89,8 @@
     .market-strip { display:flex; gap:12px; overflow-x:auto; margin:0 0 16px; padding-bottom:4px; scrollbar-width:none; }
     .market-strip::-webkit-scrollbar { display:none; }
     .indices-page { display:grid; gap:14px; }
+    .indices-cache-notice { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; padding:9px 12px; border:1px solid rgba(56,189,248,.22); border-radius:12px; color:#bae6fd; background:rgba(14,116,144,.12); font-size:12px; font-weight:700; }
+    .indices-cache-notice span:last-child { color:#7dd3fc; font-variant-numeric:tabular-nums; }
     .indices-switch { width:min(320px,100%); display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:3px; padding:3px; border:1px solid rgba(148,163,184,.16); border-radius:14px; background:rgba(2,6,23,.46); box-shadow:inset 0 1px 0 rgba(255,255,255,.035); }
     .indices-switch-btn { appearance:none; border:0; border-radius:10px; margin:0; padding:9px 12px; min-width:0; color:#94a3b8; background:transparent; font-size:14px; line-height:1; font-weight:850; }
     .indices-switch-btn.active { color:#f8fafc; background:linear-gradient(135deg, rgba(124,92,255,.86), rgba(36,198,220,.58)); box-shadow:0 8px 22px rgba(124,92,255,.18), inset 0 1px 0 rgba(255,255,255,.10); }
@@ -752,6 +754,7 @@
       .practice-calendar-amount { font-size:8px; }
       .market-strip { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:7px; margin:0 0 9px; }
       .indices-page { gap:11px; }
+      .indices-cache-notice { align-items:flex-start; flex-direction:column; gap:3px; }
       .indices-switch { width:100%; }
       .indices-switch-btn { padding:8px 10px; font-size:13px; }
       .indices-part-title-row { gap:8px; }

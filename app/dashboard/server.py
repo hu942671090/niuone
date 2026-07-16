@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 import urllib.request
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
+from dashboard_json_cache import write_json_cache
 from dashboard import practice_payload as practice_payload_impl
 from dashboard import practice_market_summary as practice_market_summary_impl
 from dashboard import security as security_impl
@@ -128,6 +129,7 @@ CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG") or str(DASHBOARD_HOME / "c
 DASHBOARD_ENV_FILE = get_dashboard_env_file(PROJECT_ROOT)
 CRON_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 CRON_STATE_DIR = DASHBOARD_HOME / "cron" / "state"
+INDICES_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "indices_dashboard_cache.json"
 IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = Path(
     os.environ.get("IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE")
     or CRON_OUTPUT_DIR / "iwencai_dragon_tiger_latest.json"
@@ -1006,6 +1008,24 @@ def annotate_practice_snapshot(payload: dict[str, Any], *, mode: str, history_sc
     return payload
 
 
+def persist_indices_snapshot(payload: dict[str, Any]) -> bool:
+    """Keep the last complete index response for fast startup fallback."""
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or not items or payload.get("error"):
+        return False
+    snapshot = dict(payload)
+    snapshot.pop("stale_cache", None)
+    try:
+        write_json_cache(INDICES_SNAPSHOT_FILE, snapshot)
+    except (OSError, TypeError, ValueError) as exc:
+        print(
+            f"dashboard indices snapshot write failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def produce_indices_data() -> dict[str, Any]:
     try:
         import importlib.util
@@ -1017,7 +1037,9 @@ def produce_indices_data() -> dict[str, Any]:
             indices_mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(indices_mod)
             raw_result = indices_mod.fetch_indices_data()
-            return raw_result if isinstance(raw_result, dict) else {"items": raw_result}
+            result = raw_result if isinstance(raw_result, dict) else {"items": raw_result}
+            persist_indices_snapshot(result)
+            return result
         return {"items": []}
     except Exception as exc:
         return {"items": [], "error": str(exc)}
@@ -4222,6 +4244,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json_cached("practice_benchmarks", API_TTLS["practice_benchmarks"], get_practice_benchmarks, edge_ttl=API_TTLS["practice_benchmarks"], browser_ttl=10)
             return
         if parsed.path == "/api/indices":
+            seed_api_cache_from_json_file(
+                "indices",
+                INDICES_SNAPSHOT_FILE,
+                API_TTLS["indices"],
+            )
             self.send_json_cached("indices", API_TTLS["indices"], produce_indices_data, edge_ttl=API_TTLS["indices"], browser_ttl=15)
             return
         if parsed.path == "/api/sectors":

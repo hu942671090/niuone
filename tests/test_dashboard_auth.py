@@ -75,6 +75,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.original_stats_db = dashboard.STATS_DB
         self.original_legacy_stats_db = dashboard.LEGACY_STATS_DB
         self.original_admin_token_file = dashboard.ADMIN_TOKEN_FILE
+        self.original_indices_snapshot_file = dashboard.INDICES_SNAPSHOT_FILE
         self.original_iwencai_snapshot_file = dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE
         self.original_admin_password = dashboard.ADMIN_PASSWORD
         self.saved_env = {
@@ -104,6 +105,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.ADMIN_PASSWORD = ''
         dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
         dashboard.CRON_STATE_DIR = self.tmp_path / 'cron' / 'state'
+        dashboard.INDICES_SNAPSHOT_FILE = self.tmp_path / 'cron' / 'output' / 'indices_dashboard_cache.json'
         dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = self.tmp_path / 'cron' / 'output' / 'iwencai_dragon_tiger_latest.json'
         dashboard.API_RESPONSE_CACHE.clear()
         dashboard.API_CACHE_KEY_LOCKS.clear()
@@ -118,6 +120,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.STATS_DB = self.original_stats_db
         dashboard.LEGACY_STATS_DB = self.original_legacy_stats_db
         dashboard.ADMIN_TOKEN_FILE = self.original_admin_token_file
+        dashboard.INDICES_SNAPSHOT_FILE = self.original_indices_snapshot_file
         dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = self.original_iwencai_snapshot_file
         dashboard.ADMIN_PASSWORD = self.original_admin_password
         for name, value in self.saved_env.items():
@@ -172,8 +175,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
-        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=21">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=35" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=22">', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=36" defer></script>', DASHBOARD_FRONTEND)
         self.assertNotIn('document.title', DASHBOARD_FRONTEND)
         self.assertIn("document.title = '牛牛1号';", ADMIN_FRONTEND)
         self.assertNotIn("title + ' · 牛牛1号'", ADMIN_FRONTEND)
@@ -1339,7 +1342,7 @@ console.log(JSON.stringify(result));
 
     def test_indices_market_panel_switches_to_us_sectors_with_index_session(self):
         self.assertIn("let usSectorData = {items: []};", DASHBOARD_FRONTEND)
-        self.assertIn("fetch('/api/us_sectors')", DASHBOARD_FRONTEND)
+        self.assertIn("fetchJson('/api/us_sectors'", DASHBOARD_FRONTEND)
         self.assertIn('function indicesSwitchSession(aIndexItems = [])', DASHBOARD_FRONTEND)
         self.assertIn("let indicesMarketRegionOverride = '';", DASHBOARD_FRONTEND)
         self.assertIn('function resolvedIndicesMarketRegion(aIndexItems = [])', DASHBOARD_FRONTEND)
@@ -1809,6 +1812,76 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(payload['items'], [{'name': '银行'}])
         self.assertLessEqual(cached['ts'], before - 60)
         self.assertFalse(dashboard.seed_api_cache_from_json_file('sectors', snapshot, 60))
+
+    def test_indices_snapshot_only_replaces_cache_with_nonempty_success(self):
+        valid = {
+            'generated_at': '2026-07-17 10:00:00',
+            'items': [{'code': 'sh000001', 'name': '上证指数', 'price': 3500}],
+            'stale_cache': True,
+        }
+        self.assertTrue(dashboard.persist_indices_snapshot(valid))
+        stored = json.loads(dashboard.INDICES_SNAPSHOT_FILE.read_text(encoding='utf-8'))
+        self.assertEqual(stored['items'], valid['items'])
+        self.assertNotIn('stale_cache', stored)
+
+        self.assertFalse(dashboard.persist_indices_snapshot({'items': []}))
+        self.assertFalse(dashboard.persist_indices_snapshot({'items': valid['items'], 'error': 'upstream failed'}))
+        unchanged = json.loads(dashboard.INDICES_SNAPSHOT_FILE.read_text(encoding='utf-8'))
+        self.assertEqual(unchanged, stored)
+
+    def test_indices_route_serves_snapshot_while_refreshing_in_background(self):
+        dashboard.INDICES_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dashboard.INDICES_SNAPSHOT_FILE.write_text(
+            json.dumps({
+                'generated_at': '2026-07-17 09:30:00',
+                'items': [{'code': 'sh000001', 'name': '上证指数', 'price': 3490}],
+            }),
+            encoding='utf-8',
+        )
+        original_producer = dashboard.produce_indices_data
+        producer_started = threading.Event()
+        release_producer = threading.Event()
+
+        def slow_producer():
+            producer_started.set()
+            self.assertTrue(release_producer.wait(timeout=2))
+            return {
+                'generated_at': '2026-07-17 10:01:00',
+                'items': [{'code': 'sh000001', 'name': '上证指数', 'price': 3510}],
+            }
+
+        dashboard.produce_indices_data = slow_producer
+        try:
+            handler = FakeHandler(path='/api/indices')
+            started_at = dashboard.time.monotonic()
+            handler.do_GET()
+            elapsed = dashboard.time.monotonic() - started_at
+            payload = json.loads(handler.wfile.getvalue().decode('utf-8'))
+
+            self.assertEqual(handler.status, 200)
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(payload['stale_cache'])
+            self.assertEqual(payload['items'][0]['price'], 3490)
+            self.assertTrue(producer_started.wait(timeout=1))
+        finally:
+            release_producer.set()
+            dashboard.produce_indices_data = original_producer
+
+        deadline = dashboard.time.time() + 2
+        while dashboard.time.time() < deadline:
+            cached = dashboard.API_RESPONSE_CACHE.get('indices', {})
+            if b'3510' in cached.get('payload', b''):
+                break
+            dashboard.time.sleep(0.01)
+        refreshed = json.loads(dashboard.API_RESPONSE_CACHE['indices']['payload'])
+        self.assertEqual(refreshed['items'][0]['price'], 3510)
+
+    def test_indices_frontend_prioritizes_primary_quotes_and_labels_stale_cache(self):
+        index_fetch = DASHBOARD_FRONTEND.index("fetchJson('/api/indices'")
+        sector_fetch = DASHBOARD_FRONTEND.index("fetchJson('/api/sectors'")
+        self.assertLess(index_fetch, sector_fetch)
+        self.assertIn('正在后台更新实时行情', DASHBOARD_FRONTEND)
+        self.assertIn('indices-cache-notice', DASHBOARD_FRONTEND)
 
     def test_index_template_intraday_curve_renders_single_point_from_opening_base(self):
         self.assertIn('if (rawPoints.length < (isDailyMode ? 2 : 1))', DASHBOARD_FRONTEND)
