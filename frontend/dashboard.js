@@ -2978,6 +2978,12 @@ function renderPracticePage() {
       super_b1:       {label:'超级B1',    color:'#fb7185'},
     };
     const STRATEGY_META = {...fallbackStrategyMeta, ...(d.strategy_meta || {})};
+    const STOCK_BOARD_LABELS = {
+      main_board: '主板',
+      chi_next: '创业板',
+      star_market: '科创板',
+      st: 'ST',
+    };
     const tierCounts = {high:0, mid:0, low:0};
     for (const item of items) {
       const s = item.best_score || item.score || 0;
@@ -3021,7 +3027,7 @@ function renderPracticePage() {
       const scoreBasis = item.score_basis || '';
       const tradeDiscipline = [item.position_hint, item.time_stop].filter(Boolean).join(' · ');
       const tradeReady = !!item.actionable && !hardBlockers.length && finalScore >= entryThreshold;
-      const industryLabel = item.industry || item.sector || item.board || '';
+      const industryLabel = item.industry || item.sector || item.board_label || STOCK_BOARD_LABELS[item.board] || '';
       const groupBadgeBase = 'display:inline-flex;align-items:center;flex:0 0 auto;white-space:nowrap;line-height:1;background:rgba(52,211,153,.15);color:#34d399;padding:6px 10px;border-radius:999px;font-size:11px;font-weight:600';
       if (tradeReady) groupBadge = `<span style="${groupBadgeBase}">交易达标</span>`;
       else if (hardBlockers.length) groupBadge = `<span style="${groupBadgeBase};background:rgba(251,191,36,.15);color:#fbbf24">硬过滤</span>`;
