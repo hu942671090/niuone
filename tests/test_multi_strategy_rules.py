@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import concurrent.futures
 import os
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -233,6 +235,68 @@ class MultiStrategyRuleTests(unittest.TestCase):
                 os.environ.pop(trade_name, None)
             else:
                 os.environ[trade_name] = saved_trade
+
+    def test_market_enrichment_reuses_market_wide_downloads_across_workers(self):
+        import pandas as pd
+
+        margin_calls = []
+        block_calls = []
+        margin_frame = pd.DataFrame([
+            {
+                '标的证券代码': '600001',
+                '融资买入额': 4_000_000,
+                '融资偿还额': 1_000_000,
+                '融资余额': 100_000_000,
+            },
+            {
+                '标的证券代码': '600002',
+                '融资买入额': 2_000_000,
+                '融资偿还额': 1_000_000,
+                '融资余额': 100_000_000,
+            },
+        ])
+        block_frame = pd.DataFrame([
+            {'证券代码': '600001', '成交额': 1_000_000, '折溢率': 2.5},
+            {'证券代码': '600002', '成交额': 2_000_000, '折溢率': -1.0},
+        ])
+
+        def load_margin(date):
+            time.sleep(0.03)
+            margin_calls.append(date)
+            return margin_frame
+
+        def load_block(**kwargs):
+            time.sleep(0.03)
+            block_calls.append(kwargs)
+            return block_frame
+
+        fake_akshare = types.SimpleNamespace(
+            stock_margin_detail_sse=load_margin,
+            stock_margin_detail_szse=lambda date: margin_calls.append(date) or margin_frame,
+            stock_dzjy_mrmx=load_block,
+        )
+        original_akshare = sys.modules.get('akshare')
+        screen._MARGIN_DETAIL_CACHE.clear()
+        screen._BLOCK_TRADE_CACHE.clear()
+        sys.modules['akshare'] = fake_akshare
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                margin_results = list(pool.map(screen.get_margin_signal, ['600001', '600002']))
+                block_results = list(
+                    pool.map(screen.get_block_trade_signal, ['600001', '600002'])
+                )
+        finally:
+            screen._MARGIN_DETAIL_CACHE.clear()
+            screen._BLOCK_TRADE_CACHE.clear()
+            if original_akshare is None:
+                sys.modules.pop('akshare', None)
+            else:
+                sys.modules['akshare'] = original_akshare
+
+        self.assertTrue(all(result is not None for result in margin_results))
+        self.assertTrue(all(result is not None for result in block_results))
+        self.assertEqual(len(margin_calls), 1)
+        self.assertEqual(len(block_calls), 1)
 
     def test_extract_industry_from_individual_info_rows(self):
         rows = [
