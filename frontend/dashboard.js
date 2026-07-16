@@ -2359,8 +2359,14 @@ function renderPracticeMarketSummary() {
   const generating = !!practiceMarketSummaryGenerating;
   const scanCount = Math.max(0, Number(d.scan_count) || 0);
   const usSummaryCount = Math.max(0, Number(d.us_summary_count) || 0);
-  const sourceCountText = `A股 ${scanCount} 次${usSummaryCount ? ` · 前日美股 ${usSummaryCount} 份` : ''}`;
-  const buttonText = generating ? '正在汇总今日盘面…' : '生成今日盘面总结';
+  const liveSnapshotCount = Math.max(0, Number(d.live_snapshot_count) || 0);
+  const previousSummaryCount = Math.max(0, Number(d.previous_summary_count) || 0);
+  const sourceParts = [`已有A股总结 ${scanCount} 次`];
+  if (usSummaryCount) sourceParts.push(`前日美股 ${usSummaryCount} 份`);
+  if (previousSummaryCount) sourceParts.push(`上一版 ${previousSummaryCount} 份`);
+  if (liveSnapshotCount) sourceParts.push(`实时快照 ${liveSnapshotCount} 份`);
+  const sourceCountText = sourceParts.join(' · ');
+  const buttonText = generating ? '正在抓取实时盘面并对比…' : '生成今日盘面总结';
   const statusText = d.loading
     ? '正在读取今日盘面扫描'
     : (scanCount ? `复盘资料：${sourceCountText}` : '今日暂无A股盘面扫描');
@@ -2370,6 +2376,7 @@ function renderPracticeMarketSummary() {
   </div>`;
   const error = d.error ? `<div class="practice-market-summary-error">${esc(d.error)}</div>` : '';
   if (!d.available || !d.summary) return `${action}${error}`;
+  const comparisons = Array.isArray(d.comparison_lines) ? d.comparison_lines.filter(Boolean).slice(0, 5) : [];
   const trendLines = Array.isArray(d.trend_lines) ? d.trend_lines.filter(Boolean).slice(0, 5) : [];
   const structureLines = Array.isArray(d.structure_lines) ? d.structure_lines.filter(Boolean).slice(0, 5) : [];
   const risks = Array.isArray(d.risk_lines) ? d.risk_lines.filter(Boolean).slice(0, 4) : [];
@@ -2386,10 +2393,11 @@ function renderPracticeMarketSummary() {
     </button>
     <div class="practice-market-summary-body"${expanded ? '' : ' hidden'}>
       <p>${esc(d.summary)}</p>
+      ${renderList('实时对比结论', comparisons)}
       ${renderList('走势脉络', trendLines)}
       ${renderList('市场结构', structureLines)}
       ${renderList('风险变化', risks, 'risk')}
-      <div class="practice-market-summary-meta">汇总 ${esc(sourceCountText)} · ${esc(sourceMode)}${d.stale ? ' · 当前结果未包含最新资料' : ''}</div>
+      <div class="practice-market-summary-meta">汇总 ${esc(sourceCountText)} · ${esc(sourceMode)}${d.live_snapshot_at ? ` · 实时抓取 ${esc(d.live_snapshot_at.slice(11, 19))}` : ''}${d.stale ? ' · 当前结果未包含最新资料' : ''}</div>
     </div>
   </section>`;
 }

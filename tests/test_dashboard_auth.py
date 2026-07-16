@@ -2211,6 +2211,44 @@ process.stdout.write(JSON.stringify({
             dashboard.generate_practice_market_summary = original_generate
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
 
+    def test_manual_market_summary_snapshot_force_refreshes_live_channels(self):
+        original_runner = dashboard.run_dashboard_helper
+        original_builder = dashboard.practice_market_summary_impl.build_realtime_market_snapshot
+        calls = []
+        captured = {}
+        try:
+            def fake_runner(script_name, fallback, timeout=90, args=()):
+                calls.append((script_name, timeout, args))
+                return {"script": script_name}
+
+            def fake_builder(indices, sectors, money_flow, now):
+                captured.update({
+                    "indices": indices,
+                    "sectors": sectors,
+                    "money_flow": money_flow,
+                    "now": now,
+                })
+                return {"complete": True, "time": now.strftime('%Y-%m-%d %H:%M:%S')}
+
+            dashboard.run_dashboard_helper = fake_runner
+            dashboard.practice_market_summary_impl.build_realtime_market_snapshot = fake_builder
+            now = datetime(2026, 7, 14, 12, 0, 0)
+
+            result = dashboard.fetch_practice_realtime_market_snapshot(now)
+        finally:
+            dashboard.run_dashboard_helper = original_runner
+            dashboard.practice_market_summary_impl.build_realtime_market_snapshot = original_builder
+
+        self.assertTrue(result["complete"])
+        self.assertEqual({call[0] for call in calls}, {
+            "indices_dashboard_api.py",
+            "sectors_dashboard_api.py",
+            "money_flow_dashboard_api.py",
+        })
+        self.assertTrue(all(call[1:] == (120, ("--force-refresh",)) for call in calls))
+        self.assertEqual(captured["indices"]["script"], "indices_dashboard_api.py")
+        self.assertEqual(captured["now"], now)
+
     def test_notification_test_api_has_dedicated_rate_limit_and_body_limit(self):
         original_sender = dashboard.send_notification_test
         original_admin_limit = dashboard.RATE_LIMIT_ADMIN

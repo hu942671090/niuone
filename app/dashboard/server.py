@@ -887,7 +887,12 @@ def get_trader_module():
                     TRADER_SELL_SIGNALS_MTIME = support_mtime
     return TRADER_MODULE
 
-def run_dashboard_helper(script_name: str, fallback: dict[str, Any], timeout: int = 90) -> dict[str, Any]:
+def run_dashboard_helper(
+    script_name: str,
+    fallback: dict[str, Any],
+    timeout: int = 90,
+    args: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Run dashboard helper API scripts out-of-process.
 
     Some akshare paths load native JavaScript runtimes that can abort the whole
@@ -896,7 +901,12 @@ def run_dashboard_helper(script_name: str, fallback: dict[str, Any], timeout: in
     """
     script = COMPAT_DIR / script_name
     try:
-        raw = subprocess.check_output([sys.executable, str(script)], text=True, timeout=timeout, stderr=subprocess.DEVNULL)
+        raw = subprocess.check_output(
+            [sys.executable, str(script), *args],
+            text=True,
+            timeout=timeout,
+            stderr=subprocess.DEVNULL,
+        )
         return json.loads(raw)
     except Exception as exc:
         return {**fallback, "error": str(exc)}
@@ -1925,11 +1935,45 @@ def get_practice_market_summary_status() -> dict[str, Any]:
     )
 
 
+def fetch_practice_realtime_market_snapshot(now: datetime) -> dict[str, Any]:
+    """Force-refresh current A-share channels in isolated helper processes."""
+    jobs = {
+        "indices": ("indices_dashboard_api.py", {"items": []}),
+        "sectors": ("sectors_dashboard_api.py", {"gain_top": [], "loss_top": [], "items": []}),
+        "money_flow": ("money_flow_dashboard_api.py", {"inflow": [], "outflow": []}),
+    }
+    payloads: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = {
+            key: pool.submit(
+                run_dashboard_helper,
+                script_name,
+                fallback,
+                120,
+                ("--force-refresh",),
+            )
+            for key, (script_name, fallback) in jobs.items()
+        }
+        for key, future in futures.items():
+            try:
+                payloads[key] = future.result()
+            except Exception as exc:
+                payloads[key] = {**jobs[key][1], "error": f"{type(exc).__name__}: {exc}"}
+    return practice_market_summary_impl.build_realtime_market_snapshot(
+        payloads.get("indices") or {},
+        payloads.get("sectors") or {},
+        payloads.get("money_flow") or {},
+        now,
+    )
+
+
 def generate_practice_market_summary() -> dict[str, Any]:
     return practice_market_summary_impl.generate_and_store_summary(
         _practice_market_summary_records(),
         PRACTICE_MARKET_SUMMARY_FILE,
         current_cn_datetime(),
+        realtime_snapshot_provider=fetch_practice_realtime_market_snapshot,
+        require_realtime=True,
     )
 
 
