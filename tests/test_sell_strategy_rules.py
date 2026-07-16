@@ -258,6 +258,83 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(state["cash"], 100000.0)
         self.assertIn("执行前复核失败", decision["execution_blocked_reason"])
 
+    def test_execute_actions_blocks_locked_manual_position(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: self.fail("locked position must not request execution quote")
+            state = {
+                "cash": 100000.0,
+                "positions": {
+                    "561980": {
+                        "code": "561980",
+                        "name": "半导体设备ETF招商",
+                        "qty": 18200,
+                        "avg_cost": 0.7649,
+                        "last_price": 0.744,
+                        "auto_trade_locked": True,
+                    }
+                },
+                "trade_log": [],
+            }
+            decision = {
+                "actions": [{
+                    "action": "SELL",
+                    "code": "561980",
+                    "name": "半导体设备ETF招商",
+                    "shares": 18200,
+                    "reason": "test",
+                }]
+            }
+
+            executed = trader.execute_actions(state, decision, [], True, "连续竞价交易时段")
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["561980"]["qty"], 18200)
+        self.assertIn("真实同步持仓已锁定", decision["execution_blocked_reason"])
+
+    def test_execute_actions_records_quote_failure(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {
+                "code": code,
+                "price": None,
+                "error": "missing quotes: 600000",
+            }
+            state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            decision = {
+                "actions": [{
+                    "action": "BUY",
+                    "code": "600000",
+                    "name": "测试股",
+                    "shares": 1000,
+                    "reason": "test",
+                }]
+            }
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [],
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["cash"], 100000.0)
+        self.assertIn("成交价获取失败", decision["execution_blocked_reason"])
+        self.assertIn("missing quotes: 600000", decision["execution_blocked_reason"])
+
     def test_execute_actions_fills_missing_trade_reason(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
@@ -1688,6 +1765,26 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(quote["price"], 10.25)
         self.assertEqual(quote["execution_price_source"], "auction_reference:test auction")
 
+    def test_execution_quote_uses_redundant_sources_during_session(self):
+        original_auction = trader.is_a_share_auction_time
+        original_fetch = trader.fetch_realtime_quotes
+        original_quote_one = trader.quote_one
+        try:
+            trader.is_a_share_auction_time = lambda dt=None: False
+            trader.fetch_realtime_quotes = lambda codes: ({
+                "600000": {"code": "600000", "name": "测试股", "price": 10.35, "source": "test redundant"}
+            }, {"channel_counts": {"test": 1}, "errors": []})
+            trader.quote_one = lambda code: self.fail("direct quote fallback should not run")
+
+            quote = trader.execution_quote("600000")
+        finally:
+            trader.is_a_share_auction_time = original_auction
+            trader.fetch_realtime_quotes = original_fetch
+            trader.quote_one = original_quote_one
+
+        self.assertEqual(quote["price"], 10.35)
+        self.assertEqual(quote["execution_price_source"], "test redundant")
+
     def test_fixed_percentage_loss_does_not_trigger_exit(self):
         pos = {
             "qty": 1000,
@@ -2051,6 +2148,30 @@ class SellStrategyRuleTests(unittest.TestCase):
                 self.assertIsNotNone(tail)
                 self.assertEqual(tail["signal"], expected_signal)
                 self.assertIn("14:45", tail["reason"])
+
+    def test_auto_exit_skips_locked_manual_position(self):
+        state = {
+            "cash": 0.0,
+            "positions": {
+                "561980": {
+                    "code": "561980",
+                    "name": "半导体设备ETF招商",
+                    "qty": 18200,
+                    "avg_cost": 0.7649,
+                    "last_price": 0.70,
+                    "buy_strategy": "b3_accelerate",
+                    "buy_date_lots": {"2026-06-23": 18200},
+                    "auto_trade_locked": True,
+                }
+            },
+            "trade_log": [],
+            "decision_log": [],
+        }
+
+        executed = trader.check_auto_exits(state, datetime(2026, 6, 24, 9, 37))
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["561980"]["qty"], 18200)
 
     def test_auto_exit_b3_triggers_at_open_and_tail_rules_at_1445(self):
         def make_b3_state():

@@ -137,8 +137,8 @@ def eastmoney_spot_endpoints() -> list[str]:
     """Return ordered close-summary endpoints, including the delayed close fallback."""
     configured = os.getenv(
         "A_SHARE_SUMMARY_DIRECT_ENDPOINTS",
-        "https://push2.eastmoney.com/api/qt/clist/get,"
         "https://push2delay.eastmoney.com/api/qt/clist/get,"
+        "https://push2.eastmoney.com/api/qt/clist/get,"
         "https://82.push2.eastmoney.com/api/qt/clist/get",
     )
     return [item.strip().rstrip("?") for item in configured.split(",") if item.strip()] or [
@@ -281,32 +281,29 @@ def fetch_eastmoney_spot_direct_single_page():
 def fetch_spot():
     errors: list[str] = []
     try:
-        with time_limit(safe_int(os.getenv("A_SHARE_SUMMARY_SPOT_TIMEOUT", "50"), 50)):
-            df = quiet_call(ak.stock_zh_a_spot_em)
-        if df is not None and len(df):
-            issue = spot_snapshot_issue(extract_market(df), None)
-            if not issue:
-                return df, None
-            errors.append(f"stock_zh_a_spot_em: {issue}")
-        else:
-            errors.append("stock_zh_a_spot_em: returned empty")
-    except Exception as e:
-        errors.append(f"stock_zh_a_spot_em: {type(e).__name__}: {e}")
-
-    try:
         rows, direct_warning = fetch_eastmoney_spot_direct()
         if rows:
             issue = spot_snapshot_issue(rows, direct_warning)
             if not issue:
-                msg = "akshare东财现货接口失败，已切换东方财富直连：" + errors[-1]
-                if direct_warning:
-                    msg += f"；{direct_warning}"
-                return rows, msg
+                return rows, direct_warning
             errors.append(f"东财分页直连不完整: {issue}")
         else:
             errors.append("东财分页直连返回空")
     except Exception as e:
         errors.append(f"东财分页直连: {type(e).__name__}: {e}")
+
+    try:
+        with time_limit(safe_int(os.getenv("A_SHARE_SUMMARY_SPOT_TIMEOUT", "50"), 50)):
+            df = quiet_call(ak.stock_zh_a_spot_em)
+        if df is not None and len(df):
+            issue = spot_snapshot_issue(extract_market(df), None)
+            if not issue:
+                return df, "东财直连不可用，已切换 AkShare 现货：" + errors[-1]
+            errors.append(f"stock_zh_a_spot_em: {issue}")
+        else:
+            errors.append("stock_zh_a_spot_em: returned empty")
+    except Exception as e:
+        errors.append(f"stock_zh_a_spot_em: {type(e).__name__}: {e}")
 
     try:
         rows, tencent_warning = fetch_tencent_spot_snapshot(DASHBOARD_HOME)

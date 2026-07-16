@@ -1146,21 +1146,33 @@ def fetch_realtime_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], 
 
 def execution_quote(code: str, dt: datetime | None = None) -> dict[str, Any]:
     dt = dt or datetime.now()
-    if is_a_share_auction_time(dt):
-        quotes, _ = fetch_realtime_quotes([code])
-        quote = quotes.get(normalize_code(code)) or {}
-        price = quote.get("price") if isinstance(quote.get("price"), (int, float)) else None
-        if price and price > 0:
-            return {
-                **quote,
-                "price": float(price),
-                "execution_price_source": f"auction_reference:{quote.get('source') or 'realtime_quote'}",
-            }
-    quote = quote_one(code)
+    normalized_code = normalize_code(code)
+    quotes, meta = fetch_realtime_quotes([normalized_code])
+    quote = quotes.get(normalized_code) or {}
     price = quote.get("price") if isinstance(quote.get("price"), (int, float)) else None
     if price and price > 0:
-        return {**quote, "price": float(price), "execution_price_source": quote.get("source") or "quote_one"}
-    return quote
+        source = quote.get("source") or "realtime_quote"
+        execution_source = f"auction_reference:{source}" if is_a_share_auction_time(dt) else source
+        return {**quote, "price": float(price), "execution_price_source": execution_source}
+
+    # Keep the direct helper as a final fallback in case a provider returned
+    # malformed data during the redundant quote pass.
+    direct_quote = quote_one(normalized_code)
+    direct_price = direct_quote.get("price") if isinstance(direct_quote.get("price"), (int, float)) else None
+    if direct_price and direct_price > 0:
+        source = direct_quote.get("source") or "quote_one"
+        execution_source = f"auction_reference:{source}" if is_a_share_auction_time(dt) else source
+        return {**direct_quote, "price": float(direct_price), "execution_price_source": execution_source}
+
+    errors = [str(item) for item in (meta.get("errors") or []) if str(item).strip()]
+    if direct_quote.get("error"):
+        errors.append(str(direct_quote["error"]))
+    return {
+        "code": normalized_code,
+        "price": None,
+        "name": str(quote.get("name") or direct_quote.get("name") or ""),
+        "error": " | ".join(dict.fromkeys(errors)) or "all realtime quote sources failed",
+    }
 
 
 def refresh_realtime_prices(state: dict[str, Any]) -> dict[str, Any]:
@@ -3755,6 +3767,8 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
     
     for code in list(positions.keys()):
         pos = positions[code]
+        if pos.get("auto_trade_locked"):
+            continue
         sellable = available_to_sell(pos, today)
         if sellable <= 0:
             continue
@@ -4774,9 +4788,15 @@ def execute_actions(
         code = normalize_code(action.get("code") or "")
         if not code or act == "HOLD":
             continue
+        existing_pos = positions.get(code)
+        if existing_pos and existing_pos.get("auto_trade_locked"):
+            add_execution_block(decision, code, "真实同步持仓已锁定，自动交易不调整该仓位")
+            continue
         q = execution_quote(code)
         price = q.get("price") if isinstance(q.get("price"), (int, float)) else None
         if not price or price <= 0:
+            quote_error = str(q.get("error") or "all realtime quote sources returned no valid price")
+            add_execution_block(decision, code, f"成交价获取失败：{quote_error}")
             continue
         price_source = q.get("execution_price_source") or q.get("source") or "quote"
         candidate = cand_by_code.get(code) or {}
