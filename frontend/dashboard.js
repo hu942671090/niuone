@@ -10,18 +10,21 @@ let usQuotesLoadScheduled = false;
 let hotStocksData = {};
 let moneyFlowData = {inflow: [], outflow: []};
 let marketFlowData = {total_inflow_yi: null, total_outflow_yi: null, net_flow_yi: null};
+let dragonTigerData = {loading: true, loaded: false, available: false, items: []};
+let dragonTigerSort = {key: 'net_amount_yuan', direction: 'desc'};
 let usMarketSummaryData = {loading: true};
 let practiceCandidatesData = {items: [], count: 0};
 let niuniuPracticeData = {positions: [], equity_history: [], trade_log: [], decision_log: [], cash: 1000000, total_equity: 1000000};
 let practiceBenchmarksData = {items: []};
 let benchmarkOverlay = {sh000001: true, sh000300: true, sz399006: true, sh000688: true};
 const initialParams = new URLSearchParams(location.search);
-const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];
-const CATEGORY_LABELS = {all:'全部', indices:'指数行情', practice:'模拟交易', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
+const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'dragon_tiger', 'x_monitor', 'us_ratings'];
+const CATEGORY_LABELS = {all:'全部', indices:'指数行情', practice:'模拟交易', dragon_tiger:'龙虎榜', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
 const CATEGORY_PATHS = {
   practice: '/practice',
   indices: '/indices',
   market_monitor: '/market-monitor',
+  dragon_tiger: '/dragon-tiger',
   x_monitor: '/x-monitor',
   us_ratings: '/us-ratings'
 };
@@ -420,7 +423,7 @@ function saveMarketPageState() {
 function saveViewState() {
   try {
     sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
-      data, indicesData, sectorData, usSectorData, hotStocksData, moneyFlowData, marketFlowData,
+      data, indicesData, sectorData, usSectorData, hotStocksData, moneyFlowData, marketFlowData, dragonTigerData,
       usMarketSummaryData, practiceCandidatesData, niuniuPracticeData, practiceBenchmarksData, usQuotesData, usProfilesData,
       xPageOffset, xLoadedOffset, practiceCurveMode, practicePositionMode, practicePositionBriefMode, indicesViewMode,
       savedAt: Date.now()
@@ -459,6 +462,7 @@ function restoreViewState() {
     hotStocksData = cached.hotStocksData || hotStocksData;
     moneyFlowData = cached.moneyFlowData || moneyFlowData;
     marketFlowData = cached.marketFlowData || marketFlowData;
+    dragonTigerData = cached.dragonTigerData || dragonTigerData;
     usMarketSummaryData = (cachedMarketPageFresh && cachedMarketPageState.usMarketSummaryData)
       || cached.usMarketSummaryData
       || usMarketSummaryData;
@@ -500,6 +504,7 @@ function restoreViewState() {
 function hasWarmData(category) {
   if (category === 'indices') return Array.isArray(indicesData.items) && indicesData.items.length;
   if (category === 'practice') return (Array.isArray(practiceCandidatesData.items) && practiceCandidatesData.items.length) || Array.isArray(niuniuPracticeData.equity_history);
+  if (category === 'dragon_tiger') return dragonTigerData.loaded === true;
   if (category === 'x_monitor') return xLoadedOffset === xPageOffset && !!cachedXPage(xPageOffset) && Array.isArray(data.records);
   if (category === 'market_monitor') return !!cachedMarketPage() && (data.records || []).some(r => r.category === category);
   if (isMessageCategory(category)) return (data.records || []).some(r => r.category === category);
@@ -623,6 +628,7 @@ function cancelXMediaRequests() {
   });
 }
 function autoRefreshIntervalMs(category = activeCategory) {
+  if (category === 'dragon_tiger') return 60 * 1000;
   return category === 'us_ratings' ? US_RATINGS_AUTO_REFRESH_MS : AUTO_REFRESH_TICK_MS;
 }
 async function autoRefresh() {
@@ -636,6 +642,15 @@ function loadActiveCategoryData(category = activeCategory) {
   if (category === 'market_monitor') return loadMarketMonitorAuxData();
   return null;
 }
+async function fetchDragonTiger(signal) {
+  const response = await fetch('/api/iwencai/dragon-tiger', {
+    signal,
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`dragon tiger load failed: ${response.status}`);
+  return response.json();
+}
 async function load({background=false, updateTabs=true, waitFor=null} = {}) {
   const seq = ++loadSeq;
   const categoryAtStart = activeCategory;
@@ -644,6 +659,33 @@ async function load({background=false, updateTabs=true, waitFor=null} = {}) {
   if (pendingLoadController) pendingLoadController.abort();
   const controller = new AbortController();
   pendingLoadController = controller;
+  if (categoryAtStart === 'dragon_tiger') {
+    if (!background && !hasWarmData(categoryAtStart)) {
+      dragonTigerData = {...dragonTigerData, loading: true};
+      $('feed').innerHTML = '<div class="loading">加载中…</div>';
+    }
+    try {
+      const payload = await fetchDragonTiger(controller.signal);
+      if (seq !== loadSeq || activeCategory !== categoryAtStart) return;
+      dragonTigerData = {...payload, loading: false, loaded: true};
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error;
+      if (seq !== loadSeq || activeCategory !== categoryAtStart) return;
+      dragonTigerData = {
+        loading: false,
+        loaded: true,
+        available: false,
+        items: [],
+        error: 'dashboard_request_failed',
+      };
+    }
+    $('updated').textContent = String(dragonTigerData.generated_at || '').slice(11, 19) || '--';
+    if (updateTabs) renderTabs();
+    render();
+    lastAutoRefreshAt = Date.now();
+    saveViewState();
+    return;
+  }
   const msgUrl = messagesUrl(isMessageCategory(categoryAtStart) ? offsetAtStart : 0, isMessageCategory(categoryAtStart) ? limitAtStart : 0, categoryAtStart);
   if (!background && !hasWarmData(categoryAtStart)) {
     $('feed').innerHTML = '<div class="loading">加载中…</div>';
@@ -1085,7 +1127,11 @@ async function loadPracticePage() {
 }
 function renderTabs() {
   $('categoryTabs').innerHTML = visibleCategoryOrder().map(key => {
-    const count = (key === 'indices' || key === 'practice') ? '' : ` · ${data.categories?.[key]?.count || 0}`;
+    const count = key === 'dragon_tiger'
+      ? (dragonTigerData.loaded ? ` · ${Number(dragonTigerData.unique_count ?? (dragonTigerData.items || []).length)}` : '')
+      : (key === 'indices' || key === 'practice')
+      ? ''
+      : ` · ${data.categories?.[key]?.count || 0}`;
     return `<a class="tab ${activeCategory === key ? 'active' : ''}" data-category="${key}" href="${CATEGORY_PATHS[key]}">${CATEGORY_LABELS[key]}${count}</a>`;
   }).join('');
   document.querySelectorAll('.tab[data-category]').forEach(tab => tab.onclick = (event) => {
@@ -4100,6 +4146,194 @@ function renderXMonitor(records) {
     <div class="x-list">${records.map(r => renderXRow(r)).join('')}</div>
   </section>${renderHistoryControls(records)}`;
 }
+function fmtDragonTigerAmount(value, {signed=false} = {}) {
+  if (value === null || value === undefined || value === '') return '--';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '--';
+  const absolute = Math.abs(number);
+  const formatted = absolute >= 100000000
+    ? `${(absolute / 100000000).toFixed(2)}亿`
+    : absolute >= 10000
+    ? `${(absolute / 10000).toFixed(2)}万`
+    : `${absolute.toFixed(0)}元`;
+  if (!signed || number === 0) return formatted;
+  return `${number > 0 ? '+' : '-'}${formatted}`;
+}
+function fmtDragonTigerPct(value) {
+  if (value === null || value === undefined || value === '') return '--';
+  return fmtSignedPct(value);
+}
+function dragonTigerValueClass(value) {
+  if (value === null || value === undefined || value === '') return '';
+  return upCls(Number(value));
+}
+const DRAGON_TIGER_SORT_FIELDS = new Set(['name', 'sector', 'change_pct', 'net_amount_yuan']);
+const DRAGON_TIGER_TEXT_SORT_FIELDS = new Set(['name', 'sector']);
+function dragonTigerDefaultSortDirection(key) {
+  return DRAGON_TIGER_TEXT_SORT_FIELDS.has(key) ? 'asc' : 'desc';
+}
+function dragonTigerSortValue(item, key) {
+  if (DRAGON_TIGER_TEXT_SORT_FIELDS.has(key)) return String(item?.[key] ?? '').trim();
+  const rawValue = item?.[key];
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+  const value = Number(rawValue);
+  return Number.isFinite(value) ? value : null;
+}
+function sortDragonTigerItems(items) {
+  const key = DRAGON_TIGER_SORT_FIELDS.has(dragonTigerSort.key) ? dragonTigerSort.key : 'net_amount_yuan';
+  const direction = dragonTigerSort.direction === 'asc' ? 1 : -1;
+  const compareText = (left, right) => String(left).localeCompare(String(right), 'zh-CN', {numeric:true, sensitivity:'base'});
+  return items.map((item, index) => ({item, index})).sort((left, right) => {
+    const leftValue = dragonTigerSortValue(left.item, key);
+    const rightValue = dragonTigerSortValue(right.item, key);
+    const leftMissing = leftValue === null || leftValue === '';
+    const rightMissing = rightValue === null || rightValue === '';
+    if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+    if (!leftMissing) {
+      const primary = DRAGON_TIGER_TEXT_SORT_FIELDS.has(key)
+        ? compareText(leftValue, rightValue)
+        : leftValue - rightValue;
+      if (primary !== 0) return primary * direction;
+    }
+    const nameOrder = compareText(left.item.name || '', right.item.name || '');
+    if (nameOrder !== 0) return nameOrder;
+    const codeOrder = compareText(left.item.code || '', right.item.code || '');
+    return codeOrder || left.index - right.index;
+  }).map(entry => entry.item);
+}
+function renderDragonTigerSortButton(key, label) {
+  const active = dragonTigerSort.key === key;
+  const direction = active ? dragonTigerSort.direction : dragonTigerDefaultSortDirection(key);
+  const directionLabel = direction === 'asc' ? '升序' : '降序';
+  const indicator = active ? (direction === 'asc' ? '↑' : '↓') : '↕';
+  const ariaLabel = active ? `按${label}排序，当前${directionLabel}` : `按${label}排序，首次点击为${directionLabel}`;
+  return `<button type="button" class="dragon-tiger-sort-btn${active ? ' active' : ''}" data-dragon-tiger-sort="${esc(key)}" aria-label="${esc(ariaLabel)}" title="${esc(ariaLabel)}">
+    <span>${esc(label)}</span><span class="dragon-tiger-sort-indicator" aria-hidden="true">${indicator}</span>
+  </button>`;
+}
+function renderDragonTigerStreak(item) {
+  const upStreak = Math.max(0, Math.trunc(Number(item?.limit_up_streak) || 0));
+  const downStreak = Math.max(0, Math.trunc(Number(item?.limit_down_streak) || 0));
+  if (upStreak > 0) {
+    const label = upStreak === 1 ? '首板' : `${upStreak}连板`;
+    return `<small class="dragon-tiger-streak limit-up" title="连续涨停 ${upStreak} 个交易日">${esc(label)}</small>`;
+  }
+  if (downStreak > 0) {
+    const label = downStreak === 1 ? '首跌停' : `${downStreak}连跌停`;
+    return `<small class="dragon-tiger-streak limit-down" title="连续跌停 ${downStreak} 个交易日">${esc(label)}</small>`;
+  }
+  return '';
+}
+function collectDragonTigerReasons(details) {
+  const reasons = [];
+  const seen = new Set();
+  details.forEach(detail => {
+    const reason = String(detail?.reason ?? '').replace(/\s+/g, ' ').trim();
+    if (!reason || seen.has(reason)) return;
+    seen.add(reason);
+    reasons.push(reason);
+  });
+  return reasons;
+}
+function renderDragonTigerReasons(details) {
+  const reasons = collectDragonTigerReasons(details);
+  const content = reasons.length
+    ? `<ol class="dragon-tiger-reason-list">${reasons.map((reason, index) => `<li><b>${index + 1}</b><span>${esc(reason)}</span></li>`).join('')}</ol>`
+    : '<div class="dragon-tiger-reason-empty">暂无上榜理由</div>';
+  return `<section class="dragon-tiger-reasons" aria-label="上榜理由">
+    <div class="dragon-tiger-reasons-head"><b>上榜理由</b><span>${reasons.length ? `${reasons.length} 条` : '暂无'}</span></div>
+    ${content}
+  </section>`;
+}
+function renderDragonTigerDetailRecord(detail) {
+  const netClass = dragonTigerValueClass(detail.net_amount_yuan);
+  return `<article class="dragon-tiger-detail-record">
+    <div class="dragon-tiger-detail-record-head">
+      <b>${esc(detail.list_type || '龙虎榜')}</b>
+      <span>${esc(detail.list_date || '--')}</span>
+    </div>
+    <p>${esc(detail.reason || '暂无上榜原因')}</p>
+    <div class="dragon-tiger-detail-values">
+      <span><small>买入额</small><b>${fmtDragonTigerAmount(detail.buy_amount_yuan)}</b></span>
+      <span><small>卖出额</small><b>${fmtDragonTigerAmount(detail.sell_amount_yuan)}</b></span>
+      <span><small>净买入</small><b class="${netClass}">${fmtDragonTigerAmount(detail.net_amount_yuan, {signed:true})}</b></span>
+      <span><small>净买入占比</small><b>${fmtDragonTigerPct(detail.net_ratio_pct)}</b></span>
+    </div>
+  </article>`;
+}
+function dragonTigerErrorText(error) {
+  if (error === 'iwencai_disabled') return '问财数据源尚未启用。';
+  if (error === 'iwencai_not_configured') return '问财 API Key 尚未配置。';
+  if (error === 'dashboard_request_failed') return 'Dashboard 暂时无法读取龙虎榜数据。';
+  return '龙虎榜数据暂时不可用，请稍后重试。';
+}
+function renderDragonTigerPanel() {
+  const payload = dragonTigerData || {};
+  const refreshTime = payload.scheduled_refresh_time || '18:00';
+  if (payload.loading && !payload.loaded) return '<div class="loading">加载龙虎榜数据…</div>';
+  if (!payload.available) {
+    return `<section class="sector-cloud dragon-tiger-panel">
+      <div class="dragon-tiger-head">
+        <div><h2>每日龙虎榜</h2><div class="dragon-tiger-sub">同花顺问财 · 每日北京时间 ${esc(refreshTime)} 更新</div></div>
+      </div>
+      <div class="dragon-tiger-unavailable">
+        <b>${esc(dragonTigerErrorText(payload.error))}</b>
+        <span>启用并保存配置后，定时任务会自动生成每日快照。</span>
+        <a href="/admin/settings/iwencai">前往问财配置</a>
+      </div>
+    </section>`;
+  }
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const sortedItems = sortDragonTigerItems(items);
+  const statusText = payload.stale
+    ? `当前展示最近成功快照 · 原计划 ${esc(payload.requested_date || '')}`
+    : payload.snapshot
+    ? `${esc(refreshTime)} 定时快照`
+    : '实时回源数据';
+  const rows = sortedItems.map(item => {
+    const changeClass = dragonTigerValueClass(item.change_pct);
+    const netClass = dragonTigerValueClass(item.net_amount_yuan);
+    const stockName = item.name || '--';
+    const stockCode = item.code || '--';
+    const sector = item.sector || '--';
+    const sectorPath = item.sector_path || sector;
+    const details = Array.isArray(item.details) && item.details.length ? item.details : [item];
+    return `<details class="dragon-tiger-item">
+      <summary>
+        <span class="dragon-tiger-list-name"><span>${esc(stockName)}</span>${renderDragonTigerStreak(item)}</span>
+        <span class="dragon-tiger-list-sector" title="${esc(sectorPath)}">${esc(sector)}</span>
+        <span class="dragon-tiger-list-number ${changeClass}">${fmtDragonTigerPct(item.change_pct)}</span>
+        <span class="dragon-tiger-list-number ${netClass}">${fmtDragonTigerAmount(item.net_amount_yuan, {signed:true})}</span>
+      </summary>
+      <div class="dragon-tiger-detail">
+        <div class="dragon-tiger-detail-meta">
+          <span><small>股票代码</small><b>${esc(stockCode)}</b></span>
+          <span><small>最新价</small><b>${fmtNumber(item.price, 2)}</b></span>
+          <span><small>所属行业</small><b title="${esc(sectorPath)}">${esc(sectorPath || '--')}</b></span>
+          <span><small>上榜明细</small><b>${details.length} 条</b></span>
+        </div>
+        ${renderDragonTigerReasons(details)}
+        <div class="dragon-tiger-detail-records">${details.map(renderDragonTigerDetailRecord).join('')}</div>
+      </div>
+    </details>`;
+  }).join('');
+  return `<section class="sector-cloud dragon-tiger-panel">
+    <div class="dragon-tiger-head">
+      <div><h2>每日龙虎榜</h2><div class="dragon-tiger-sub">数据日期 ${esc(payload.date || '--')} · ${esc(payload.source || '同花顺问财')} · 每日北京时间 ${esc(refreshTime)} 更新</div></div>
+      <div class="dragon-tiger-status ${payload.stale ? 'stale' : ''}">${statusText}</div>
+    </div>
+    ${items.length ? `<div class="dragon-tiger-list">
+      <div class="dragon-tiger-list-head">
+        ${renderDragonTigerSortButton('name', '名称')}
+        ${renderDragonTigerSortButton('sector', '板块')}
+        ${renderDragonTigerSortButton('change_pct', '涨幅')}
+        ${renderDragonTigerSortButton('net_amount_yuan', '净买入')}
+      </div>
+      ${rows}
+    </div>` : '<div class="empty">当日暂无龙虎榜记录</div>'}
+    <div class="dragon-tiger-foot">列表按股票去重，净买入优先采用单日榜；点击股票可查看上榜理由与明细。数据仅用于研究和信息展示，不构成投资建议。</div>
+  </section>`;
+}
 function render() {
   if (activeCategory === 'indices') {
     $('feed').innerHTML = renderIndicesPanel();
@@ -4108,6 +4342,10 @@ function render() {
   if (activeCategory === 'practice') {
     renderPracticePage();
     renderPracticeCalendarModal();
+    return;
+  }
+  if (activeCategory === 'dragon_tiger') {
+    $('feed').innerHTML = renderDragonTigerPanel();
     return;
   }
   const records = filtered();
@@ -4179,6 +4417,18 @@ function renderCard(r) {
     </article>`;
 }
 document.addEventListener('click', event => {
+  const dragonTigerSortAction = event.target.closest('[data-dragon-tiger-sort]');
+  if (dragonTigerSortAction) {
+    event.preventDefault();
+    event.stopPropagation();
+    const key = dragonTigerSortAction.dataset.dragonTigerSort || '';
+    if (!DRAGON_TIGER_SORT_FIELDS.has(key)) return;
+    dragonTigerSort = dragonTigerSort.key === key
+      ? {key, direction: dragonTigerSort.direction === 'asc' ? 'desc' : 'asc'}
+      : {key, direction: dragonTigerDefaultSortDirection(key)};
+    if (activeCategory === 'dragon_tiger') render();
+    return;
+  }
   const usMarketAction = event.target.closest('[data-us-market-action]');
   if (usMarketAction) {
     event.preventDefault();

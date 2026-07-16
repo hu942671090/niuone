@@ -36,6 +36,19 @@ from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_tradi
 from dashboard import practice_payload as practice_payload_impl
 from dashboard import practice_market_summary as practice_market_summary_impl
 from dashboard import security as security_impl
+from dashboard.apis.iwencai_service import (
+    DEFAULT_LIMIT as IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT,
+    fetch_dragon_tiger,
+    normalize_limit as normalize_iwencai_limit,
+    normalize_page as normalize_iwencai_page,
+    normalize_trade_date as normalize_iwencai_trade_date,
+    read_dragon_tiger_snapshot,
+    write_dragon_tiger_snapshot,
+)
+from market_data.iwencai_client import (
+    DEFAULT_BASE_URL as IWENCAI_DEFAULT_BASE_URL,
+    normalize_base_url as normalize_iwencai_base_url,
+)
 from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
 from screening.stock_universe import (
@@ -104,6 +117,7 @@ DASHBOARD_PAGE_PATHS = frozenset({
     "/",
     "/practice",
     "/indices",
+    "/dragon-tiger",
     "/market-monitor",
     "/x-monitor",
     "/us-ratings",
@@ -114,6 +128,10 @@ CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG") or str(DASHBOARD_HOME / "c
 DASHBOARD_ENV_FILE = get_dashboard_env_file(PROJECT_ROOT)
 CRON_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 CRON_STATE_DIR = DASHBOARD_HOME / "cron" / "state"
+IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = Path(
+    os.environ.get("IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE")
+    or CRON_OUTPUT_DIR / "iwencai_dragon_tiger_latest.json"
+).expanduser()
 B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
 STATS_DB = DASHBOARD_HOME / "dashboard_stats.db"
 LEGACY_STATS_DB = DASHBOARD_HOME / "dashboard_users.db"
@@ -256,6 +274,7 @@ API_TTLS = {
     "us_quotes": 30,
     "us_profiles": int(os.environ.get("DASHBOARD_US_PROFILES_TTL_SECONDS", "86400") or "86400"),
     "us_market_summary": int(os.environ.get("DASHBOARD_US_MARKET_SUMMARY_TTL_SECONDS", "300") or "300"),
+    "iwencai_dragon_tiger": int(os.environ.get("IWENCAI_CACHE_TTL_SECONDS", "300") or "300"),
 }
 PRACTICE_FAST_CACHE_KEY = "niuniu_practice_fast:v2"
 CALENDAR_HISTORY_SCHEMA_VERSION = 1
@@ -323,6 +342,16 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_ENABLED", "label": "启用综合决策参考", "group": "综合决策参考", "kind": "bool", "default": "1", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", "label": "决策参考缓存秒数", "group": "综合决策参考", "kind": "int", "default": "75", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS", "label": "单类参考数据上限", "group": "综合决策参考", "kind": "int", "default": "5", "effect": "next_run"},
+
+    {"name": "IWENCAI_ENABLED", "label": "启用问财数据源", "group": "问财数据源", "kind": "bool", "default": "0", "effect": "runtime"},
+    {"name": "IWENCAI_BASE_URL", "label": "问财 API 地址", "group": "问财数据源", "kind": "text", "default": IWENCAI_DEFAULT_BASE_URL, "effect": "runtime"},
+    {"name": "IWENCAI_API_KEY", "label": "问财 API Key", "group": "问财数据源", "kind": "secret", "default": "", "effect": "runtime"},
+    {"name": "IWENCAI_TIMEOUT_SECONDS", "label": "问财请求超时秒数", "group": "问财数据源", "kind": "int", "default": "20", "effect": "runtime"},
+    {"name": "IWENCAI_MAX_RETRIES", "label": "问财失败重试次数", "group": "问财数据源", "kind": "int", "default": "1", "effect": "runtime"},
+    {"name": "IWENCAI_MAX_CONCURRENCY", "label": "问财最大并发数", "group": "问财数据源", "kind": "int", "default": "2", "effect": "runtime"},
+    {"name": "IWENCAI_CACHE_TTL_SECONDS", "label": "问财龙虎榜缓存秒数", "group": "问财数据源", "kind": "int", "default": "300", "effect": "runtime"},
+    {"name": "IWENCAI_DRAGON_TIGER_CRON", "label": "龙虎榜交易日更新时间", "group": "问财数据源", "kind": "cron_time", "default": "0 18 * * 1-5", "effect": "next_run"},
+
     {"name": "DASHBOARD_MARKET_GUIDANCE_ENABLED", "label": "启用盘面指引控仓", "group": "交易规则与风控", "kind": "bool", "default": "1", "effect": "next_run"},
     {"name": TRADE_DISCIPLINE_TEXT_ENV, "label": "交易纪律 Prompt", "group": "交易规则与风控", "kind": "trade_discipline_text", "default": default_trade_discipline_text(), "effect": "runtime"},
     {"name": "DASHBOARD_MAX_OPEN_POSITIONS", "label": "最大持仓只数", "group": "交易规则与风控", "kind": "int", "default": "6", "effect": "next_run"},
@@ -446,6 +475,14 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_DECISION_INTELLIGENCE_ENABLED",
     "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
     "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
+    "IWENCAI_ENABLED",
+    "IWENCAI_BASE_URL",
+    "IWENCAI_API_KEY",
+    "IWENCAI_TIMEOUT_SECONDS",
+    "IWENCAI_MAX_RETRIES",
+    "IWENCAI_MAX_CONCURRENCY",
+    "IWENCAI_CACHE_TTL_SECONDS",
+    "IWENCAI_DRAGON_TIGER_CRON",
     "DASHBOARD_MARKET_GUIDANCE_ENABLED",
     TRADE_DISCIPLINE_TEXT_ENV,
     "DASHBOARD_MAX_OPEN_POSITIONS",
@@ -2224,6 +2261,16 @@ def invalidate_api_cache(*cache_keys: str) -> None:
             API_CACHE_KEY_GENERATIONS[cache_key] = API_CACHE_KEY_GENERATIONS.get(cache_key, 0) + 1
 
 
+def invalidate_api_cache_prefix(prefix: str) -> None:
+    """Invalidate every in-process cache entry under one bounded API family."""
+
+    with API_RESPONSE_LOCK:
+        cache_keys = [key for key in API_RESPONSE_CACHE if key.startswith(prefix)]
+        for cache_key in cache_keys:
+            API_RESPONSE_CACHE.pop(cache_key, None)
+            API_CACHE_KEY_GENERATIONS[cache_key] = API_CACHE_KEY_GENERATIONS.get(cache_key, 0) + 1
+
+
 def cached_json_data(cache_key: str, ttl: int, producer, fallback: dict[str, Any]) -> dict[str, Any]:
     payload, _ = cache_get_json(cache_key, ttl, producer)
     try:
@@ -2231,6 +2278,45 @@ def cached_json_data(cache_key: str, ttl: int, producer, fallback: dict[str, Any
         return data if isinstance(data, dict) else dict(fallback)
     except Exception as exc:
         return {**fallback, "error": str(exc)}
+
+
+def iwencai_dragon_tiger_snapshot_version() -> int:
+    try:
+        return IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def produce_iwencai_dragon_tiger_data(
+    trade_date: str,
+    *,
+    page: int,
+    limit: int,
+    allow_latest_snapshot: bool,
+) -> dict[str, Any]:
+    use_snapshot = page == 1 and limit == IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT
+    if use_snapshot:
+        exact = read_dragon_tiger_snapshot(
+            IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE,
+            trade_date=trade_date,
+        )
+        if exact:
+            exact["stale"] = False
+            exact["scheduled_refresh_time"] = "18:00"
+            return exact
+        if allow_latest_snapshot:
+            latest = read_dragon_tiger_snapshot(IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE)
+            if latest:
+                latest["stale"] = str(latest.get("date") or "") != trade_date
+                latest["requested_date"] = trade_date
+                latest["scheduled_refresh_time"] = "18:00"
+                return latest
+
+    payload = fetch_dragon_tiger(trade_date, page=page, limit=limit)
+    payload["scheduled_refresh_time"] = "18:00"
+    if use_snapshot and write_dragon_tiger_snapshot(IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE, payload):
+        payload["snapshot_saved"] = True
+    return payload
 
 
 def produce_us_market_summary_data() -> dict[str, Any]:
@@ -2661,6 +2747,7 @@ def write_yaml_config(raw_text: str) -> dict[str, Any]:
 
 
 CRON_CONFIG_NAMES = {
+    "IWENCAI_DRAGON_TIGER_CRON",
     "DASHBOARD_US_MARKET_SUMMARY_CRON",
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
@@ -2668,6 +2755,7 @@ CRON_CONFIG_NAMES = {
     "DASHBOARD_US_RATING_CRON",
 }
 CRON_TIME_CONFIGS = {
+    "IWENCAI_DRAGON_TIGER_CRON": {"day_label": "A股交易日"},
     "DASHBOARD_US_MARKET_SUMMARY_CRON": {"day_label": "A股交易日"},
     "DASHBOARD_MARKET_AUCTION_CRON": {"day_label": "周一至周五"},
     "DASHBOARD_MARKET_MIDDAY_CRON": {"day_label": "周一至周五"},
@@ -2682,6 +2770,7 @@ ADMIN_GROUP_NOTES = {
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
     "选股与买卖设置": "配置主板、创业板、科创板和 ST 选股范围、候选数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
     "综合决策参考": "为买卖决策汇总指数、板块、资金流向、热门股票等参考数据。缓存秒数控制数据复用周期，单类参考数据上限可设置为 1～8。",
+    "问财数据源": "内置同花顺问财结构化查询能力，提供交易日龙虎榜快照；默认在 A 股交易日北京时间 18:00 更新。默认关闭；API Key 只保存到本机私有 dashboard.env，页面不会回显。",
     "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
@@ -2728,6 +2817,12 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
         "name": "综合决策参考",
         "summary": "汇总指数、板块、资金流和热门股票，辅助买卖决策。",
         "icon": "参考",
+    },
+    {
+        "slug": "iwencai",
+        "name": "问财数据源",
+        "summary": "配置问财网关、密钥、超时、重试、并发与缓存。",
+        "icon": "问财",
     },
     {
         "slug": "stock-strategy",
@@ -3017,6 +3112,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
     for name in list(normalized):
         if name in CRON_CONFIG_NAMES:
             normalized[name] = normalize_cron_update(name, normalized[name])
+        elif name == "IWENCAI_BASE_URL":
+            normalized[name] = normalize_iwencai_base_url(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "time_list":
             normalized[name] = normalize_time_list_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "time":
@@ -3066,6 +3163,23 @@ def validate_business_updates(updates: dict[str, str]) -> None:
     for name, value in updates.items():
         if name in CRON_CONFIG_NAMES:
             validate_cron_expr(normalize_cron_update(name, value))
+        elif name == "IWENCAI_BASE_URL":
+            normalize_iwencai_base_url(value)
+        elif name in {
+            "IWENCAI_TIMEOUT_SECONDS",
+            "IWENCAI_MAX_RETRIES",
+            "IWENCAI_MAX_CONCURRENCY",
+            "IWENCAI_CACHE_TTL_SECONDS",
+        } and str(value or "").strip():
+            number = int(value)
+            minimum, maximum = {
+                "IWENCAI_TIMEOUT_SECONDS": (2, 60),
+                "IWENCAI_MAX_RETRIES": (0, 2),
+                "IWENCAI_MAX_CONCURRENCY": (1, 4),
+                "IWENCAI_CACHE_TTL_SECONDS": (15, 3600),
+            }[name]
+            if number < minimum or number > maximum:
+                raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
         elif name == "DASHBOARD_B1_SCHEDULE_TIMES":
             normalize_time_list_update(value)
         elif name in {"DASHBOARD_B3_EXIT_TIME", "DASHBOARD_TIME_EXIT_TIME", "DASHBOARD_TIME_STOP_EXIT_TIME"}:
@@ -3166,6 +3280,26 @@ def sync_business_runtime_settings(
             applied.append("indices_ttl")
         except (TypeError, ValueError):
             pass
+
+    iwencai_names = {
+        "IWENCAI_ENABLED",
+        "IWENCAI_BASE_URL",
+        "IWENCAI_API_KEY",
+        "IWENCAI_TIMEOUT_SECONDS",
+        "IWENCAI_MAX_RETRIES",
+        "IWENCAI_MAX_CONCURRENCY",
+        "IWENCAI_CACHE_TTL_SECONDS",
+    }
+    if changed_names & iwencai_names:
+        try:
+            API_TTLS["iwencai_dragon_tiger"] = int(
+                env_values.get("IWENCAI_CACHE_TTL_SECONDS")
+                or ENV_CONFIG_BY_NAME["IWENCAI_CACHE_TTL_SECONDS"]["default"]
+            )
+        except (TypeError, ValueError):
+            pass
+        invalidate_api_cache_prefix("iwencai_dragon_tiger:")
+        applied.append("iwencai")
 
     if changed_names & {
         STRATEGY_SOURCE_ENV,
@@ -3972,6 +4106,44 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.write_response(payload)
+            return
+        if parsed.path == "/api/iwencai/dragon-tiger":
+            params = parse_qs(parsed.query)
+            raw_trade_date = params.get("date", [""])[0].strip()
+            try:
+                trade_date = normalize_iwencai_trade_date(raw_trade_date)
+                page = normalize_iwencai_page(params.get("page", ["1"])[0])
+                limit = normalize_iwencai_limit(
+                    params.get("limit", [str(IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT)])[0]
+                )
+            except ValueError:
+                self.send_json_error(400, "invalid_iwencai_dragon_tiger_request")
+                return
+            allow_latest_snapshot = not raw_trade_date
+            snapshot_version = (
+                iwencai_dragon_tiger_snapshot_version()
+                if allow_latest_snapshot
+                and page == 1
+                and limit == IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT
+                else 0
+            )
+            cache_key = (
+                f"iwencai_dragon_tiger:{trade_date}:{page}:{limit}:"
+                f"{int(allow_latest_snapshot)}:{snapshot_version}"
+            )
+            ttl = API_TTLS["iwencai_dragon_tiger"]
+            self.send_json_cached(
+                cache_key,
+                ttl,
+                lambda: produce_iwencai_dragon_tiger_data(
+                    trade_date,
+                    page=page,
+                    limit=limit,
+                    allow_latest_snapshot=allow_latest_snapshot,
+                ),
+                edge_ttl=ttl,
+                browser_ttl=min(30, ttl),
+            )
             return
         if parsed.path == "/api/x_media":
             params = parse_qs(parsed.query)

@@ -81,6 +81,7 @@ Core configuration items:
 | Grok API | `DASHBOARD_GROK_BASE_URL`, `DASHBOARD_GROK_API_KEY`, `DASHBOARD_GROK_MODEL`, `DASHBOARD_GROK_API_MODE`, `DASHBOARD_GROK_CONTEXT_LENGTH` |
 | Separate override for A-share market model summaries | `A_SHARE_MODEL_SUMMARY_BASE_URL`, `A_SHARE_MODEL_SUMMARY_API_KEY`, `A_SHARE_MODEL_SUMMARY_MODEL`, `A_SHARE_MODEL_SUMMARY_MAX_TOKENS` |
 | News pre-check API | `DASHBOARD_NEWS_BASE_URL`, `DASHBOARD_NEWS_API_KEY`, `DASHBOARD_NEWS_MODEL`, `DASHBOARD_NEWS_MAX_TOKENS`, `DASHBOARD_NEWS_CONCURRENCY` |
+| Built-in iWencai data source | `IWENCAI_ENABLED`, `IWENCAI_BASE_URL`, `IWENCAI_API_KEY`, `IWENCAI_TIMEOUT_SECONDS`, `IWENCAI_MAX_RETRIES`, `IWENCAI_MAX_CONCURRENCY`, `IWENCAI_CACHE_TTL_SECONDS`, `IWENCAI_DRAGON_TIGER_CRON` |
 | Trading-decision API | `DASHBOARD_DECISION_BASE_URL`, `DASHBOARD_DECISION_API_KEY`, `DASHBOARD_DECISION_MODEL` |
 | Trading-decision intelligence bundle | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED`, `DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS`, `DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS` |
 | Trading discipline for trading decisions | `DASHBOARD_TRADE_DISCIPLINE_TEXT`; when empty, the built-in default discipline is used; when populated, its content is inserted into the “Mandatory Rules” section of the model prompt |
@@ -92,6 +93,13 @@ After administrator authentication, preferably use the settings button on the pa
 `DASHBOARD_GROK_API_MODE` accepts `auto`, `responses`, or `chat`. The default `auto` mode uses the Responses API with `web_search`/`x_search` tools for Grok 4.5 and keeps Chat Completions for other models; compatible gateways can force either mode. `X_WATCHLIST_REQUEST_TIMEOUT_SECONDS` controls the per-account X request timeout and defaults to `45` seconds.
 `*_CONTEXT_LENGTH` represents only the model context window and defaults to `128000`; `*_MAX_TOKENS` controls only `max_tokens` in the request body, defaults to `4096`, and can be overridden per scenario.
 The news pre-check examines at most five candidate stocks concurrently by default. If the upstream service returns rate limits or 403/429 responses, reduce `DASHBOARD_NEWS_CONCURRENCY` to `2` or `1`.
+
+The iWencai data source is disabled by default. After enabling it and configuring an API key, the Dashboard exposes the purpose-built
+`/api/iwencai/dragon-tiger?date=YYYY-MM-DD&page=1&limit=100` endpoint. It does not proxy arbitrary natural-language queries,
+caps each page at 100 stocks, and uses the Dashboard's existing rate limits and cache. Results are deduplicated by stock code, `sector` contains the industry, and duplicate leaderboard entries remain available under `details`. iWencai responses are research snapshots;
+timeouts, count mismatches, and upstream failures return explicit status without overwriting account, fill, or other real trading records.
+The `/dragon-tiger` Dashboard section prefers the latest durable successful snapshot. By default, Cron refreshes
+`.local-data/runtime/cron/output/iwencai_dragon_tiger_latest.json` at 18:00 China time on A-share trading days; empty or failed responses do not replace the last valid snapshot.
 
 The trading-decision intelligence bundle is enabled by default. Each model decision after a stock-selection scan on the Practice page reads market monitoring, overnight U.S. market data, index quotes, sector performance, industry fund flows, trending stocks, candidate news, and an account-position summary, then writes the compressed `decision_intelligence` into the simulated-trading decision log. If a market-data source fails, its `source_status` is retained, and the current decision continues with available information and existing risk controls.
 
