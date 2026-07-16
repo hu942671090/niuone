@@ -6,6 +6,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -408,6 +409,60 @@ print(json.dumps({{
             self.assertEqual(data['metadata_post_id'], 'unit-post-1')
             self.assertEqual(data['delivery_mode'], 'dashboard_database_only')
             self.assertEqual(data['markdown_count'], 0)
+
+    def test_database_time_uses_numeric_post_id_instead_of_model_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
+            code = f"""
+import importlib.util, json, sys
+from datetime import datetime, timezone
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+actual_utc = datetime(2026, 7, 16, 15, 21, tzinfo=timezone.utc)
+post_id = str((int(actual_utc.timestamp() * 1000) - 1288834974657) << 22)
+post = {{
+  'post_id': post_id,
+  'time': '2026-07-17 07:21:00',
+  'chinese_text': '时间应由推文 ID 校准',
+  'conversation_type': 'original',
+  'media': [],
+}}
+count = m.write_direct_x_alerts_to_db([('测试账号', post, post_id, 'tester')])
+con = m.push_history.connect()
+try:
+    row = con.execute(
+        "SELECT timestamp, time_text, content, metadata_json FROM dashboard_messages WHERE external_id = ?",
+        (post_id,),
+    ).fetchone()
+finally:
+    con.close()
+metadata = json.loads(row['metadata_json'])
+print(json.dumps({{
+  'count': count,
+  'timestamp': row['timestamp'],
+  'time_text': row['time_text'],
+  'content': row['content'],
+  'metadata_time': metadata['post']['time'],
+  'state_changes': m.normalize_monitor_state_times({{
+      'latest': {{'tester': {{'post_id': post_id, 'time': '2026-07-17 07:21:00'}}}},
+  }}),
+}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            expected_timestamp = datetime(2026, 7, 16, 15, 21, tzinfo=timezone.utc).timestamp()
+            self.assertEqual(data['count'], 1)
+            self.assertEqual(data['timestamp'], expected_timestamp)
+            self.assertEqual(data['time_text'], '2026-07-16 23:21:00')
+            self.assertIn('2026-07-16 23:21:00', data['content'])
+            self.assertNotIn('2026-07-17 07:21:00', data['content'])
+            self.assertEqual(data['metadata_time'], '2026-07-16 23:21:00')
+            self.assertEqual(data['state_changes'], 1)
 
     def test_database_failure_does_not_advance_seen_or_latest(self):
         with tempfile.TemporaryDirectory() as tmp:
