@@ -3,11 +3,6 @@
     html { -webkit-text-size-adjust: 100%; }
     body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: radial-gradient(circle at top left, rgba(124,92,255,.25), transparent 34rem), var(--bg); color:var(--text); overflow-x:hidden; }
     body.x-image-viewer-open { overflow:hidden; }
-    .compliance-notice { display:grid; gap:6px; padding:10px clamp(16px, 4vw, 42px); border-bottom:1px solid rgba(148,163,184,.16); background:linear-gradient(180deg, rgba(15,23,42,.96), rgba(8,11,18,.94)); color:#cbd5e1; font-size:12px; line-height:1.55; box-shadow:inset 0 -1px 0 rgba(255,255,255,.025); }
-    .compliance-row { display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap; }
-    .compliance-badge { flex:0 0 auto; border:1px solid rgba(251,191,36,.26); background:rgba(251,191,36,.10); color:#fde68a; border-radius:999px; padding:2px 8px; font-weight:850; line-height:1.45; white-space:nowrap; }
-    .compliance-badge.risk { border-color:rgba(248,113,113,.28); background:rgba(127,29,29,.16); color:#fecaca; }
-    .compliance-text { min-width:0; flex:1 1 300px; overflow-wrap:anywhere; }
     header { position: sticky; top:0; z-index:2; backdrop-filter: blur(16px); background: rgba(6,7,10,.78); border-bottom:1px solid var(--line); padding:20px clamp(16px, 4vw, 42px); }
     .header-row { display:flex; align-items:center; justify-content:space-between; gap:14px; }
     .header-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
@@ -465,9 +460,6 @@
     .practice-curve { height:120px; width:100%; margin-top:8px; }
     @media (max-width: 720px) {
       body { background:var(--bg); }
-      .compliance-notice { padding:9px 12px; font-size:11px; gap:5px; }
-      .compliance-row { gap:6px; }
-      .compliance-badge { padding:1px 7px; }
       header { position:static; padding:8px 9px 7px; backdrop-filter:none; background:rgba(6,7,10,.98); }
       .header-row { gap:8px; }
       .header-actions { gap:5px; }
