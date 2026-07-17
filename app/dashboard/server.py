@@ -1543,12 +1543,10 @@ def run_practice_decision_logged(b1_payload: dict[str, Any], *, record_start: bo
     if not item_count:
         record_practice_decision_event(
             payload,
-            f"选股完成{slot_note}但没有候选股，本轮不执行买卖。",
-            f"选股完成{slot_note}：0只候选",
-            mark_b1_done=True,
+            f"选股完成{slot_note}但没有候选股，继续检查已有持仓的原策略退出规则。",
+            f"选股完成{slot_note}：0只候选，开始持仓退出检查",
         )
-        return {"skipped": True, "reason": "no_candidates"}
-    if record_start:
+    elif record_start:
         record_practice_decision_event(
             payload,
             f"选股完成{slot_note}：{item_count}只候选，开始生成买卖决策。",

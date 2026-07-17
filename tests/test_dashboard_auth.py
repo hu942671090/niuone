@@ -739,6 +739,10 @@ class DashboardAuthTests(unittest.TestCase):
             def record_decision_log_entry(self, entry, mark_b1_done=False):
                 calls['entries'].append((entry, mark_b1_done))
 
+            def run_decision_after_b1(self, payload):
+                calls['decision_payload'] = payload
+                return {'decision': {'summary': '持仓退出检查完成'}, 'executed': []}
+
         original_get_trader = dashboard.get_trader_module
         try:
             dashboard.get_trader_module = lambda: TraderStub()
@@ -751,12 +755,14 @@ class DashboardAuthTests(unittest.TestCase):
         finally:
             dashboard.get_trader_module = original_get_trader
 
-        self.assertEqual(result['reason'], 'no_candidates')
+        self.assertEqual(result['decision']['summary'], '持仓退出检查完成')
+        self.assertEqual(calls['decision_payload']['items'], [])
         self.assertEqual(calls['refresh_payload']['market_snapshot']['sample_count'], 3000)
         entry, mark_done = calls['entries'][0]
-        self.assertTrue(mark_done)
+        self.assertFalse(mark_done)
         self.assertEqual(entry['market_decision_context']['tone'], 'balanced')
         self.assertEqual(entry['decision']['market_guidance']['source_title'], 'B1定时选股实时盘面')
+        self.assertIn('继续检查已有持仓的原策略退出规则', entry['decision']['summary'])
 
     def test_manual_practice_cycle_stays_locked_until_trade_decision_finishes(self):
         scan_started = threading.Event()

@@ -2668,7 +2668,7 @@ function renderPracticePanel() {
     ${renderPracticeMarketSummary()}
     ${manualCycle.error ? `<div class="practice-manual-cycle-error">本轮执行失败：${esc(manualCycle.error)}</div>` : ''}
     ${p.trading_paused ? `<div style=\"background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);border-radius:12px;padding:10px 14px;margin:10px 0;display:flex;justify-content:space-between;align-items:center\">
-      <span style=\"color:#fbbf24;font-size:13px\">⏸️ 交易已暂停：${esc(p.pause_reason||'风控触发')}（${esc((p.pause_since||'').slice(11,16))}起）</span>
+      <span style=\"color:#fbbf24;font-size:13px\">⏸️ 新开仓已暂停：${esc(p.pause_reason||'风控触发')}（${esc((p.pause_since||'').slice(11,16))}起，卖出风控继续运行）</span>
       <button onclick=\"actionFetch('/api/niuniu_practice/resume').then(r=>r.json()).then(d=>{if(d.resumed)location.reload()})\" style=\"background:rgba(52,211,153,.18);color:#34d399;border:1px solid rgba(52,211,153,.35);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600\">🔄 强制恢复交易</button>
     </div>` : ''}
     <div class="practice-stats" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0">

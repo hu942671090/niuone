@@ -353,6 +353,64 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(compact_pos["position_pct"], 10.0)
         self.assertEqual(compact_pos["strategy_mark_history"][-1]["action"], "BUY")
 
+    def test_execute_actions_daily_loss_budget_blocks_buy_but_not_sell(self):
+        state = {
+            "cash": 100000.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "name": "旧持仓",
+                    "qty": 100,
+                    "avg_cost": 10.0,
+                    "last_price": 9.5,
+                    "buy_strategy": "b2_confirm",
+                    "strategy_mark": {"strategy_id": "b2_confirm", "label": "B2确认"},
+                    "buy_date_lots": {"2026-06-23": 100},
+                }
+            },
+            "trade_log": [],
+            "decision_log": [],
+        }
+        decision = {
+            "actions": [
+                {"action": "BUY", "code": "600001", "name": "新候选", "shares": 100, "reason": "测试买入"},
+                {"action": "SELL", "code": "600000", "name": "旧持仓", "shares": 100, "reason": "原策略退出"},
+            ]
+        }
+        candidates = [{
+            "code": "600001",
+            "name": "新候选",
+            "best_strategy": "b2_confirm",
+            "actionable": True,
+            "hard_blockers": [],
+            "risk_flags": [],
+        }]
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        original_budget = trader.check_daily_loss_budget
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 9.5 if code == "600000" else 10.0, "name": "测试", "source": "test"}
+            trader.check_daily_loss_budget = lambda _state: (True, -3.2)
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                candidates,
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+            trader.check_daily_loss_budget = original_budget
+
+        self.assertEqual([item["action"] for item in executed], ["SELL"])
+        self.assertNotIn("600001", state["positions"])
+        self.assertNotIn("600000", state["positions"])
+        self.assertIn("仅暂停BUY", decision["execution_blocked_reasons"][0])
+
     def test_execute_actions_marks_sell_rule_on_remaining_position(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
@@ -1935,6 +1993,74 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("现金≥", prompt)
         self.assertIn('"target_position_pct"', prompt)
 
+    def test_tide_active_prompt_keeps_z_exit_rules_for_existing_z_position(self):
+        saved_env = {
+            trader.ACTIVE_STRATEGY_ENV: os.environ.get(trader.ACTIVE_STRATEGY_ENV),
+            trader.STRATEGY_SOURCE_ENV: os.environ.get(trader.STRATEGY_SOURCE_ENV),
+            trader.PERSONA_STRATEGY_ENV: os.environ.get(trader.PERSONA_STRATEGY_ENV),
+            trader.TRADE_DISCIPLINE_TEXT_ENV: os.environ.get(trader.TRADE_DISCIPLINE_TEXT_ENV),
+        }
+        originals = {
+            "load_crossdesk_config": trader.load_crossdesk_config,
+            "check_market_environment": trader.check_market_environment,
+            "check_market_sentiment": trader.check_market_sentiment,
+            "current_market_strategy_context": trader.current_market_strategy_context,
+            "check_candidate_news_precheck": trader.check_candidate_news_precheck,
+            "request_chat_content": trader.request_chat_content,
+        }
+        captured = {}
+        try:
+            os.environ[trader.ACTIVE_STRATEGY_ENV] = "sector_tide"
+            os.environ[trader.STRATEGY_SOURCE_ENV] = "builtin"
+            os.environ[trader.PERSONA_STRATEGY_ENV] = "sector_tide"
+            os.environ.pop(trader.TRADE_DISCIPLINE_TEXT_ENV, None)
+            trader.load_crossdesk_config = lambda *args, **kwargs: ("https://decision.example/v1", "key")
+            trader.check_market_environment = lambda: {"bullish": False, "detail": "test"}
+            trader.check_market_sentiment = lambda: {"sentiment": "cold", "detail": "test", "hot_sectors": []}
+            trader.current_market_strategy_context = lambda now=None: {"enabled": False}
+            trader.check_candidate_news_precheck = lambda candidates: ""
+
+            def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+                captured["prompt"] = payload["messages"][0]["content"]
+                return '{"summary":"ok","actions":[]}'
+
+            trader.request_chat_content = fake_request
+            trader.call_model_decision(
+                [],
+                {
+                    "positions": [{
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "available_qty": 1000,
+                        "buy_strategy": "b2_confirm",
+                        "strategy_mark": {"strategy_id": "b2_confirm", "label": "B2确认"},
+                        "strategy_mark_id": "b2_confirm",
+                    }],
+                    "cash": 900000,
+                    "total_equity": 1000000,
+                },
+                True,
+                "连续竞价交易时段",
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        prompt = captured["prompt"]
+        self.assertIn("当前激活策略：板块潮汐（独立策略）", prompt)
+        self.assertIn("【当前新开仓策略规则（只控制BUY）】", prompt)
+        self.assertIn("板块潮汐（市场→行业→个股", prompt)
+        self.assertIn("【已有持仓退出规则（按strategy_mark动态装载）】", prompt)
+        self.assertIn("Z哥历史持仓退出纪律", prompt)
+        self.assertIn("strategy_mark=B2确认", prompt)
+        self.assertIn("SELL必须逐只读取已有持仓的strategy_mark", prompt)
+
     def test_held_candidate_add_rule_is_in_decision_prompt(self):
         saved_env = {
             trader.STRATEGY_SOURCE_ENV: os.environ.get(trader.STRATEGY_SOURCE_ENV),
@@ -2238,6 +2364,57 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(len(at_tail), 1)
         self.assertEqual(at_tail[0]["exit_signal"], "b2_no_follow_through")
         self.assertIn("14:45", at_tail[0]["reason"])
+
+    def test_predecision_exit_uses_strategy_mark_when_active_suite_and_legacy_field_differ(self):
+        state = {
+            "cash": 0.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "name": "测试股",
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 9.5,
+                    "confirmed_close": 9.5,
+                    "shaofu_stop_price": 9.7,
+                    "shaofu_stop_source": "b1_low",
+                    "buy_strategy": "sector_tide_mainline",
+                    "strategy_mark_id": "b2_confirm",
+                    "strategy_mark": {"strategy_id": "b2_confirm", "label": "B2确认"},
+                    "buy_date_lots": {"2026-06-23": 1000},
+                }
+            },
+            "trade_log": [],
+            "decision_log": [],
+        }
+        saved_active = os.environ.get(trader.ACTIVE_STRATEGY_ENV)
+        originals = {
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+            "refresh_position_intraday": trader.refresh_position_intraday,
+            "_refresh_position_bbi": trader._refresh_position_bbi,
+        }
+        try:
+            os.environ[trader.ACTIVE_STRATEGY_ENV] = "sector_tide"
+            trader.refresh_realtime_prices = lambda _state: {}
+            trader.refresh_position_intraday = lambda _state: {}
+            trader._refresh_position_bbi = lambda _state, _dt=None: None
+
+            executed = trader.run_position_exit_checks_before_decision(
+                state,
+                datetime(2026, 6, 24, 10, 0),
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            if saved_active is None:
+                os.environ.pop(trader.ACTIVE_STRATEGY_ENV, None)
+            else:
+                os.environ[trader.ACTIVE_STRATEGY_ENV] = saved_active
+
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]["exit_signal"], "shaofu_entry_stop")
+        self.assertEqual(executed[0]["buy_strategy"], "b2_confirm")
+        self.assertEqual(state["positions"], {})
 
     def test_partial_profit_does_not_auto_sell_rest_at_same_band(self):
         state = {

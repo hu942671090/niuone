@@ -121,7 +121,9 @@ The 09:25 scan falls in the quiet period after the opening auction. The system m
 
 Users can click **Manually trigger candidate scan and trading strategy** on the Practice page to run the complete flow. It uses the same scanner, active-strategy setting, and execution layer as the scheduled path; it is not a force-fill or risk-bypass endpoint. A normal page refresh only reads cached and account state.
 
-Local automatic exits are invoked by the separate Cron Scheduler process. Structural stops, Sector Tide deterioration, strategy time boxes, 2R, and 2 ATR are scheduled checks rather than tick-by-tick monitoring. Both the Dashboard and Cron Scheduler processes must be running for the full lifecycle.
+Every scheduled or manual B1 decision refreshes all open positions first and evaluates each position under the original exit rules identified by its stored `strategy_mark`; the active suite controls new candidates and BUYs only. SELL/HOLD checks continue when the candidate list is empty or the daily loss budget has fired, and that budget pauses new entries only.
+
+Local automatic exits are also invoked by the separate Cron Scheduler process at dedicated times. Structural stops, Sector Tide deterioration, strategy time boxes, 2R, and 2 ATR remain discrete checks rather than tick-by-tick monitoring. Both the Dashboard and Cron Scheduler processes must be running for the full lifecycle.
 
 When a strategy appears not to trigger, check in this order:
 

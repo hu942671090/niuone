@@ -82,7 +82,11 @@ from strategies.policy import (
     candidate_buy_blockers as _strategy_candidate_buy_blockers,
     strategy_position_limit_pct as _strategy_position_limit_pct,
 )
-from strategies.prompts import build_strategy_prompt_sections, format_preset_strategy_section
+from strategies.prompts import (
+    build_position_exit_prompt_section,
+    build_strategy_prompt_sections,
+    format_preset_strategy_section,
+)
 from strategies.scoring.common import find_n_structure_prior_low as _find_n_structure_prior_low
 from strategies.sector_tide_risk import (
     SECTOR_TIDE_EXECUTION_BUFFER_PCT,
@@ -3551,10 +3555,10 @@ def load_latest_sector_tide_payload() -> dict[str, Any]:
 def position_entry_strategy(pos: dict[str, Any]) -> str:
     mark = pos.get("strategy_mark") if isinstance(pos.get("strategy_mark"), dict) else {}
     return str(
-        pos.get("buy_strategy")
-        or pos.get("strategy_mark_id")
-        or mark.get("strategy_id")
+        mark.get("strategy_id")
         or mark.get("entry_strategy_id")
+        or pos.get("strategy_mark_id")
+        or pos.get("buy_strategy")
         or ""
     )
 
@@ -4072,7 +4076,7 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
             continue
         exit_reason = str(exit_signal.get("reason") or "")
         entry_strategy = str(
-            pos.get("buy_strategy")
+            position_entry_strategy(pos)
             or latest_buy_strategy_for_code(state, code)
             or classify_buy_strategy(str(pos.get("entry_reason") or ""))
         )
@@ -4212,6 +4216,21 @@ def run_auto_exits_once(dt: datetime | None = None) -> dict[str, Any]:
         "executed_count": len(executed),
         "portfolio": enrich_portfolio(state),
     }
+
+
+def run_position_exit_checks_before_decision(
+    state: dict[str, Any],
+    dt: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Refresh and evaluate every open position before candidate/model work."""
+    positions = state.get("positions") or {}
+    if not any(isinstance(pos, dict) and position_qty(pos) > 0 for pos in positions.values()):
+        return []
+    current = dt or datetime.now()
+    refresh_realtime_prices(state)
+    refresh_position_intraday(state)
+    _refresh_position_bbi(state, current)
+    return check_auto_exits(state, current)
 
 
 def maybe_record_session_equity_heartbeat(min_interval_seconds: int = EQUITY_HEARTBEAT_MIN_SECONDS) -> bool:
@@ -4757,6 +4776,19 @@ def active_strategy_ids_for_decision() -> set[str]:
     )
 
 
+def position_strategy_ids_for_prompt(positions: list[dict[str, Any]]) -> set[str]:
+    """Collect entry strategies from live position marks without using active-suite state."""
+    known = known_strategy_ids()
+    strategy_ids: set[str] = set()
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        mark = pos.get("strategy_mark") if isinstance(pos.get("strategy_mark"), dict) else {}
+        values = [position_entry_strategy(pos), mark.get("component_strategy_id")]
+        strategy_ids.update(str(value) for value in values if str(value or "") in known)
+    return strategy_ids
+
+
 def load_decision_model_config() -> tuple[str, str]:
     # Provider selection: most models use the configured OpenAI-compatible endpoint;
     # this legacy alias keeps the OpenCode Zen free-model path working.
@@ -4806,6 +4838,8 @@ def call_model_decision(
     strategy_suite = current_strategy_suite()
     preset_strategy_text = current_preset_strategy_text()
     active_strategy_ids = active_strategy_ids_for_decision()
+    portfolio_positions = [p for p in (portfolio.get("positions") or []) if isinstance(p, dict)]
+    position_strategy_ids = position_strategy_ids_for_prompt(portfolio_positions)
     strategy_prompt_sections = build_strategy_prompt_sections(
         strategy_suite,
         preset_strategy_text,
@@ -4817,7 +4851,11 @@ def call_model_decision(
     strategy_labels = strategy_prompt_sections["strategy_labels"]
     active_strategy_section = strategy_prompt_sections["active_strategy_section"]
     position_limit_desc = strategy_prompt_sections["position_limit_desc"]
-    portfolio_positions = [p for p in (portfolio.get("positions") or []) if isinstance(p, dict)]
+    position_exit_section = build_position_exit_prompt_section(
+        position_strategy_ids,
+        b3_exit_hhmm=B3_EXIT_HHMM,
+        time_exit_hhmm=TIME_EXIT_HHMM,
+    )
     position_by_code = {
         normalize_code(pos.get("code") or ""): pos
         for pos in portfolio_positions
@@ -4899,10 +4937,13 @@ def call_model_decision(
 当前激活策略：{strategy_source_label}
 当前选股范围：{friendly_stock_universe(current_stock_universe())}
 
-【当前独立策略规则】
+【当前新开仓策略规则（只控制BUY）】
 {active_strategy_section}
 
-隔离要求：本轮新开仓只能依据上述当前策略及其候选；不得引用、混合或补充其他未启用策略。已有持仓继续按各自 strategy_mark 执行原策略退出纪律。
+【已有持仓退出规则（按strategy_mark动态装载）】
+{position_exit_section}
+
+隔离要求：本轮BUY只能依据当前新开仓策略及其候选，不得引用、混合或补充其他未启用策略。SELL必须逐只读取已有持仓的strategy_mark并执行上方对应的原策略退出纪律；不得因为当前激活策略变化而改写历史持仓归因。即使候选为空、盘面禁止开仓或日内亏损预算触发，也必须继续判断已有持仓的SELL/HOLD。
 
 ⚠️ 有风险标记的候选股，请结合其近期消息面（利空/减持/监管）综合判断，不要只看技术面。
 
@@ -5173,6 +5214,7 @@ def execute_actions(
     effective_max_open_positions = int(market_strategy_ctx.get("max_open_positions", MAX_OPEN_POSITIONS))
     effective_max_new_buys = int(market_strategy_ctx.get("max_new_buys_per_decision", MAX_NEW_BUYS_PER_DECISION))
     allow_market_guidance_buys = bool(market_strategy_ctx.get("allow_new_buys", True))
+    daily_loss_budget_exceeded, daily_loss_budget_pnl = check_daily_loss_budget(state)
     if not trade_allowed:
         return executed
     for action in (decision.get("actions") or [])[:5]:
@@ -5201,6 +5243,13 @@ def execute_actions(
             add_execution_block(decision, code, f"模型仓位{shares}股不是100股整数倍，本轮不自动取整")
             continue
         if act == "BUY":
+            if daily_loss_budget_exceeded:
+                add_execution_block(
+                    decision,
+                    code,
+                    f"日内亏损预算已触发({daily_loss_budget_pnl:.1f}%)，仅暂停BUY，SELL继续执行",
+                )
+                continue
             if not candidate or not candidate_in_stock_universe(candidate):
                 add_execution_block(decision, code, "买入标的不在当前选股范围")
                 continue
@@ -5560,7 +5609,7 @@ def execute_actions(
             realized_pnl = net_proceeds - cost_basis
             realized_pnl_pct = (realized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
             entry_strategy = str(
-                pos.get("buy_strategy")
+                position_entry_strategy(pos)
                 or latest_buy_strategy_for_code(state, code)
                 or classify_buy_strategy(str(pos.get("entry_reason") or ""))
             )
@@ -5849,47 +5898,51 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     schedule_slot = b1_payload.get("schedule_slot") or ""
     schedule_run_kind = b1_payload.get("schedule_run_kind") or ""
     schedule_triggered_at = b1_payload.get("schedule_triggered_at") or ""
-    if not force and state.get("last_b1_generated_at") == generated_at:
-        return {"skipped": True, "reason": "already_decided_for_this_b1", "state": enrich_portfolio(state)}
+    already_decided = bool(not force and state.get("last_b1_generated_at") == generated_at)
     sync_sector_tide_position_context(state, b1_payload)
+    position_exit_executed = run_position_exit_checks_before_decision(state, datetime.now())
+    if already_decided:
+        record_equity(state)
+        save_state(state)
+        if position_exit_executed:
+            _notify_trade_executions_safely(position_exit_executed)
+        return {
+            "skipped": True,
+            "reason": "already_decided_for_this_b1",
+            "executed": position_exit_executed,
+            "position_exit_executed": position_exit_executed,
+            "model_executed": [],
+            "state": enrich_portfolio(state),
+        }
     market_strategy_ctx = market_strategy_context_for_b1(b1_payload)
-    compact_market_ctx = compact_market_strategy_context(market_strategy_ctx)
-    state["market_decision_context"] = compact_market_ctx
-    
-    # 日内亏损预算检查
+
+    # 日内亏损预算只暂停新开仓；已有持仓的本地和模型退出继续运行。
     budget_exceeded, today_pnl = check_daily_loss_budget(state)
-    if budget_exceeded and not force:
-        decision = {
-            "summary": f"🛑 日内亏损预算触发（今日累计{today_pnl:.1f}% ≤ {DAILY_LOSS_BUDGET_PCT}%），暂停当日开仓",
-            "actions": [],
-            "model": "SYSTEM_RISK_BUDGET",
-            "provider": "local_rule",
-            "market_guidance": compact_market_ctx,
-            "decision_intelligence": safe_decision_intelligence_context(enrich_portfolio(state), [], market_strategy_ctx, ""),
+    buy_budget_exceeded = bool(budget_exceeded)
+    if buy_budget_exceeded:
+        market_strategy_ctx = {
+            **market_strategy_ctx,
+            "allow_new_buys": False,
+            "max_new_buys_per_decision": 0,
+            "daily_loss_budget_exceeded": True,
+            "daily_loss_budget_pnl_pct": round(float(today_pnl), 3),
+            "daily_loss_budget_limit_pct": DAILY_LOSS_BUDGET_PCT,
         }
         state["trading_paused"] = True
         state["pause_reason"] = f"日内亏损预算({today_pnl:.1f}%)"
         state["pause_since"] = now_ts()
-        # 触发自优化
         try:
             from self_optimizer import run_optimization
             run_optimization()
-        except Exception: pass
-        log_entry = {
-            "time": now_ts(), "b1_generated_at": generated_at,
-            "trade_allowed": False, "trade_reason": f"日内亏损预算({today_pnl:.1f}%)",
-            "decision": decision, "executed": [],
-            "market_decision_context": compact_market_ctx,
-        }
-        if schedule_slot:
-            log_entry["schedule_slot"] = schedule_slot
-            log_entry["schedule_run_kind"] = schedule_run_kind
-            log_entry["schedule_triggered_at"] = schedule_triggered_at
-        state.setdefault("decision_log", []).append(log_entry)
-        _sync_decision_to_db(log_entry)
-        save_state(state)
-        return {"decision": decision, "executed": [], "portfolio": enrich_portfolio(state)}
-    
+        except Exception:
+            pass
+    else:
+        for key in ("trading_paused", "pause_reason", "pause_since"):
+            state.pop(key, None)
+
+    compact_market_ctx = compact_market_strategy_context(market_strategy_ctx)
+    state["market_decision_context"] = compact_market_ctx
+
     # 自适应参数
     adaptive = get_adaptive_params()
     
@@ -5899,15 +5952,9 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
         if isinstance(c, dict) and candidate_in_stock_universe(c) and candidate_is_buyable(c)
     ]
     
-    # 本轮允许交易 → 清除之前的暂停标记
-    if "trading_paused" in state:
-        del state["trading_paused"]
-        if "pause_reason" in state:
-            del state["pause_reason"]
-        if "pause_since" in state:
-            del state["pause_since"]
-    
     trade_allowed, trade_reason = is_a_share_execution_time()
+    if buy_budget_exceeded:
+        trade_reason = f"{trade_reason}；日内亏损预算触发，仅允许SELL/HOLD"
     deferred_due_at = "" if trade_allowed else deferred_execution_due_at(schedule_slot)
     market_env = check_market_environment()
     market_sent = check_market_sentiment()
@@ -5916,8 +5963,29 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     if market_sent["sentiment"] == "cold" and trade_allowed:
         sentiment_note = f"⚠️市场情绪偏冷({market_sent['detail']})，建议仓位减半或不建仓"
     portfolio = enrich_portfolio(state)
+    has_open_positions = any(
+        isinstance(pos, dict) and position_qty(pos) > 0
+        for pos in (state.get("positions") or {}).values()
+    )
     try:
-        if not trade_allowed and deferred_due_at:
+        if not has_open_positions and (not candidates or buy_budget_exceeded):
+            summary = (
+                f"日内亏损预算触发（今日累计{today_pnl:.1f}%），当前无持仓，仅暂停新开仓"
+                if buy_budget_exceeded
+                else "本轮无候选且无持仓，无需生成买卖动作"
+            )
+            decision = {
+                "summary": summary,
+                "actions": [],
+                "model": "SYSTEM_POSITION_RISK_CHECK",
+                "provider": "local_rule",
+                "market_guidance": compact_market_ctx,
+                "decision_intelligence": safe_decision_intelligence_context(
+                    portfolio, candidates, market_strategy_ctx, ""
+                ),
+            }
+            executed = []
+        elif not trade_allowed and deferred_due_at:
             model_trade_reason = (
                 f"计划{schedule_slot[-5:]}选股属于上午连续竞价时段；当前{trade_reason}。"
                 f"请正常生成买卖策略，系统会在{deferred_due_at[-8:-3]}开盘后复核并成交。"
@@ -6022,9 +6090,16 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
         _sync_positions_to_db(state)
     record_equity(state)
     save_state(state)
-    if executed:
-        _notify_trade_executions_safely(executed)
-    return {"decision": decision, "executed": executed, "portfolio": enrich_portfolio(state)}
+    all_executed = [*position_exit_executed, *executed]
+    if all_executed:
+        _notify_trade_executions_safely(all_executed)
+    return {
+        "decision": decision,
+        "executed": all_executed,
+        "position_exit_executed": position_exit_executed,
+        "model_executed": executed,
+        "portfolio": enrich_portfolio(state),
+    }
 
 
 def resume_trading() -> dict[str, Any]:

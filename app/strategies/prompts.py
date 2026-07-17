@@ -31,6 +31,76 @@ def format_preset_strategy_section(source: str, preset_text: str) -> str:
 4. 返回JSON的summary和reason里简短体现预设文字策略的核心规则。"""
 
 
+def build_position_exit_prompt_section(
+    position_strategy_ids: set[str],
+    *,
+    b3_exit_hhmm: str,
+    time_exit_hhmm: str,
+) -> str:
+    """Build exit-only rules for the strategies actually held in the portfolio."""
+    known_ids = {
+        strategy_id
+        for strategy_id in position_strategy_ids
+        if strategy_id in STRATEGY_DEFINITIONS
+    }
+    if not known_ids:
+        return "当前没有带有效 strategy_mark 的持仓，无需加载历史持仓退出规则。"
+
+    sections: list[str] = []
+    zettaranc_ids = {
+        strategy_id
+        for strategy_id in known_ids
+        if STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona") == "zettaranc"
+    }
+    if zettaranc_ids:
+        labels = "、".join(
+            str(STRATEGY_DEFINITIONS[strategy_id].get("label") or strategy_id)
+            for strategy_id in sorted(
+                zettaranc_ids,
+                key=lambda item: int(STRATEGY_DEFINITIONS[item].get("display_order", 999)),
+            )
+        )
+        sections.append(f"""Z哥历史持仓退出纪律（仅适用于 strategy_mark={labels}）：
+- 少妇B1使用N型上移结构最近前低；B2使用前置B1低点；B3使用B3当日低点（缺失时用B2大阳线中位）；超级B1使用放量洗盘阴线低点。
+- 保留防卖飞5分评分、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线、峰值回撤与ATR吊灯保护。
+- B3仅在{b3_exit_hhmm}执行次日开盘不涨离场；B2和超级B1仅在{time_exit_hhmm}执行相应时间窗退出；必须服从T+1可卖数量。""")
+
+    sector_tide_ids = {
+        strategy_id
+        for strategy_id in known_ids
+        if STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona") == "sector_tide"
+    }
+    if sector_tide_ids:
+        labels = "、".join(
+            str(STRATEGY_DEFINITIONS[strategy_id].get("label") or strategy_id)
+            for strategy_id in sorted(
+                sector_tide_ids,
+                key=lambda item: int(STRATEGY_DEFINITIONS[item].get("display_order", 999)),
+            )
+        )
+        sections.append(f"""板块潮汐历史持仓退出纪律（仅适用于 strategy_mark={labels}）：
+- 跌破入场结构止损退出；行业分数低于55连续两次退出；市场复合风险硬停止且行业转弱时退出。
+- 主线5日、轮动3日、修复T+2未延续时退出；达到2R先减半，余仓按峰值减2ATR跟踪。
+- 当前激活策略发生变化不得改写这些持仓的入场策略、止损锚点或退出时间窗。""")
+
+    covered = zettaranc_ids | sector_tide_ids
+    other_ids = known_ids - covered
+    if other_ids:
+        labels = "、".join(
+            str(STRATEGY_DEFINITIONS[strategy_id].get("label") or strategy_id)
+            for strategy_id in sorted(
+                other_ids,
+                key=lambda item: int(STRATEGY_DEFINITIONS[item].get("display_order", 999)),
+            )
+        )
+        sections.append(
+            f"其他历史持仓退出纪律（strategy_mark={labels}）："
+            "按持仓保存的时间纪律、结构止损、BBI/趋势失效、峰值回撤和ATR保护执行；"
+            "不得套用当前新开仓策略重写原入场逻辑。"
+        )
+    return "\n\n".join(sections)
+
+
 def build_strategy_prompt_sections(
     strategy_suite: str,
     preset_strategy_text: str,

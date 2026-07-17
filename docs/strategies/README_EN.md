@@ -19,7 +19,7 @@ Strategy outputs are experimental signals and must not be used as the basis for 
 
 The settings page directly selects one active strategy suite. Basic Strategies, Z-ge, Li Daxiao, Sector Tide, and Preset Text are peer, mutually exclusive suites. Each suite independently owns its candidate scope, scoring, entry, exit, sizing, and model-prompt rules. Inactive suites do not enter the current new-position scan or decision context.
 
-Switching suites does not rewrite historical position attribution. Existing positions continue to use the `strategy_mark` captured at entry for their original exit discipline. Preset Text uses the basic scan only as a raw candidate pool and applies the text rules as the independent decision policy. Empty text creates no new simulated positions and only performs risk checks on existing holdings.
+Switching suites does not rewrite historical position attribution. The active suite controls new BUYs only; each existing position dynamically loads its original exit discipline from the `strategy_mark` captured at entry. Every scan-and-decision cycle refreshes and evaluates all open positions with local exit rules before processing current-suite candidates or model judgment. SELL/HOLD checks continue when the candidate list is empty or the daily loss budget has fired; that budget pauses new BUYs only. Preset Text uses the basic scan only as a raw candidate pool and applies the text rules as the independent decision policy. Empty text creates no new simulated positions and only performs risk checks on existing holdings.
 
 ### 2.1 User Guide: Enabling and Triggering a Strategy
 
@@ -32,7 +32,7 @@ Scheduling ownership is split between two processes:
 
 | Work | Process | Main settings | Behavior |
 |---|---|---|---|
-| Candidate scan and model decision | Dashboard | `DASHBOARD_B1_SCHEDULE_ENABLED`, `DASHBOARD_B1_SCHEDULE_TIMES` | Runs the scan on schedule or on manual request and sends only the active suite's candidates into the simulated decision flow |
+| Candidate scan and model decision | Dashboard | `DASHBOARD_B1_SCHEDULE_ENABLED`, `DASHBOARD_B1_SCHEDULE_TIMES` | Checks every open position under its original exit discipline first, then sends current-suite candidates into the simulated decision flow; zero-candidate scans still perform position exits |
 | Local automatic exits | Cron Scheduler | `DASHBOARD_B3_EXIT_TIME`, `DASHBOARD_TIME_EXIT_TIME` | Refreshes position data at the configured times and checks structural stops, sector deterioration, time boxes, 2R, and 2 ATR rules |
 
 Automatic exits are discrete scheduled checks, not broker-native conditional orders or tick-by-tick monitoring. Refreshing the page only reads state and never creates a simulated fill. Switching away from Sector Tide stops new Sector Tide candidates, while existing Sector Tide positions continue to receive exits according to their stored strategy marks.
