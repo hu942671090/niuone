@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -2373,6 +2374,257 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(payload["cash"], 100000.0)
         self.assertEqual(state["trade_log"], [])
         self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+
+    def test_session_equity_heartbeat_uses_wall_clock_minute_buckets(self):
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 17, 10, 1, 1)
+
+        state = {
+            "initial_cash": 100000.0,
+            "cash": 100000.0,
+            "positions": {},
+            "trade_log": [],
+            "decision_log": [],
+            "equity_history": [{
+                "time": "2026-07-17 10:00:59",
+                "equity": 100000.0,
+                "cash": 100000.0,
+                "market_value": 0.0,
+                "pnl_pct": 0.0,
+            }],
+            "daily_equity_history": [],
+        }
+        calls = {"refresh": 0, "save": 0}
+        fake_db = types.ModuleType("niuniu_db")
+        fake_db.record_daily_equity = lambda _point: None
+        original_db = sys.modules.get("niuniu_db")
+        originals = {
+            "datetime": trader.datetime,
+            "is_a_share_trading_day": trader.is_a_share_trading_day,
+            "load_state": trader.load_state,
+            "save_state": trader.save_state,
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+        }
+        try:
+            sys.modules["niuniu_db"] = fake_db
+            trader.datetime = FixedDateTime
+            trader.is_a_share_trading_day = lambda dt=None: True
+            trader.load_state = lambda: state
+            trader.save_state = lambda _state: calls.__setitem__("save", calls["save"] + 1)
+            trader.refresh_realtime_prices = lambda _state: calls.__setitem__(
+                "refresh", calls["refresh"] + 1
+            )
+
+            self.assertTrue(trader.maybe_record_session_equity_heartbeat())
+            self.assertFalse(trader.maybe_record_session_equity_heartbeat())
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            if original_db is None:
+                sys.modules.pop("niuniu_db", None)
+            else:
+                sys.modules["niuniu_db"] = original_db
+
+        self.assertEqual(calls, {"refresh": 1, "save": 1})
+        self.assertEqual(
+            [point["time"] for point in state["equity_history"]],
+            ["2026-07-17 10:00:59", "2026-07-17 10:01:00"],
+        )
+
+    def test_session_equity_heartbeat_captures_the_full_closing_minute(self):
+        class ClosingDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 17, 15, 0, 59)
+
+        state = {
+            "initial_cash": 100000.0,
+            "cash": 100000.0,
+            "positions": {},
+            "trade_log": [],
+            "decision_log": [],
+            "equity_history": [{
+                "time": "2026-07-17 14:59:00",
+                "equity": 100000.0,
+                "cash": 100000.0,
+                "market_value": 0.0,
+                "pnl_pct": 0.0,
+            }],
+            "daily_equity_history": [],
+        }
+        fake_db = types.ModuleType("niuniu_db")
+        fake_db.record_daily_equity = lambda _point: None
+        original_db = sys.modules.get("niuniu_db")
+        originals = {
+            "datetime": trader.datetime,
+            "is_a_share_trading_day": trader.is_a_share_trading_day,
+            "load_state": trader.load_state,
+            "save_state": trader.save_state,
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+        }
+        try:
+            sys.modules["niuniu_db"] = fake_db
+            trader.datetime = ClosingDateTime
+            trader.is_a_share_trading_day = lambda dt=None: True
+            trader.load_state = lambda: state
+            trader.save_state = lambda _state: None
+            trader.refresh_realtime_prices = lambda _state: {}
+
+            self.assertTrue(
+                trader.is_a_share_equity_heartbeat_clock(
+                    datetime(2026, 7, 17, 15, 0, 1)
+                )
+            )
+            self.assertFalse(
+                trader.is_a_share_session_clock(
+                    datetime(2026, 7, 17, 15, 0, 1)
+                )
+            )
+            self.assertTrue(
+                trader.is_a_share_equity_heartbeat_clock(
+                    datetime(2026, 7, 17, 15, 0, 59)
+                )
+            )
+            self.assertFalse(
+                trader.is_a_share_equity_heartbeat_clock(
+                    datetime(2026, 7, 17, 15, 1, 0)
+                )
+            )
+            self.assertTrue(trader.maybe_record_session_equity_heartbeat())
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            if original_db is None:
+                sys.modules.pop("niuniu_db", None)
+            else:
+                sys.modules["niuniu_db"] = original_db
+
+        self.assertEqual(
+            [point["time"] for point in state["equity_history"]],
+            ["2026-07-17 14:59:00", "2026-07-17 15:00:00"],
+        )
+
+    def test_session_equity_heartbeat_preserves_concurrent_trade_point(self):
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 17, 10, 1, 20)
+
+        previous_point = {
+            "time": "2026-07-17 10:00:00",
+            "equity": 100000.0,
+            "cash": 100000.0,
+            "market_value": 0.0,
+            "pnl_pct": 0.0,
+        }
+        initial = {
+            "initial_cash": 100000.0,
+            "cash": 100000.0,
+            "positions": {},
+            "trade_log": [],
+            "decision_log": [],
+            "pending_decisions": [],
+            "equity_history": [dict(previous_point)],
+            "daily_equity_history": [dict(previous_point)],
+        }
+        refresh_started = threading.Event()
+        release_refresh = threading.Event()
+        heartbeat_results = []
+        heartbeat_errors = []
+        db_points = []
+        fake_db = types.ModuleType("niuniu_db")
+        fake_db.record_daily_equity = lambda point: db_points.append(dict(point))
+        original_db = sys.modules.get("niuniu_db")
+        original_state_file = trader.STATE_FILE
+        originals = {
+            "datetime": trader.datetime,
+            "is_a_share_trading_day": trader.is_a_share_trading_day,
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+        }
+        worker = None
+
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                sys.modules["niuniu_db"] = fake_db
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                trader.datetime = FixedDateTime
+                trader.is_a_share_trading_day = lambda dt=None: True
+
+                def blocking_refresh(_state):
+                    refresh_started.set()
+                    if not release_refresh.wait(5):
+                        raise TimeoutError("test quote refresh was not released")
+                    return {}
+
+                trader.refresh_realtime_prices = blocking_refresh
+                trader.save_state(initial)
+
+                def run_heartbeat():
+                    try:
+                        heartbeat_results.append(
+                            trader.maybe_record_session_equity_heartbeat()
+                        )
+                    except Exception as exc:
+                        heartbeat_errors.append(exc)
+
+                worker = threading.Thread(target=run_heartbeat)
+                worker.start()
+                self.assertTrue(refresh_started.wait(2))
+
+                traded = trader.load_state()
+                traded["cash"] = 90000.0
+                traded["positions"] = {
+                    "600000": {
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 100,
+                        "avg_cost": 100.0,
+                        "last_price": 110.0,
+                        "buy_date_lots": {"2026-07-17": 100},
+                    }
+                }
+                traded["trade_log"] = [{
+                    "time": "2026-07-17 10:01:10",
+                    "action": "BUY",
+                    "code": "600000",
+                    "name": "测试股",
+                    "shares": 100,
+                    "price": 100.0,
+                    "reason": "并发成交",
+                }]
+                self.assertTrue(trader.record_equity(traded))
+                trader.save_state(traded)
+
+                release_refresh.set()
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+                saved = trader.load_state()
+            finally:
+                release_refresh.set()
+                if worker is not None:
+                    worker.join(5)
+                for name, value in originals.items():
+                    setattr(trader, name, value)
+                trader.STATE_FILE = original_state_file
+                if original_db is None:
+                    sys.modules.pop("niuniu_db", None)
+                else:
+                    sys.modules["niuniu_db"] = original_db
+
+        self.assertEqual(heartbeat_errors, [])
+        self.assertEqual(heartbeat_results, [False])
+        self.assertEqual(saved["cash"], 90000.0)
+        self.assertEqual(saved["positions"]["600000"]["qty"], 100)
+        self.assertEqual(
+            [point["time"] for point in saved["equity_history"]],
+            ["2026-07-17 10:00:00", "2026-07-17 10:01:00"],
+        )
+        self.assertEqual(saved["equity_history"][-1]["equity"], 101000.0)
+        self.assertEqual(saved["daily_equity_history"][-1]["equity"], 101000.0)
+        self.assertNotIn(trader._PENDING_EQUITY_DB_SYNC_TIME, saved)
+        self.assertEqual(db_points[-1]["equity"], 101000.0)
 
     def test_intraday_curve_rebuild_skips_days_with_trades(self):
         state = {
