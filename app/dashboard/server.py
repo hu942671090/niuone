@@ -189,6 +189,9 @@ B1_SCHEDULE_LOCK = threading.RLock()
 B1_SCHEDULE_THREAD: threading.Thread | None = None
 PENDING_DECISION_THREAD: threading.Thread | None = None
 PENDING_DECISION_POLL_SECONDS = float(os.environ.get("DASHBOARD_PENDING_DECISION_POLL_SECONDS", "5") or "5")
+PRACTICE_EQUITY_HEARTBEAT_LOCK = threading.Lock()
+PRACTICE_EQUITY_HEARTBEAT_THREAD: threading.Thread | None = None
+PRACTICE_EQUITY_HEARTBEAT_POLL_SECONDS = 5.0
 B1_CANDIDATE_REFRESH_LOCK = threading.Lock()
 B1_FULL_SCAN_LOCK = threading.Lock()
 B1_CANDIDATE_REFRESH_MIN_SECONDS = float(os.environ.get("DASHBOARD_B1_CANDIDATE_REFRESH_MIN_SECONDS", "0") or "0")
@@ -394,6 +397,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_GROK_BASE_URL", "label": "Grok API 地址", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_API_KEY", "label": "Grok API 密钥", "group": "牛牛美股", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_MODEL", "label": "消息面预检模型", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_NEWS_API_MODE", "label": "消息面搜索工具接口模式", "group": "消息面预检模型", "kind": "api_mode", "default": "auto", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_CONTEXT_LENGTH", "label": "消息面预检上下文长度", "group": "消息面预检模型", "kind": "context_length", "default": DEFAULT_MODEL_CONTEXT_LENGTH, "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_MAX_TOKENS", "label": "消息面预检最大输出长度", "group": "消息面预检模型", "kind": "max_tokens", "default": DEFAULT_MODEL_MAX_TOKENS, "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_BASE_URL", "label": "消息面预检 API 地址", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
@@ -464,6 +468,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "US_RATING_DEADLINE_SECONDS",
     "US_RATING_REQUEST_TIMEOUT_SECONDS",
     "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_API_MODE",
     "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_MAX_TOKENS",
     "DASHBOARD_NEWS_BASE_URL",
@@ -538,6 +543,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
 TRADER_RUNTIME_ENV_NAMES = {
     STOCK_UNIVERSE_ENV,
     "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_API_MODE",
     "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_MAX_TOKENS",
     "DASHBOARD_NEWS_BASE_URL",
@@ -1065,9 +1071,10 @@ def apply_hot_stocks_sort(data: dict[str, Any], sort_by: str) -> dict[str, Any]:
 def get_practice_payload() -> dict[str, Any]:
     try:
         trader = get_trader_module()
-        # 盘面时间内按 dashboard 刷新节奏补记账户权益点；与是否交易/是否有B1候选无关。
-        if hasattr(trader, "maybe_record_session_equity_heartbeat"):
-            trader.maybe_record_session_equity_heartbeat()
+        # The independent heartbeat normally owns minute snapshots. Keep this
+        # request-side call as a safe fallback for legacy entrypoints that do not
+        # start dashboard background workers.
+        record_practice_equity_heartbeat(trader)
         payload = trader.get_dashboard_payload()
         payload["trade_markers"] = compact_trade_markers(payload.get("trade_log") or [])
         annotate_practice_snapshot(payload, mode="full", history_scope="retained_history")
@@ -1084,6 +1091,27 @@ def get_practice_payload() -> dict[str, Any]:
                    "equity_history": [], "trade_markers": [], "last_error": str(exc), "decision_model": "", "decision_provider": ""}
         annotate_practice_snapshot(payload, mode="full", history_scope="unavailable")
         return annotate_practice_payload_clock(payload)
+
+
+def record_practice_equity_heartbeat(trader: Any | None = None) -> bool:
+    """Record one due equity heartbeat without overlapping another producer."""
+
+    if not PRACTICE_EQUITY_HEARTBEAT_LOCK.acquire(blocking=False):
+        return False
+    try:
+        trader = trader or get_trader_module()
+        recorder = getattr(trader, "maybe_record_session_equity_heartbeat", None)
+        if recorder is None:
+            return False
+        recorded = bool(recorder())
+        if recorded:
+            invalidate_api_cache("niuniu_practice", PRACTICE_FAST_CACHE_KEY)
+        return recorded
+    except Exception as exc:
+        print(f"[WARN] 模拟账户权益心跳失败: {type(exc).__name__}: {exc}", flush=True)
+        return False
+    finally:
+        PRACTICE_EQUITY_HEARTBEAT_LOCK.release()
 
 def downsample_sequence(items: list[Any], max_points: int) -> list[Any]:
     return practice_payload_impl.downsample_sequence(items, max_points)
@@ -2008,6 +2036,33 @@ def pending_decision_loop() -> None:
         time.sleep(max(1.0, PENDING_DECISION_POLL_SECONDS))
 
 
+def practice_equity_heartbeat_loop(
+    *,
+    stop_event: threading.Event | None = None,
+    poll_seconds: float = PRACTICE_EQUITY_HEARTBEAT_POLL_SECONDS,
+) -> None:
+    """Keep minute equity snapshots flowing even when no dashboard is open."""
+
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
+        record_practice_equity_heartbeat()
+        if stop_event.wait(max(1.0, float(poll_seconds))):
+            return
+
+
+def start_practice_equity_heartbeat() -> None:
+    global PRACTICE_EQUITY_HEARTBEAT_THREAD
+    if PRACTICE_EQUITY_HEARTBEAT_THREAD and PRACTICE_EQUITY_HEARTBEAT_THREAD.is_alive():
+        return
+    PRACTICE_EQUITY_HEARTBEAT_THREAD = threading.Thread(
+        target=practice_equity_heartbeat_loop,
+        name="practice-equity-heartbeat",
+        daemon=True,
+    )
+    PRACTICE_EQUITY_HEARTBEAT_THREAD.start()
+    print("Practice equity heartbeat enabled: 60s", flush=True)
+
+
 def start_pending_decision_executor() -> None:
     global PENDING_DECISION_THREAD
     if PENDING_DECISION_THREAD and PENDING_DECISION_THREAD.is_alive():
@@ -2836,7 +2891,7 @@ CRON_TIME_CONFIGS = {
 }
 ADMIN_GROUP_NOTES = {
     "牛牛美股": "集中管理 X/推文监控、美股买入评级和隔夜美股盘面总结使用的 Grok 配置。长度默认：上下文 128000 tokens，最大输出 4096 tokens；关闭时隐藏 X/评级相关设置，隔夜美股总结仍会读取已配置的 Grok 参数。",
-    "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。长度默认：上下文 128000 tokens，最大输出 4096 tokens。模型和密钥留空则跳过。",
+    "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；auto 会为 Grok 4.5 和 GPT-5 系列搜索模型选择 Responses API，也可显式选择 responses 或 chat。长度默认：上下文 128000 tokens，最大输出 4096 tokens。模型和密钥留空则跳过。",
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "交易规则与风控": "约束买卖决策必须遵守的交易纪律、持仓数量、仓位比例、现金缓冲与盘面控仓规则。交易纪律 Prompt 会直接写入决策模型的必须遵守段。",
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
@@ -4735,6 +4790,7 @@ def main() -> None:
     server = ReusableThreadingHTTPServer((args.host, args.port), Handler)
     start_b1_scheduler()
     start_pending_decision_executor()
+    start_practice_equity_heartbeat()
     print(f"牛牛1号：http://{args.host}:{args.port}")
     if ADMIN_PASSWORD:
         print("设置页：/admin（管理员密码保护已启用）")

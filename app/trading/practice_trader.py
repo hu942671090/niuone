@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
+from core.model_api import build_model_request, parse_model_response, request_model
 from market_data.news_precheck import format_cached_news_record, format_cached_news_records
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
 from screening.stock_universe import (
@@ -166,6 +167,7 @@ DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
 def load_dashboard_env() -> None:
     allowed = {
         "DASHBOARD_NEWS_MODEL",
+        "DASHBOARD_NEWS_API_MODE",
         "DASHBOARD_NEWS_CONTEXT_LENGTH",
         "DASHBOARD_NEWS_MAX_TOKENS",
         "DASHBOARD_NEWS_BASE_URL",
@@ -244,6 +246,7 @@ STAMP_DUTY_SELL_RATE = 0.0005
 TRANSFER_FEE_RATE = 0.00001
 REALTIME_QUOTE_MAX_AGE_SECONDS = 8
 EQUITY_HEARTBEAT_MIN_SECONDS = 60
+_PENDING_EQUITY_DB_SYNC_TIME = "_pending_equity_db_sync_time"
 INTRADAY_CACHE_TTL_SECONDS = 45
 INTRADAY_MAX_POINTS = 260
 TENCENT_MINUTE_URL = "https://ifzq.gtimg.cn/appstock/app/minute/query"
@@ -365,6 +368,7 @@ DECISION_REQUEST_TIMEOUT = env_int("DASHBOARD_DECISION_TIMEOUT", 180)
 NEWS_PRECHECK_REQUEST_TIMEOUT = max(5, env_int("DASHBOARD_NEWS_TIMEOUT", 45))
 NEWS_PRECHECK_MAX_RETRIES = max(1, env_int("DASHBOARD_NEWS_MAX_RETRIES", 1))
 NEWS_PRECHECK_CONCURRENCY = max(1, min(5, env_int("DASHBOARD_NEWS_CONCURRENCY", 5)))
+NEWS_PRECHECK_API_MODE = os.environ.get("DASHBOARD_NEWS_API_MODE") or "auto"
 NEWS_PRECHECK_CONTEXT_LENGTH = env_token_count("DASHBOARD_NEWS_CONTEXT_LENGTH", 128000)
 NEWS_PRECHECK_MAX_TOKENS = env_token_count("DASHBOARD_NEWS_MAX_TOKENS", 4096)
 PROVIDER_DISPLAY_NAME = "Crossdesk.ccwu.cc"
@@ -484,11 +488,43 @@ def is_a_share_session_clock(dt: datetime | None = None) -> bool:
     return dtime(9, 15) <= dt.time() <= dtime(15, 0)
 
 
+def is_a_share_equity_heartbeat_clock(dt: datetime | None = None) -> bool:
+    """Equity sampling clock, including every second of the 15:00 closing minute."""
+    dt = dt or datetime.now()
+    if not is_a_share_trading_day(dt):
+        return False
+    return dtime(9, 15) <= dt.time() < dtime(15, 1)
+
+
 def parse_ts(value: str) -> datetime | None:
     try:
         return datetime.strptime(str(value or ""), "%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
+
+
+def equity_heartbeat_due(
+    now: datetime,
+    last: datetime | None,
+    min_interval_seconds: int = EQUITY_HEARTBEAT_MIN_SECONDS,
+) -> bool:
+    """Return whether a new wall-clock minute bucket should be sampled."""
+    if last is None:
+        return True
+    interval_minutes = max(1, math.ceil(max(0, int(min_interval_seconds or 0)) / 60))
+    now_minute = now.replace(second=0, microsecond=0)
+    last_minute = last.replace(second=0, microsecond=0)
+    return now_minute - last_minute >= timedelta(minutes=interval_minutes)
+
+
+def latest_equity_timestamp(state: dict[str, Any]) -> datetime | None:
+    for item in reversed(state.get("equity_history") or []):
+        if not isinstance(item, dict):
+            continue
+        parsed = parse_ts(item.get("time", ""))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def current_session_minute(dt: datetime | None = None) -> int:
@@ -638,6 +674,7 @@ def load_state() -> dict[str, Any]:
 
 
 _STATE_FILE_THREAD_LOCK = threading.RLock()
+_STATE_FILE_LOCK_DEPTH = threading.local()
 
 
 @contextmanager
@@ -646,29 +683,42 @@ def state_file_write_lock():
     lock_file = STATE_FILE.with_name(f"{STATE_FILE.name}.lock")
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     with _STATE_FILE_THREAD_LOCK:
-        with lock_file.open("a+b") as handle:
-            if os.name == "nt":  # pragma: no cover - exercised on Windows deployments
-                import msvcrt
+        depth = int(getattr(_STATE_FILE_LOCK_DEPTH, "value", 0) or 0)
+        if depth:
+            _STATE_FILE_LOCK_DEPTH.value = depth + 1
+            try:
+                yield
+            finally:
+                _STATE_FILE_LOCK_DEPTH.value = depth
+            return
 
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(b"\0")
-                    handle.flush()
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                try:
-                    yield
-                finally:
+        _STATE_FILE_LOCK_DEPTH.value = 1
+        try:
+            with lock_file.open("a+b") as handle:
+                if os.name == "nt":  # pragma: no cover - exercised on Windows deployments
+                    import msvcrt
+
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell() == 0:
+                        handle.write(b"\0")
+                        handle.flush()
                     handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                    try:
+                        yield
+                    finally:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    try:
+                        yield
+                    finally:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            _STATE_FILE_LOCK_DEPTH.value = 0
 
 
 def reconcile_positions_with_trade_log(state: dict[str, Any]) -> list[str]:
@@ -740,6 +790,7 @@ def reconcile_positions_with_trade_log(state: dict[str, Any]) -> list[str]:
 def save_state(state: dict[str, Any]) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with state_file_write_lock():
+        pending_equity_sync_time = str(state.pop(_PENDING_EQUITY_DB_SYNC_TIME, "") or "")
         state["updated_at"] = now_ts()
 
         # Merge append-only logs with the on-disk copy before replacing the file.
@@ -747,7 +798,8 @@ def save_state(state: dict[str, Any]) -> None:
         # replace alone prevents partial JSON, but it does not prevent a slower
         # writer that loaded stale state from replacing a newer decision record.
         if STATE_FILE.exists():
-            current = json.loads(STATE_FILE.read_text())
+            current = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            current.pop(_PENDING_EQUITY_DB_SYNC_TIME, None)
 
             def merge_list(key: str, identity_fields: tuple[str, ...], prefer_state: bool = False) -> None:
                 merged = []
@@ -764,18 +816,26 @@ def save_state(state: dict[str, Any]) -> None:
                     merged.append(item)
                 state[key] = merged
 
+            trade_identity_fields = ("time", "action", "code", "shares", "price", "reason")
+
+            def trade_id(item: dict[str, Any]) -> tuple[str, ...]:
+                return tuple(
+                    json.dumps(item.get(field, ""), ensure_ascii=False, sort_keys=True)
+                    for field in trade_identity_fields
+                )
+
             state_trade_ids = {
-                tuple(json.dumps(item.get(f, ""), ensure_ascii=False, sort_keys=True)
-                      for f in ("time", "action", "code", "shares", "price", "reason"))
+                trade_id(item)
                 for item in (state.get("trade_log") or [])
                 if isinstance(item, dict)
             }
-            current_has_unseen_trades = any(
-                tuple(json.dumps(item.get(f, ""), ensure_ascii=False, sort_keys=True)
-                      for f in ("time", "action", "code", "shares", "price", "reason")) not in state_trade_ids
+            current_trade_ids = {
+                trade_id(item)
                 for item in (current.get("trade_log") or [])
                 if isinstance(item, dict)
-            )
+            }
+            current_has_unseen_trades = bool(current_trade_ids - state_trade_ids)
+            state_has_unseen_trades = bool(state_trade_ids - current_trade_ids)
             if current_has_unseen_trades:
                 # A slow dashboard quote refresh can save an old portfolio after
                 # the trade engine has already appended fills. Keep the traded
@@ -784,10 +844,14 @@ def save_state(state: dict[str, Any]) -> None:
                 state["positions"] = current.get("positions", state.get("positions", {}))
 
             merge_list("decision_log", ("time", "b1_generated_at", "decision"))
-            merge_list("trade_log", ("time", "action", "code", "shares", "price", "reason"))
+            merge_list("trade_log", trade_identity_fields)
             merge_list("pending_decisions", ("id",), prefer_state=True)
-            merge_list("equity_history", ("time",), prefer_state=True)
-            merge_list("daily_equity_history", ("time",), prefer_state=True)
+            # A writer that has not seen an already-persisted trade must not replace
+            # the corresponding same-minute post-trade equity point with its stale
+            # pre-trade snapshot. A writer carrying a new trade remains authoritative.
+            prefer_state_equity = not current_has_unseen_trades or state_has_unseen_trades
+            merge_list("equity_history", ("time",), prefer_state=prefer_state_equity)
+            merge_list("daily_equity_history", ("time",), prefer_state=prefer_state_equity)
 
             # Position snapshots are mutable and can be stale even when the
             # append-only trade merge succeeded. Re-apply the retained ledger
@@ -813,9 +877,28 @@ def save_state(state: dict[str, Any]) -> None:
         normalize_daily_equity_history(state)
         sort_equity_history(state)
 
+        equity_point_to_sync = next(
+            (
+                dict(point)
+                for point in reversed(state.get("equity_history") or [])
+                if isinstance(point, dict)
+                and str(point.get("time") or "") == pending_equity_sync_time
+            ),
+            None,
+        )
         tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(STATE_FILE)
+
+        # Synchronize SQLite only after the canonical same-minute point is chosen.
+        # Keeping this under the state-file lock preserves JSON/DB writer ordering.
+        if equity_point_to_sync is not None:
+            try:
+                from niuniu_db import record_daily_equity as _record_db
+
+                _record_db(equity_point_to_sync)
+            except Exception:
+                pass
 
 
 def normalize_code(code: str) -> str:
@@ -1255,6 +1338,43 @@ def refresh_realtime_prices(state: dict[str, Any]) -> dict[str, Any]:
     return meta
 
 
+def apply_realtime_price_snapshot(
+    state: dict[str, Any],
+    refreshed_state: dict[str, Any],
+) -> None:
+    """Apply fetched quote fields without restoring stale account positions."""
+
+    refreshed_positions = {
+        normalize_code(code): position
+        for code, position in (refreshed_state.get("positions") or {}).items()
+        if isinstance(position, dict)
+    }
+    quote_fields = (
+        "last_price",
+        "quote_time",
+        "quote_source",
+        "change_pct",
+        "prev_close",
+        "day_high",
+        "day_low",
+    )
+    for code, position in (state.get("positions") or {}).items():
+        if not isinstance(position, dict):
+            continue
+        refreshed = refreshed_positions.get(normalize_code(code))
+        if refreshed is None:
+            continue
+        for field in quote_fields:
+            if field in refreshed:
+                position[field] = refreshed[field]
+        if not position.get("name") and refreshed.get("name"):
+            position["name"] = refreshed["name"]
+
+    refresh_meta = refreshed_state.get("last_quote_refresh")
+    if isinstance(refresh_meta, dict):
+        state["last_quote_refresh"] = dict(refresh_meta)
+
+
 def refresh_position_intraday(state: dict[str, Any]) -> dict[str, Any]:
     positions = state.get("positions") or {}
     meta = {"enabled": True, "source": "Tencent ifzq minute/query", "updated": 0, "error": "", "quote_time": now_ts()}
@@ -1598,17 +1718,23 @@ def add_execution_block(decision: dict[str, Any], code: str, reason: str) -> Non
     decision["execution_blocked_reason"] = "；".join(blocks[-5:])
 
 
-def record_equity(state: dict[str, Any]) -> None:
+def record_equity(state: dict[str, Any]) -> bool:
     if not is_a_share_trading_day():
         prune_non_trading_day_equity_points(state)
-        return
+        return False
     prune_non_trading_day_equity_points(state)
     prune_future_intraday_equity_points(state)
     normalize_daily_equity_history(state)
     sort_equity_history(state)
     snap = enrich_portfolio(state)
     history = state.setdefault("equity_history", [])
-    now = now_ts()
+    raw_now = now_ts()
+    now_dt = parse_ts(raw_now)
+    now = (
+        now_dt.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+        if now_dt
+        else raw_now
+    )
     today = now[:10]
     
     # 获取今天已有的所有记录
@@ -1617,8 +1743,7 @@ def record_equity(state: dict[str, Any]) -> None:
     # 获取每日结算净值历史（按天存储）
     daily_history = state.setdefault("daily_equity_history", [])
     
-    # 动态降采样保存日内点：
-    # 每2分钟保存一次，或者收盘(15:00)时强制保存
+    # 按自然分钟保存日内点，或者收盘(15:00)时强制保存。
     should_save = False
     is_closing_point = False
     
@@ -1627,11 +1752,11 @@ def record_equity(state: dict[str, Any]) -> None:
     else:
         last_time_str = today_records[-1].get("time", "")
         if last_time_str:
-            import datetime
             try:
-                last_dt = datetime.datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
-                now_dt = datetime.datetime.strptime(now, "%Y-%m-%d %H:%M:%S")
-                if (now_dt - last_dt).total_seconds() >= EQUITY_HEARTBEAT_MIN_SECONDS:
+                last_dt = parse_ts(last_time_str)
+                if now_dt is None or last_dt is None:
+                    should_save = True
+                elif equity_heartbeat_due(now_dt, last_dt):
                     should_save = True
                 elif "15:00:" in now and "15:00:" not in last_time_str:
                     should_save = True
@@ -1659,12 +1784,10 @@ def record_equity(state: dict[str, Any]) -> None:
             # 新的一天，添加记录
             daily_history.append(pt)
         
-        # 同步写入 SQLite
-        try:
-            from niuniu_db import record_daily_equity as _record_db
-            _record_db(pt)
-        except Exception:
-            pass
+        # Defer SQLite synchronization until save_state() has merged any
+        # concurrent trade and selected the canonical same-minute point.
+        state[_PENDING_EQUITY_DB_SYNC_TIME] = now
+    return should_save
 
 
 def rebuild_intraday_equity_curve(
@@ -1801,11 +1924,7 @@ def rebuild_intraday_equity_curve(
     daily_history.append(final_point)
     state["daily_equity_history"] = daily_history[-EQUITY_HISTORY_LIMIT:]
 
-    try:
-        from niuniu_db import record_daily_equity as _record_db
-        _record_db(final_point)
-    except Exception:
-        pass
+    state[_PENDING_EQUITY_DB_SYNC_TIME] = str(final_point.get("time") or "")
     return True
 
 
@@ -4234,30 +4353,51 @@ def run_position_exit_checks_before_decision(
 
 
 def maybe_record_session_equity_heartbeat(min_interval_seconds: int = EQUITY_HEARTBEAT_MIN_SECONDS) -> bool:
-    """Record account equity during the full 09:30-15:00 dashboard session, independent of trades/B1 candidates."""
+    """Record session equity independently of dashboard requests."""
     now = datetime.now()
-    if not is_a_share_session_clock(now):
+    if not is_a_share_equity_heartbeat_clock(now):
         return False
-    state = load_state()
-    pruned = prune_future_intraday_equity_points(state, now=now)
-    history = state.setdefault("equity_history", [])
-    last_dt = None
-    for item in reversed(history):
-        last_dt = parse_ts(item.get("time", ""))
-        if last_dt:
-            break
-    if last_dt and (now - last_dt).total_seconds() < min_interval_seconds:
+    refreshed_state = load_state()
+    pruned = prune_future_intraday_equity_points(refreshed_state, now=now)
+    last_dt = latest_equity_timestamp(refreshed_state)
+    if last_dt and not equity_heartbeat_due(now, last_dt, min_interval_seconds):
         if pruned:
-            save_state(state)
+            save_state(refreshed_state)
         return False
-    # Keep current holdings marked-to-market before taking a snapshot.
+
+    # Fetch quotes outside the portfolio lock so transient providers cannot
+    # block trading writes. Only quote fields are carried into the transaction.
     try:
-        refresh_position_quotes(state)
+        refresh_realtime_prices(refreshed_state)
     except Exception as exc:
-        state["last_quote_refresh"] = {"time": now_ts(), "updated": 0, "error": f"{type(exc).__name__}: {exc}"}
-    record_equity(state)
-    save_state(state)
-    return True
+        refreshed_state["last_quote_refresh"] = {
+            "time": now_ts(),
+            "updated": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    # Re-read under the cross-process write lock after the network call. A trade
+    # may have committed while quotes were loading; its same-minute point must
+    # remain authoritative instead of being replaced by this older snapshot.
+    with state_file_write_lock():
+        state = load_state()
+        commit_now = datetime.now()
+        if not is_a_share_equity_heartbeat_clock(commit_now):
+            return False
+        pruned = prune_future_intraday_equity_points(state, now=commit_now)
+        last_dt = latest_equity_timestamp(state)
+        if last_dt and not equity_heartbeat_due(
+            commit_now,
+            last_dt,
+            min_interval_seconds,
+        ):
+            if pruned:
+                save_state(state)
+            return False
+        apply_realtime_price_snapshot(state, refreshed_state)
+        recorded = record_equity(state)
+        save_state(state)
+        return recorded
 
 
 def load_crossdesk_config(base_url_env: str = "", api_key_env: str = "") -> tuple[str, str]:
@@ -4331,78 +4471,47 @@ def format_http_error(exc: urllib.error.HTTPError, model_name: str) -> RuntimeEr
 
 
 def parse_chat_completion_content(raw: str) -> tuple[str, str]:
-    """Return visible assistant content plus compact response metadata."""
-    if not (raw or "").strip():
-        raise ValueError("空响应")
-
-    if raw.lstrip().startswith("data:"):
-        parts = []
-        finish_reasons = []
-        usage = None
-        chunks = 0
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line.startswith("data:"):
-                continue
-            chunk = line[5:].strip()
-            if not chunk or chunk == "[DONE]":
-                continue
-            try:
-                obj = json.loads(chunk)
-            except Exception:
-                continue
-            chunks += 1
-            if obj.get("usage"):
-                usage = obj.get("usage")
-            choice = (obj.get("choices") or [{}])[0]
-            if choice.get("finish_reason"):
-                finish_reasons.append(str(choice.get("finish_reason")))
-            delta = choice.get("delta") or {}
-            message = choice.get("message") or {}
-            parts.append(delta.get("content") or message.get("content") or "")
-        detail_bits = [f"sse_chunks={chunks}"]
-        if finish_reasons:
-            detail_bits.append(f"finish_reason={finish_reasons[-1]}")
-        if usage:
-            detail_bits.append(f"usage={usage}")
-        return "".join(parts), ", ".join(detail_bits)
-
-    try:
-        data = json.loads(raw)
-    except Exception:
-        raise ValueError(f"模型返回了非JSON内容，请检查max_tokens/超时是否够用。前150字符: {clip_text(raw, 150)}")
-    choice = (data.get("choices") or [{}])[0]
-    message = choice.get("message") or {}
-    content = message.get("content") or ""
-    detail_bits = []
-    if choice.get("finish_reason"):
-        detail_bits.append(f"finish_reason={choice.get('finish_reason')}")
-    if data.get("usage"):
-        detail_bits.append(f"usage={data.get('usage')}")
-    return content, ", ".join(detail_bits)
+    """Backward-compatible wrapper around the shared model response parser."""
+    parsed = parse_model_response(raw)
+    return parsed.content, parsed.detail
 
 
-def request_chat_content(base_url: str, api_key: str, payload: dict, model_name: str,
-                         max_retries: int = 3, timeout: int = 60) -> str:
-    """Call chat/completions and require non-empty visible assistant content."""
+def request_chat_content(
+    base_url: str,
+    api_key: str,
+    payload: dict,
+    model_name: str,
+    max_retries: int = 3,
+    timeout: int = 60,
+    *,
+    api_mode: str = "chat",
+    tools: list[dict[str, Any]] | None = None,
+    reasoning: dict[str, Any] | None = None,
+) -> str:
+    """Call a compatible model endpoint and require visible assistant text."""
     import time as _time
     last_err: Exception | None = None
     request_payload = {**payload, "model": model_name}
     for attempt in range(max_retries):
         try:
-            req = urllib.request.Request(
-                base_url + "/chat/completions",
-                data=json.dumps(request_payload).encode("utf-8"),
-                headers={
-                    "Authorization": "Bearer " + api_key,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "User-Agent": "NiuOne/1.0",
-                },
+            model_request = build_model_request(
+                base_url,
+                model_name,
+                list(request_payload.get("messages") or []),
+                max_tokens=int(request_payload.get("max_tokens") or 0) or None,
+                api_mode=api_mode,
+                tools=tools,
+                reasoning=reasoning,
+                stream=bool(request_payload.get("stream", False)),
+                extra_payload=request_payload,
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8", "ignore")
-            content, detail = parse_chat_completion_content(raw)
+            parsed = request_model(
+                model_request,
+                api_key,
+                timeout=timeout,
+                opener=urllib.request.urlopen,
+            )
+            content, detail = parsed.content, parsed.detail
             if not (content or "").strip():
                 if "finish_reason=length" in detail:
                     current_max = int(request_payload.get("max_tokens") or 0)
@@ -4461,21 +4570,24 @@ def api_call_with_retry(base_url: str, api_key: str, payload: dict, max_retries:
     last_err = None
     for attempt in range(max_retries):
         try:
-            req = urllib.request.Request(
-                base_url + "/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Authorization": "Bearer " + api_key,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "User-Agent": "NiuOne/1.0",
-                },
+            model_request = build_model_request(
+                base_url,
+                str(payload.get("model") or ""),
+                list(payload.get("messages") or []),
+                max_tokens=int(payload.get("max_tokens") or 0) or None,
+                api_mode="chat",
+                stream=bool(payload.get("stream", False)),
+                extra_payload=payload,
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8", "ignore")
-            if not raw.strip():
+            parsed = request_model(
+                model_request,
+                api_key,
+                timeout=timeout,
+                opener=urllib.request.urlopen,
+            )
+            if parsed.data is None:
                 raise ValueError("空响应")
-            return json.loads(raw)
+            return parsed.data
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
@@ -4613,6 +4725,9 @@ def request_single_candidate_news_precheck(
         model,
         max_retries=NEWS_PRECHECK_MAX_RETRIES,
         timeout=NEWS_PRECHECK_REQUEST_TIMEOUT,
+        api_mode=NEWS_PRECHECK_API_MODE,
+        tools=[{"type": "web_search"}],
+        reasoning={"effort": "low"},
     ).strip()
 
 

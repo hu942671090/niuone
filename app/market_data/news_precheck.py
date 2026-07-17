@@ -5,12 +5,12 @@ import concurrent.futures
 import json
 import re
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
+
+from core.model_api import build_model_request, request_model
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
@@ -47,6 +47,7 @@ class NewsPrecheckConfig:
     base_url: str
     api_key: str
     model: str
+    api_mode: str = "auto"
     timeout_seconds: int = 45
     max_requests: int = 1
     concurrency: int = 5
@@ -74,6 +75,7 @@ class NewsPrecheckConfig:
             base_url=base_url,
             api_key=api_key,
             model=model,
+            api_mode=str(values.get("DASHBOARD_NEWS_API_MODE") or "auto").strip() or "auto",
             timeout_seconds=_bounded_int(values, "DASHBOARD_NEWS_TIMEOUT", 45, 5, 120),
             max_requests=_bounded_int(values, "DASHBOARD_NEWS_MAX_RETRIES", 1, 1, 3),
             concurrency=_bounded_int(values, "DASHBOARD_NEWS_CONCURRENCY", 5, 1, 5),
@@ -98,28 +100,26 @@ def build_candidate_news_prompt(candidate: Mapping[str, Any]) -> str:
 
 
 def request_candidate_news(candidate: Mapping[str, Any], config: NewsPrecheckConfig) -> str:
-    payload = {
-        "model": config.model,
-        "messages": [{"role": "user", "content": build_candidate_news_prompt(candidate)}],
-        "max_tokens": config.max_tokens,
-        "stream": False,
-    }
+    model_request = build_model_request(
+        config.base_url,
+        config.model,
+        [{"role": "user", "content": build_candidate_news_prompt(candidate)}],
+        max_tokens=config.max_tokens,
+        api_mode=config.api_mode,
+        tools=[{"type": "web_search"}],
+        reasoning={"effort": "low"},
+        stream=False,
+        extra_payload={"stream": False},
+    )
     last_error: Exception | None = None
     for attempt in range(config.max_requests):
         try:
-            request = urllib.request.Request(
-                config.base_url + "/chat/completions",
-                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={
-                    "Authorization": "Bearer " + config.api_key,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "User-Agent": "NiuOne/1.0",
-                },
+            parsed = request_model(
+                model_request,
+                config.api_key,
+                timeout=config.timeout_seconds,
             )
-            with urllib.request.urlopen(request, timeout=config.timeout_seconds) as response:
-                body = response.read().decode("utf-8", "ignore")
-            content = parse_chat_completion_content(body).strip()
+            content = str(parsed.content or "").strip()
             if not content:
                 raise ValueError("empty_news_precheck_response")
             return content

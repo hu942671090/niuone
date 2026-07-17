@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import types
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,9 @@ from market_data.news_precheck import (  # noqa: E402
     format_cached_news_records,
     parse_chat_completion_content,
     parse_candidate_news_record,
+    request_candidate_news,
 )
+import market_data.news_precheck as news_precheck  # noqa: E402
 
 
 class NewsPrecheckServiceTests(unittest.TestCase):
@@ -84,6 +87,34 @@ class NewsPrecheckServiceTests(unittest.TestCase):
         self.assertEqual(records[1]["error"], "request_TimeoutError")
         self.assertEqual(records[2]["tone"], "neutral")
         self.assertIn("扫描阶段缓存", format_cached_news_records(records))
+
+    def test_request_uses_central_model_api_with_search_mode(self):
+        config = NewsPrecheckConfig(
+            base_url="https://news.example/v1",
+            api_key="secret",
+            model="gpt-5.6-sol",
+            api_mode="auto",
+            max_requests=1,
+        )
+        captured = {}
+        original_request_model = news_precheck.request_model
+        try:
+            def fake_request(model_request, api_key, **kwargs):
+                captured["request"] = model_request
+                captured["api_key"] = api_key
+                captured["kwargs"] = kwargs
+                return types.SimpleNamespace(content="- 600000 测试：订单增长（利好）")
+
+            news_precheck.request_model = fake_request
+            content = request_candidate_news({"code": "600000", "name": "测试"}, config)
+        finally:
+            news_precheck.request_model = original_request_model
+
+        self.assertIn("订单增长", content)
+        self.assertEqual(captured["request"].api_mode, "responses")
+        self.assertEqual(captured["request"].payload["tools"], [{"type": "web_search"}])
+        self.assertNotIn("max_output_tokens", captured["request"].payload)
+        self.assertEqual(captured["kwargs"]["timeout"], 45)
 
 
 if __name__ == "__main__":
