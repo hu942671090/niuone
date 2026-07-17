@@ -258,12 +258,16 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(state["cash"], 100000.0)
         self.assertIn("执行前复核失败", decision["execution_blocked_reason"])
 
-    def test_execute_actions_blocks_locked_manual_position(self):
+    def test_execute_actions_trades_manual_import_position(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
         try:
             trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
-            trader.execution_quote = lambda code: self.fail("locked position must not request execution quote")
+            trader.execution_quote = lambda code: {
+                "price": 0.744,
+                "name": "半导体设备ETF招商",
+                "source": "test",
+            }
             state = {
                 "cash": 100000.0,
                 "positions": {
@@ -273,6 +277,7 @@ class SellStrategyRuleTests(unittest.TestCase):
                         "qty": 18200,
                         "avg_cost": 0.7649,
                         "last_price": 0.744,
+                        "buy_date_lots": {"2026-06-23": 18200},
                         "auto_trade_locked": True,
                     }
                 },
@@ -293,9 +298,9 @@ class SellStrategyRuleTests(unittest.TestCase):
             trader.is_a_share_execution_time = original_execution_time
             trader.execution_quote = original_quote
 
-        self.assertEqual(executed, [])
-        self.assertEqual(state["positions"]["561980"]["qty"], 18200)
-        self.assertIn("真实同步持仓已锁定", decision["execution_blocked_reason"])
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]["action"], "SELL")
+        self.assertNotIn("561980", state["positions"])
 
     def test_execute_actions_records_quote_failure(self):
         original_execution_time = trader.is_a_share_execution_time
@@ -2149,7 +2154,7 @@ class SellStrategyRuleTests(unittest.TestCase):
                 self.assertEqual(tail["signal"], expected_signal)
                 self.assertIn("14:45", tail["reason"])
 
-    def test_auto_exit_skips_locked_manual_position(self):
+    def test_auto_exit_applies_to_manual_import_position(self):
         state = {
             "cash": 0.0,
             "positions": {
@@ -2170,8 +2175,9 @@ class SellStrategyRuleTests(unittest.TestCase):
 
         executed = trader.check_auto_exits(state, datetime(2026, 6, 24, 9, 37))
 
-        self.assertEqual(executed, [])
-        self.assertEqual(state["positions"]["561980"]["qty"], 18200)
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]["action"], "SELL")
+        self.assertNotIn("561980", state["positions"])
 
     def test_auto_exit_b3_triggers_at_open_and_tail_rules_at_1445(self):
         def make_b3_state():

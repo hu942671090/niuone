@@ -3767,8 +3767,6 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
     
     for code in list(positions.keys()):
         pos = positions[code]
-        if pos.get("auto_trade_locked"):
-            continue
         sellable = available_to_sell(pos, today)
         if sellable <= 0:
             continue
@@ -4789,9 +4787,6 @@ def execute_actions(
         if not code or act == "HOLD":
             continue
         existing_pos = positions.get(code)
-        if existing_pos and existing_pos.get("auto_trade_locked"):
-            add_execution_block(decision, code, "真实同步持仓已锁定，自动交易不调整该仓位")
-            continue
         q = execution_quote(code)
         price = q.get("price") if isinstance(q.get("price"), (int, float)) else None
         if not price or price <= 0:
