@@ -2,6 +2,7 @@
 import concurrent.futures
 import os
 import sys
+import threading
 import time
 import types
 import unittest
@@ -587,6 +588,70 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(display[0]["sector"], "银行")
         self.assertEqual(trade[0]["industry"], "银行")
         self.assertEqual(trade[0]["sector"], "银行")
+
+    def test_threaded_industry_lookup_prewarms_native_javascript_runtime(self):
+        candidates = [
+            {"code": "600001", "name": "测试A"},
+            {"code": "600002", "name": "测试B"},
+        ]
+        events: list[str] = []
+        original_cache = screen._STOCK_INDUSTRY_MEMORY_CACHE
+        original_lookup = screen.lookup_stock_industry
+        original_prepare = screen.prepare_threaded_native_javascript_runtime
+        original_save = screen.save_stock_industry_cache
+        screen._STOCK_INDUSTRY_MEMORY_CACHE = {}
+
+        def fake_prepare() -> bool:
+            events.append("prepare")
+            return True
+
+        def fake_lookup(code: str) -> str:
+            events.append(f"lookup:{code}")
+            return "银行"
+
+        try:
+            screen.prepare_threaded_native_javascript_runtime = fake_prepare
+            screen.lookup_stock_industry = fake_lookup
+            screen.save_stock_industry_cache = lambda _cache: None
+            screen.annotate_candidate_industries(candidates, max_workers=2)
+        finally:
+            screen._STOCK_INDUSTRY_MEMORY_CACHE = original_cache
+            screen.lookup_stock_industry = original_lookup
+            screen.prepare_threaded_native_javascript_runtime = original_prepare
+            screen.save_stock_industry_cache = original_save
+
+        self.assertEqual(events[0], "prepare")
+        self.assertCountEqual(events[1:], ["lookup:600001", "lookup:600002"])
+        self.assertTrue(all(candidate["industry"] == "银行" for candidate in candidates))
+
+    def test_industry_lookup_falls_back_to_serial_when_native_prewarm_fails(self):
+        candidates = [
+            {"code": "600001", "name": "测试A"},
+            {"code": "600002", "name": "测试B"},
+        ]
+        lookup_threads: list[int] = []
+        original_cache = screen._STOCK_INDUSTRY_MEMORY_CACHE
+        original_lookup = screen.lookup_stock_industry
+        original_prepare = screen.prepare_threaded_native_javascript_runtime
+        original_save = screen.save_stock_industry_cache
+        screen._STOCK_INDUSTRY_MEMORY_CACHE = {}
+
+        def fake_lookup(_code: str) -> str:
+            lookup_threads.append(threading.get_ident())
+            return "银行"
+
+        try:
+            screen.prepare_threaded_native_javascript_runtime = lambda: False
+            screen.lookup_stock_industry = fake_lookup
+            screen.save_stock_industry_cache = lambda _cache: None
+            screen.annotate_candidate_industries(candidates, max_workers=2)
+        finally:
+            screen._STOCK_INDUSTRY_MEMORY_CACHE = original_cache
+            screen.lookup_stock_industry = original_lookup
+            screen.prepare_threaded_native_javascript_runtime = original_prepare
+            screen.save_stock_industry_cache = original_save
+
+        self.assertEqual(lookup_threads, [threading.get_ident(), threading.get_ident()])
 
     def test_persona_strategies_are_registered(self):
         old = os.environ.get(screen.PERSONA_STRATEGY_ENV)

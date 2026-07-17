@@ -149,6 +149,8 @@ _MARGIN_DETAIL_CACHE: dict[tuple[str, str], Any] = {}
 _MARGIN_DETAIL_CACHE_LOCK = threading.Lock()
 _BLOCK_TRADE_CACHE: dict[tuple[str, str], Any] = {}
 _BLOCK_TRADE_CACHE_LOCK = threading.Lock()
+_NATIVE_JAVASCRIPT_CONTEXT: Any | None = None
+_NATIVE_JAVASCRIPT_CONTEXT_LOCK = threading.Lock()
 
 
 # ========== helpers ==========
@@ -167,6 +169,36 @@ def _load_cached_market_frame(
             except Exception:
                 cache[cache_key] = None
         return cache[cache_key]
+
+
+def prepare_threaded_native_javascript_runtime() -> bool:
+    """Initialize MiniRacer once before akshare work enters thread pools.
+
+    V8's process-wide partition allocator can abort the interpreter when several
+    MiniRacer contexts race through their first initialization. Keeping one
+    warmed context alive makes later per-request contexts safe to create from
+    worker threads. If initialization is unavailable, callers must fall back to
+    serial execution rather than risk terminating the scanner process.
+    """
+    global _NATIVE_JAVASCRIPT_CONTEXT
+    if _NATIVE_JAVASCRIPT_CONTEXT is not None:
+        return True
+    with _NATIVE_JAVASCRIPT_CONTEXT_LOCK:
+        if _NATIVE_JAVASCRIPT_CONTEXT is not None:
+            return True
+        try:
+            from py_mini_racer import MiniRacer
+
+            context = MiniRacer()
+            context.eval("1")
+        except Exception as exc:
+            print(
+                f"[WARN] native JavaScript runtime prewarm failed: {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            return False
+        _NATIVE_JAVASCRIPT_CONTEXT = context
+        return True
 
 def dashboard_env_value(name: str) -> str | None:
     if name in os.environ:
@@ -1119,6 +1151,8 @@ def annotate_candidate_industries(
             missing_codes = list(missing_by_code)
             resolved: dict[str, str] = {}
             workers = max(1, min(int(max_workers or 1), 12, len(missing_codes)))
+            if workers > 1 and not prepare_threaded_native_javascript_runtime():
+                workers = 1
             if workers > 1:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
                     future_by_code = {pool.submit(lookup_stock_industry, code): code for code in missing_codes}
@@ -1283,6 +1317,9 @@ def main():
     except (TypeError, ValueError):
         scan_workers = 6
     scan_workers = max(1, min(16, scan_workers, len(to_analyze) or 1))
+    if scan_workers > 1 and not prepare_threaded_native_javascript_runtime():
+        print("  Native JavaScript runtime unavailable; falling back to 1 worker", file=sys.stderr)
+        scan_workers = 1
     print(
         f"Step 3: Multi-strategy scoring (registered strategy profiles, {scan_workers} workers)...",
         file=sys.stderr,
@@ -1304,7 +1341,10 @@ def main():
             {"code": code, "name": name, "quote": q}
             for code, name, q in to_analyze
         ]
-        annotate_candidate_industries(sector_members, max_workers=8)
+        annotate_candidate_industries(
+            sector_members,
+            max_workers=8 if scan_workers > 1 else 1,
+        )
         for index, item in enumerate(sector_members):
             code = str(item["code"])
             name = str(item["name"])
