@@ -5,6 +5,7 @@ import sys
 import time
 import types
 import unittest
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,113 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual((snapshot["limit_up"], snapshot["limit_down"]), (1, 1))
         self.assertEqual(snapshot["quote_time"], "2026-07-10 10:00:04")
         self.assertEqual(snapshot["total_amount"], 1e9)
+
+    @staticmethod
+    def _tencent_quote_response():
+        parts = [""] * 39
+        parts[1] = "测试股票"
+        parts[3] = "10.50"
+        parts[4] = "10.00"
+        parts[6] = "1000"
+        parts[30] = "20260717100000"
+        parts[33] = "10.60"
+        parts[34] = "9.90"
+        parts[37] = "10000"
+        parts[38] = "2.5"
+        payload = f'v_sh600000="{"~".join(parts)}";'.encode("gbk")
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return payload
+
+        return Response()
+
+    def test_tencent_batch_quote_retries_timeout_then_succeeds(self):
+        calls = []
+        delays = []
+        original_urlopen = screen.urllib.request.urlopen
+
+        def fake_urlopen(_request, timeout=0):
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise urllib.error.URLError(TimeoutError("timed out"))
+            return self._tencent_quote_response()
+
+        try:
+            screen.urllib.request.urlopen = fake_urlopen
+            result = screen.tencent_batch_quote(
+                ["sh600000"],
+                timeout_seconds=2,
+                max_attempts=3,
+                backoff_seconds=0.25,
+                batch_label="2/21",
+                sleep_fn=delays.append,
+            )
+        finally:
+            screen.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(calls, [2, 2])
+        self.assertEqual(delays, [0.25])
+        self.assertEqual(result["sh600000"]["price"], 10.5)
+
+    def test_tencent_batch_quote_reports_batch_after_retry_budget_exhausted(self):
+        calls = []
+        delays = []
+        original_urlopen = screen.urllib.request.urlopen
+
+        def fake_urlopen(_request, timeout=0):
+            calls.append(timeout)
+            raise urllib.error.URLError(TimeoutError("timed out"))
+
+        try:
+            screen.urllib.request.urlopen = fake_urlopen
+            with self.assertRaisesRegex(
+                screen.TencentQuoteBatchError,
+                r"batch=7/21 failed after 3/3 attempts: timeout",
+            ):
+                screen.tencent_batch_quote(
+                    ["sh600000"],
+                    timeout_seconds=2,
+                    max_attempts=3,
+                    backoff_seconds=0.25,
+                    batch_label="7/21",
+                    sleep_fn=delays.append,
+                )
+        finally:
+            screen.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(calls, [2, 2, 2])
+        self.assertEqual(delays, [0.25, 0.5])
+
+    def test_tencent_batch_quote_does_not_retry_nonretryable_http_error(self):
+        calls = []
+        original_urlopen = screen.urllib.request.urlopen
+
+        def fake_urlopen(request, timeout=0):
+            calls.append(timeout)
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+
+        try:
+            screen.urllib.request.urlopen = fake_urlopen
+            with self.assertRaisesRegex(screen.TencentQuoteBatchError, r"1/3 attempts: HTTP 403"):
+                screen.tencent_batch_quote(
+                    ["sh600000"],
+                    timeout_seconds=2,
+                    max_attempts=3,
+                    sleep_fn=lambda _delay: self.fail("HTTP 403 must not be retried"),
+                )
+        finally:
+            screen.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(calls, [2])
 
     def test_sector_tide_loads_only_exact_previous_trading_day_archive(self):
         calls = {}

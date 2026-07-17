@@ -1607,6 +1607,21 @@ def load_practice_candidates_cache() -> dict[str, Any]:
         return {"error": "; ".join(errors), "items": [], "count": 0, "generated_at": ""}
     return {"items": [], "count": 0, "generated_at": ""}
 
+
+def summarize_b1_scan_failure(stderr: str, stdout: str, limit: int = 900) -> str:
+    """Keep the scanner stage and final exception without leaking a full traceback."""
+    raw = (stderr or stdout or "").strip()
+    if not raw:
+        return "扫描进程未返回错误详情"
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    stage = next((line for line in reversed(lines) if line.startswith("Step ")), "")
+    final_line = lines[-1]
+    detail = f"{stage}；{final_line}" if stage and stage != final_line else final_line
+    if len(detail) > limit:
+        detail = detail[: max(0, limit - 3)] + "..."
+    return detail
+
+
 def _trigger_b1_scan_unlocked(
     force: bool = False,
     decision_mode: str = "async",
@@ -1646,7 +1661,9 @@ def _trigger_b1_scan_unlocked(
             elif decision_mode == "async":
                 maybe_run_practice_decision_async(cache)
             return cache
-        return {"error": (result.stderr or result.stdout)[-500:], "items": [], "count": 0, "generated_at": "", "running": False}
+        error_detail = summarize_b1_scan_failure(result.stderr, result.stdout)
+        print(f"[WARN] B1 scan failed: {error_detail}", file=sys.stderr, flush=True)
+        return {"error": error_detail, "items": [], "count": 0, "generated_at": "", "running": False}
     except subprocess.TimeoutExpired:
         return {"error": f"扫描超时（{B1_SCAN_TIMEOUT_SECONDS}s）", "items": [], "count": 0, "generated_at": "", "running": False}
     except Exception as exc:

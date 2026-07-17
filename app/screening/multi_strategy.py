@@ -34,6 +34,7 @@
 }
 """
 import concurrent.futures
+import http.client
 import json
 import os
 import re
@@ -42,6 +43,7 @@ import statistics
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -126,6 +128,9 @@ from strategies.selection import (
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 TENCENT_QUOTE = "https://qt.gtimg.cn/q="
 TENCENT_KLINE = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
+TENCENT_QUOTE_TIMEOUT_SECONDS = 10
+TENCENT_QUOTE_MAX_ATTEMPTS = 3
+TENCENT_QUOTE_BACKOFF_SECONDS = 0.5
 DASHBOARD_HOME = get_dashboard_home(Path(__file__).resolve().parents[1])
 DASHBOARD_ENV_FILE = get_dashboard_env_file(Path(__file__).resolve().parents[1])
 B1_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
@@ -228,11 +233,26 @@ def candidate_in_configured_stock_universe(candidate: dict[str, Any]) -> bool:
 
 # ========== Tencent data fetchers ==========
 
-def tencent_batch_quote(codes):
-    url = TENCENT_QUOTE + ",".join(codes)
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        text = r.read().decode("gbk", "ignore")
+class TencentQuoteBatchError(RuntimeError):
+    """A bounded Tencent quote request exhausted its safe retry budget."""
+
+
+class _EmptyTencentQuoteResponse(ValueError):
+    pass
+
+
+def _tencent_quote_error_label(exc: BaseException) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+        return "timeout"
+    if isinstance(exc, _EmptyTencentQuoteResponse):
+        return "empty_or_unusable_response"
+    return type(exc).__name__
+
+
+def _parse_tencent_batch_quote(text: str) -> dict[str, dict[str, Any]]:
     results = {}
     for line in text.strip().split(";"):
         line = line.strip()
@@ -242,7 +262,7 @@ def tencent_batch_quote(codes):
         key = key.strip().lstrip("v_")
         val = val.strip().strip('"')
         parts = val.split("~")
-        if len(parts) < 38:
+        if len(parts) < 39:
             continue
         price = safe_float(parts[3])
         prev_close = safe_float(parts[4])
@@ -262,6 +282,72 @@ def tencent_batch_quote(codes):
             "quote_time": parts[30] if len(parts) > 30 else "",
         }
     return results
+
+
+def tencent_batch_quote(
+    codes: list[str] | tuple[str, ...],
+    *,
+    timeout_seconds: float = TENCENT_QUOTE_TIMEOUT_SECONDS,
+    max_attempts: int = TENCENT_QUOTE_MAX_ATTEMPTS,
+    backoff_seconds: float = TENCENT_QUOTE_BACKOFF_SECONDS,
+    batch_label: str = "",
+    sleep_fn: Callable[[float], None] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fetch one quote batch with bounded retries and sanitized diagnostics."""
+    code_list = [str(code).strip() for code in codes if str(code).strip()]
+    if not code_list:
+        return {}
+    attempts = max(1, int(max_attempts))
+    timeout = max(0.1, float(timeout_seconds))
+    base_backoff = max(0.0, float(backoff_seconds))
+    active_sleep = sleep_fn or time.sleep
+    scope = f" batch={batch_label}" if batch_label else ""
+    last_error: BaseException | None = None
+    attempts_used = 0
+
+    for attempt in range(1, attempts + 1):
+        attempts_used = attempt
+        try:
+            url = TENCENT_QUOTE + ",".join(code_list)
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                text = response.read().decode("gbk", "ignore")
+            results = _parse_tencent_batch_quote(text)
+            if not results:
+                raise _EmptyTencentQuoteResponse()
+            return results
+        except urllib.error.HTTPError as exc:
+            try:
+                exc.close()
+            except OSError:
+                pass
+            last_error = exc
+            retryable = exc.code in {408, 429} or exc.code >= 500
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            http.client.HTTPException,
+            _EmptyTencentQuoteResponse,
+        ) as exc:
+            last_error = exc
+            retryable = True
+
+        if attempt >= attempts or not retryable:
+            break
+        delay = base_backoff * (2 ** (attempt - 1))
+        print(
+            f"[WARN] Tencent quote{scope} attempt={attempt}/{attempts} failed "
+            f"error={_tencent_quote_error_label(last_error)} retry_in={delay:.1f}s",
+            file=sys.stderr,
+        )
+        if delay > 0:
+            active_sleep(delay)
+
+    raise TencentQuoteBatchError(
+        f"Tencent quote{scope} failed after {attempts_used}/{attempts} attempts: "
+        f"{_tencent_quote_error_label(last_error or RuntimeError())}"
+    ) from last_error
 
 
 def build_market_snapshot(
@@ -1160,9 +1246,11 @@ def main():
 
     quotes = {}
     batch_size = 150
+    batch_total = max(1, (len(all_keys) + batch_size - 1) // batch_size)
     for i in range(0, len(all_keys), batch_size):
         batch = all_keys[i:i + batch_size]
-        q = tencent_batch_quote(batch)
+        batch_number = i // batch_size + 1
+        q = tencent_batch_quote(batch, batch_label=f"{batch_number}/{batch_total}")
         quotes.update(q)
         time.sleep(0.05)
     market_snapshot = build_market_snapshot(quotes, pool_count=len(all_keys), stock_universe=stock_universe)

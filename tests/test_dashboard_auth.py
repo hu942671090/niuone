@@ -829,6 +829,60 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
             dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
 
+    def test_manual_practice_cycle_scan_failure_never_enters_trade_decision(self):
+        decision_calls = []
+        original_scan = dashboard.trigger_b1_scan
+        original_decision = dashboard.run_practice_decision_logged
+        original_recent_candidates = dashboard.recent_practice_candidates_for_manual_cycle
+        original_lock = dashboard.PRACTICE_MANUAL_CYCLE_LOCK
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        try:
+            dashboard.trigger_b1_scan = lambda **_kwargs: {
+                'error': 'Tencent quote batch=7/21 failed after 3/3 attempts: timeout',
+                'items': [],
+                'count': 0,
+                'generated_at': '',
+            }
+            dashboard.run_practice_decision_logged = lambda *_args, **_kwargs: decision_calls.append(True)
+            dashboard.recent_practice_candidates_for_manual_cycle = lambda: None
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK.acquire()
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {'running': True, 'stage': 'starting'}
+
+            dashboard._run_practice_manual_cycle()
+
+            status = dashboard.practice_manual_cycle_status()
+            self.assertEqual(status['stage'], 'error')
+            self.assertIn('batch=7/21', status['error'])
+            self.assertEqual(decision_calls, [])
+            self.assertTrue(dashboard.PRACTICE_MANUAL_CYCLE_LOCK.acquire(blocking=False))
+        finally:
+            if dashboard.PRACTICE_MANUAL_CYCLE_LOCK.locked():
+                dashboard.PRACTICE_MANUAL_CYCLE_LOCK.release()
+            dashboard.trigger_b1_scan = original_scan
+            dashboard.run_practice_decision_logged = original_decision
+            dashboard.recent_practice_candidates_for_manual_cycle = original_recent_candidates
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+    def test_b1_scan_failure_summary_keeps_stage_and_final_error(self):
+        stderr = "\n".join([
+            "Step 1: Loading A-share code pool...",
+            "Step 2: Fetching real-time batch quotes...",
+            "Traceback (most recent call last):",
+            '  File "/private/runtime.py", line 10, in https_open',
+            "TencentQuoteBatchError: Tencent quote batch=7/21 failed after 3/3 attempts: timeout",
+        ])
+
+        summary = dashboard.summarize_b1_scan_failure(stderr, "")
+
+        self.assertEqual(
+            summary,
+            "Step 2: Fetching real-time batch quotes...；"
+            "TencentQuoteBatchError: Tencent quote batch=7/21 failed after 3/3 attempts: timeout",
+        )
+        self.assertNotIn("/private/runtime.py", summary)
+
     def test_full_b1_scan_rejects_overlapping_requests(self):
         scan_started = threading.Event()
         allow_scan_finish = threading.Event()
