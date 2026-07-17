@@ -2715,6 +2715,9 @@ process.stdout.write(JSON.stringify({
         config_by_name = {item['name']: item for item in dashboard.ENV_CONFIG_SCHEMA}
         self.assertEqual(config_by_name['DASHBOARD_GROK_API_MODE']['kind'], 'api_mode')
         self.assertEqual(config_by_name['DASHBOARD_GROK_API_MODE']['default'], 'auto')
+        self.assertEqual(config_by_name['DASHBOARD_NEWS_API_MODE']['kind'], 'api_mode')
+        self.assertEqual(config_by_name['DASHBOARD_NEWS_API_MODE']['default'], 'auto')
+        self.assertIn('DASHBOARD_NEWS_API_MODE', dashboard.TRADER_RUNTIME_ENV_NAMES)
         self.assertEqual(dashboard.normalize_env_update('DASHBOARD_GROK_API_MODE', 'responses', 'api_mode'), 'responses')
         self.assertEqual(dashboard.normalize_env_update('DASHBOARD_GROK_API_MODE', 'chat-completions', 'api_mode'), 'chat')
         self.assertEqual(
@@ -3147,7 +3150,7 @@ process.stdout.write(JSON.stringify({
 
         body = ADMIN_FRONTEND
         self.assertIn("'4096；例如 2048 或 8192'", body)
-        self.assertIn("'4096 tokens；填写后覆盖请求 max_tokens'", body)
+        self.assertIn("'4096 tokens；按所选接口映射为兼容的输出长度参数'", body)
         self.assertIn("'128000；例如 128K、1M 或 1000000'", body)
         self.assertIn("'128000 tokens；填写后保存为数字 tokens'", body)
 
