@@ -1352,6 +1352,32 @@
     }
     html:not([data-theme="dark"]) .dragon-tiger-status { border-color:#b9dfd0; background:#eff9f5; color:#087052; }
     html:not([data-theme="dark"]) .dragon-tiger-status.stale { border-color:#ddc27e; background:#fff8e5; color:#845400; }
+    html:not([data-theme="dark"]) .dragon-tiger-list { border-color:#dfe3e8; }
+    html:not([data-theme="dark"]) .dragon-tiger-list-head { color:#475467; }
+    html:not([data-theme="dark"]) .dragon-tiger-sort-btn:hover { color:#214b9c; background:#edf3ff; }
+    html:not([data-theme="dark"]) .dragon-tiger-sort-btn.active { color:#214b9c; }
+    html:not([data-theme="dark"]) .dragon-tiger-sort-indicator { color:#667085; }
+    html:not([data-theme="dark"]) .dragon-tiger-sort-btn.active .dragon-tiger-sort-indicator { color:#2457c5; }
+    html:not([data-theme="dark"]) .dragon-tiger-item { border-color:#e3e7ed; }
+    html:not([data-theme="dark"]) .dragon-tiger-item[open] > summary { background:#edf3ff; }
+    html:not([data-theme="dark"]) .dragon-tiger-item > summary::after { color:#667085; }
+    html:not([data-theme="dark"]) .dragon-tiger-item[open] > summary::after { color:#2457c5; }
+    html:not([data-theme="dark"]) .dragon-tiger-list-sector { color:#475467; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-badge {
+      border-color:#8fabdc;
+      background:#edf3ff;
+      color:#214b9c;
+    }
+    html:not([data-theme="dark"]) .dragon-tiger-streak.limit-up {
+      border-color:#d77972;
+      background:#fff3f2;
+      color:#a8342d;
+    }
+    html:not([data-theme="dark"]) .dragon-tiger-streak.limit-down {
+      border-color:#6fb99d;
+      background:#eff9f5;
+      color:#087052;
+    }
     html:not([data-theme="dark"]) .dragon-tiger-detail { background:#fbfcfd; }
     html:not([data-theme="dark"]) .dragon-tiger-reasons,
     html:not([data-theme="dark"]) .dragon-tiger-seats { border-color:#d7dfec; background:#f7f9fc; }
@@ -1360,6 +1386,32 @@
     html:not([data-theme="dark"]) .dragon-tiger-seat-group-head b,
     html:not([data-theme="dark"]) .dragon-tiger-funds-head b,
     html:not([data-theme="dark"]) .dragon-tiger-detail-record-head b { color:#2457c5; }
+    html:not([data-theme="dark"]) .dragon-tiger-reasons-head span,
+    html:not([data-theme="dark"]) .dragon-tiger-seats-head span,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-group > p,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-side-head span,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-values small,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-side-empty,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-empty,
+    html:not([data-theme="dark"]) .dragon-tiger-reason-empty,
+    html:not([data-theme="dark"]) .dragon-tiger-funds-head span,
+    html:not([data-theme="dark"]) .dragon-tiger-detail-record-head span,
+    html:not([data-theme="dark"]) .dragon-tiger-unavailable { color:#667085; }
+    html:not([data-theme="dark"]) .dragon-tiger-reason-list li > b { background:#edf3ff; color:#214b9c; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-notice { background:#fff8e5; color:#845400; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-side.buy { border-color:#efc9c5; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-side.sell { border-color:#b9dfd0; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-side-head b { color:var(--text); }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-side.buy .dragon-tiger-seat-side-head b,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-rank.buy { color:#a8342d; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-side.sell .dragon-tiger-seat-side-head b,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-rank.sell { color:#087052; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-rank.buy { background:#fff3f2; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-rank.sell { background:#eff9f5; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-category { border-color:#cfd5dd; background:#f7f8fa; color:#475467; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-category.institution { border-color:#b9c9ea; background:#edf3ff; color:#214b9c; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-category.quant { border-color:#cdbff0; background:#f5f0ff; color:#5b3ca8; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-category.hot-money { border-color:#e8c79e; background:#fff7ed; color:#8a4b08; }
 
     @media (max-width: 720px) {
       html:not([data-theme="dark"]) header { background:#fff; }
