@@ -144,7 +144,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(admin.status, 200)
         admin_body = admin.wfile.getvalue().decode('utf-8')
         self.assertIn('<link rel="stylesheet" href="/static/admin.css?v=10">', admin_body)
-        self.assertIn('<script src="/static/admin.js?v=19" defer></script>', admin_body)
+        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', admin_body)
         self.assertIn('id="adminThemeToggle"', admin_body)
         self.assertIn('class="theme-icon theme-icon-moon"', admin_body)
         self.assertIn('class="theme-icon theme-icon-sun"', admin_body)
@@ -179,8 +179,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
-        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=41">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=49" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=69">', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=85" defer></script>', DASHBOARD_FRONTEND)
         self.assertIn('id="themeToggle"', DASHBOARD_FRONTEND)
         self.assertIn('class="theme-icon theme-icon-moon"', DASHBOARD_FRONTEND)
         self.assertIn('class="theme-icon theme-icon-sun"', DASHBOARD_FRONTEND)
@@ -257,6 +257,7 @@ class DashboardAuthTests(unittest.TestCase):
             '/',
             '/practice',
             '/indices',
+            '/industry-flow',
             '/dragon-tiger',
             '/market-monitor',
             '/x-monitor',
@@ -1508,6 +1509,361 @@ console.log(JSON.stringify(result));
         self.assertEqual(handler.status, 200)
         self.assertEqual(payload["items"][0]["symbol"], "SMH")
 
+    def test_industry_flow_page_api_and_tide_animation_are_wired(self):
+        original_producer = dashboard.produce_industry_flow_data
+        try:
+            dashboard.produce_industry_flow_data = lambda: {
+                "available": True,
+                "generated_at": "2026-07-20 11:00:00",
+                "nodes": [{"id": "sector-a", "name": "行业A", "role": "outflow"}],
+                "links": [],
+            }
+            page = FakeHandler(path='/industry-flow')
+            page.do_GET()
+            api = FakeHandler(path='/api/industry-flow')
+            api.do_GET()
+            payload = json.loads(api.wfile.getvalue().decode('utf-8'))
+        finally:
+            dashboard.produce_industry_flow_data = original_producer
+
+        self.assertEqual(page.status, 200)
+        self.assertEqual(api.status, 200)
+        self.assertEqual(payload["nodes"][0]["name"], "行业A")
+        self.assertIn("industry_flow: '/industry-flow'", DASHBOARD_FRONTEND)
+        self.assertIn("fetch('/api/industry-flow'", DASHBOARD_FRONTEND)
+        self.assertIn('function renderIndustryFlowPage()', DASHBOARD_FRONTEND)
+        self.assertIn('function renderIndicesViewSwitch(activePanel)', DASHBOARD_FRONTEND)
+        self.assertIn("onclick=\"setIndicesViewMode('flow')\">资金流动</button>", DASHBOARD_FRONTEND)
+        self.assertIn("const topLevelActiveCategory = activeCategory === 'industry_flow' ? 'indices' : activeCategory;", DASHBOARD_FRONTEND)
+        self.assertIn('function startIndustryFlowAnimation()', DASHBOARD_FRONTEND)
+        self.assertIn('data-flow-node-id=', DASHBOARD_FRONTEND)
+        self.assertIn('data-flow-bar', DASHBOARD_FRONTEND)
+        self.assertIn('data-flow-out-list', DASHBOARD_FRONTEND)
+        self.assertIn('data-flow-in-list', DASHBOARD_FRONTEND)
+        self.assertNotIn('data-flow-liquid', DASHBOARD_FRONTEND)
+        self.assertNotIn('function industryFlowLevel(role, progress)', DASHBOARD_FRONTEND)
+        self.assertIn('function industryFlowSizeScale(role, progress)', DASHBOARD_FRONTEND)
+        self.assertIn('function industryFlowTimelineFrame(progress, payload = industryFlowData)', DASHBOARD_FRONTEND)
+        self.assertIn('function industryFlowSplitSortedNodes(nodes, sideLimit = industryFlowConfiguredSideLimit())', DASHBOARD_FRONTEND)
+        self.assertIn('const INDUSTRY_FLOW_SIDE_LIMIT = 10;', DASHBOARD_FRONTEND)
+        self.assertIn('const INDUSTRY_FLOW_RANK_ANIMATION_MS = 420;', DASHBOARD_FRONTEND)
+        self.assertIn('const INDUSTRY_FLOW_SAMPLE_PLAYBACK_MS = 460;', DASHBOARD_FRONTEND)
+        self.assertIn('function industryFlowPlaybackDuration(frameCount)', DASHBOARD_FRONTEND)
+        self.assertIn('speed: 0.5,', DASHBOARD_FRONTEND)
+        self.assertIn('const INDUSTRY_FLOW_SPEED_OPTIONS = [0.5, 0.75, 1, 1.5, 2];', DASHBOARD_FRONTEND)
+        self.assertIn('const speedOptions = INDUSTRY_FLOW_SPEED_OPTIONS.map(speed =>', DASHBOARD_FRONTEND)
+        self.assertIn('if (!INDUSTRY_FLOW_SPEED_OPTIONS.includes(speed)) return;', DASHBOARD_FRONTEND)
+        self.assertIn('function animateIndustryFlowRankChanges(', DASHBOARD_FRONTEND)
+        self.assertIn("{transform:`translateY(${deltaY}px)`}", DASHBOARD_FRONTEND)
+        self.assertIn('const MONEY_FLOW_REFRESH_INTERVAL_MS = 60 * 1000;', DASHBOARD_FRONTEND)
+        self.assertIn('moneyFlowData = payload.money_flow;', DASHBOARD_FRONTEND)
+        self.assertIn('const configuredSpeed = Number(payload?.settings?.playback_speed);', DASHBOARD_FRONTEND)
+        self.assertIn('function industryFlowConfiguredSideLimit(payload = industryFlowData)', DASHBOARD_FRONTEND)
+        self.assertIn('const universeById = new Map();', DASHBOARD_FRONTEND)
+        self.assertIn('data-flow-value', DASHBOARD_FRONTEND)
+        self.assertIn('id="industryFlowSampleTime"', DASHBOARD_FRONTEND)
+        self.assertIn('id="industryFlowStage"', DASHBOARD_FRONTEND)
+        self.assertIn('id="industryFlowSeek"', DASHBOARD_FRONTEND)
+        self.assertIn('oninput="seekIndustryFlowAnimation(this.value)"', DASHBOARD_FRONTEND)
+        self.assertIn('function beginIndustryFlowSeek()', DASHBOARD_FRONTEND)
+        self.assertIn('function seekIndustryFlowAnimation(value)', DASHBOARD_FRONTEND)
+        self.assertIn('function endIndustryFlowSeek()', DASHBOARD_FRONTEND)
+        self.assertIn('orderChanged && !industryFlowSeekState.active', DASHBOARD_FRONTEND)
+        self.assertIn('class="industry-flow-progress-times"', DASHBOARD_FRONTEND)
+        self.assertIn('morningWindow.end ||', DASHBOARD_FRONTEND)
+        self.assertIn('afternoonWindow.start ||', DASHBOARD_FRONTEND)
+        self.assertIn('<h2>行业主力资金流动</h2>', DASHBOARD_FRONTEND)
+        self.assertNotIn('A 股 · 当日资金对照', DASHBOARD_FRONTEND)
+        self.assertNotIn('后台正在按设置频率积累真实快照', DASHBOARD_FRONTEND)
+        self.assertNotIn('条形长度与排序按真实采样点同步变化', DASHBOARD_FRONTEND)
+        self.assertNotIn('class="industry-flow-kpis"', DASHBOARD_FRONTEND)
+        self.assertNotIn('id="industryFlowVisibleIn"', DASHBOARD_FRONTEND)
+        self.assertNotIn('可见主力净流入', DASHBOARD_FRONTEND)
+        self.assertNotIn('class="industry-flow-legend"', DASHBOARD_FRONTEND)
+        self.assertNotIn('左侧 · 主力净流出（大者居上）', DASHBOARD_FRONTEND)
+        self.assertNotIn('条长 = 当日主力净额相对强弱', DASHBOARD_FRONTEND)
+        self.assertNotIn('class="flow-bars-head"', DASHBOARD_FRONTEND)
+        self.assertNotIn('id="industryFlowCoreBalance"', DASHBOARD_FRONTEND)
+        self.assertNotIn('class="industry-flow-caveat"', DASHBOARD_FRONTEND)
+        self.assertNotIn('<b>口径说明</b>', DASHBOARD_FRONTEND)
+        self.assertIn('class="flow-bars-stage"', DASHBOARD_FRONTEND)
+        self.assertIn('class="flow-bar-row', DASHBOARD_FRONTEND)
+        self.assertNotIn('class="flow-tide-zone', DASHBOARD_FRONTEND)
+        self.assertNotIn('class="flow-pressure-columns', DASHBOARD_FRONTEND)
+        self.assertNotIn('<svg id="industryFlowSvg"', DASHBOARD_FRONTEND)
+        self.assertNotIn('<clipPath id="industryFlowClip', DASHBOARD_FRONTEND)
+        self.assertNotIn('marker-end="url(#industryFlowArrow)"', DASHBOARD_FRONTEND)
+        dashboard_css = (FRONTEND / 'dashboard.css').read_text(encoding='utf-8')
+        self.assertIn('.flow-bar-row.outflow .flow-bar-track i { transform-origin:right center; background:var(--flow-out); }', dashboard_css)
+        self.assertIn('.flow-bar-row.inflow .flow-bar-track i { transform-origin:left center; background:var(--flow-in); }', dashboard_css)
+        self.assertIn('will-change:transform;', dashboard_css)
+        self.assertIn('.industry-flow-progress-seek {', dashboard_css)
+        self.assertIn('touch-action:none;', dashboard_css)
+        self.assertIn('cursor:ew-resize;', dashboard_css)
+        self.assertIn('.industry-flow-progress-times {', dashboard_css)
+        self.assertIn('grid-template-columns:1fr auto 1fr;', dashboard_css)
+        self.assertNotIn('transition:width .14s ease;', dashboard_css)
+        self.assertIn('.flow-legend-node.outflow { border-color:var(--flow-out); background:var(--flow-out-soft); }', dashboard_css)
+        self.assertIn('.flow-bars-split { grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr); gap:0; }', dashboard_css)
+        self.assertIn('.flow-bars-axis { display:flex; }', dashboard_css)
+        self.assertNotIn('.flow-bars-split { grid-template-columns:minmax(0,1fr); gap:14px; }', dashboard_css)
+        self.assertIn('不推断行业之间的资金划转关系', dashboard.build_industry_flow_payload({})['inference']['caveat'])
+
+    def test_industry_flow_sampling_window_and_history_file_are_bounded_to_local_data(self):
+        original_calendar = dashboard.is_a_share_trading_day_for_dashboard
+        original_history_file = dashboard.INDUSTRY_FLOW_HISTORY_FILE
+        original_interval = dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS
+        try:
+            self.assertEqual(dashboard.MONEY_FLOW_SNAPSHOT_FILE.name, 'industry_main_money_flow_cache.json')
+            self.assertEqual(original_history_file.name, 'industry_main_flow_history.json')
+            dashboard.is_a_share_trading_day_for_dashboard = lambda _now: True
+            dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = 120
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 9, 24)))
+            self.assertTrue(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 9, 25)))
+            self.assertTrue(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 11, 31)))
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 11, 32)))
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 12, 0)))
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 12, 59)))
+            self.assertTrue(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 13, 0)))
+            self.assertTrue(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 15, 1)))
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 15, 2)))
+
+            dashboard.INDUSTRY_FLOW_HISTORY_FILE = self.tmp_path / 'industry_flow_history.json'
+            sample = {
+                'generated_at': '2026-07-20 10:00:00',
+                'items': [{'name': '半导体', 'net_flow_yi': 12}],
+            }
+            first = dashboard.record_industry_flow_sample(sample)
+            second = dashboard.record_industry_flow_sample(sample)
+            too_soon = dashboard.record_industry_flow_sample({
+                'generated_at': '2026-07-20 10:01:00',
+                'items': [{'name': '银行', 'net_flow_yi': -3}],
+            })
+            due = dashboard.record_industry_flow_sample({
+                'generated_at': '2026-07-20 10:02:00',
+                'items': [{'name': '银行', 'net_flow_yi': -4}],
+            })
+            lunch = dashboard.record_industry_flow_sample({
+                'generated_at': '2026-07-20 12:00:00',
+                'items': [{'name': '银行', 'net_flow_yi': -5}],
+            })
+            stored = json.loads(dashboard.INDUSTRY_FLOW_HISTORY_FILE.read_text(encoding='utf-8'))
+
+            self.assertEqual(len(first), 1)
+            self.assertEqual(second, first)
+            self.assertEqual(too_soon, first)
+            self.assertEqual(len(due), 2)
+            self.assertEqual(lunch, due)
+            self.assertEqual(len(stored['samples']), 2)
+            self.assertEqual(stored['interval_seconds'], 120)
+        finally:
+            dashboard.is_a_share_trading_day_for_dashboard = original_calendar
+            dashboard.INDUSTRY_FLOW_HISTORY_FILE = original_history_file
+            dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = original_interval
+
+    def test_industry_flow_sampler_waits_on_a_fixed_minute_cadence(self):
+        class StopAfterFirstWait:
+            def __init__(self):
+                self.wait_seconds = None
+
+            def is_set(self):
+                return False
+
+            def wait(self, seconds):
+                self.wait_seconds = seconds
+                return True
+
+        stop_event = StopAfterFirstWait()
+        original_window = dashboard.is_industry_flow_sampling_window
+        original_refresh = dashboard.refresh_industry_flow_sample
+        original_monotonic = dashboard.time.monotonic
+        try:
+            dashboard.is_industry_flow_sampling_window = lambda: True
+            dashboard.refresh_industry_flow_sample = lambda: True
+            ticks = iter((100.0, 112.5))
+            dashboard.time.monotonic = lambda: next(ticks)
+
+            dashboard.industry_flow_sampling_loop(stop_event=stop_event, poll_seconds=60)
+
+            self.assertAlmostEqual(stop_event.wait_seconds, 47.5)
+        finally:
+            dashboard.is_industry_flow_sampling_window = original_window
+            dashboard.refresh_industry_flow_sample = original_refresh
+            dashboard.time.monotonic = original_monotonic
+
+    def test_industry_flow_timeline_interpolates_node_and_summary_amounts(self):
+        start = DASHBOARD_FRONTEND.index('const INDUSTRY_FLOW_SIDE_LIMIT')
+        end = DASHBOARD_FRONTEND.index('function renderIndustryFlowPage', start)
+        functions = DASHBOARD_FRONTEND[start:end]
+        scenario = r"""
+const payload = {
+  nodes:[
+    {id:'a', name:'行业A', role:'inflow', net_flow_yi:20},
+    {id:'b', name:'行业B', role:'outflow', net_flow_yi:-4},
+  ],
+  timeline:[
+    {generated_at:'2026-07-20 10:00:00', nodes:[
+      {id:'a', net_flow_yi:10, inflow_yi:20, outflow_yi:10},
+      {id:'b', net_flow_yi:-8, inflow_yi:4, outflow_yi:12},
+    ]},
+    {generated_at:'2026-07-20 10:01:00', nodes:[
+      {id:'a', net_flow_yi:20, inflow_yi:35, outflow_yi:15},
+      {id:'b', net_flow_yi:-4, inflow_yi:10, outflow_yi:14},
+    ]},
+  ],
+};
+const frame = industryFlowTimelineFrame(0.5, payload);
+console.log(JSON.stringify(frame));
+"""
+        output = subprocess.check_output(
+            ['node', '-e', 'let industryFlowData = {};\n' + functions + scenario],
+            cwd=ROOT,
+            text=True,
+        )
+        frame = json.loads(output)
+        nodes = {node['id']: node for node in frame['nodes']}
+
+        self.assertEqual(frame['generated_at'], '2026-07-20 10:00:30')
+        self.assertEqual(nodes['a']['net_flow_yi'], 15)
+        self.assertEqual(nodes['b']['net_flow_yi'], -6)
+        self.assertEqual(frame['totals']['visible_inflow_yi'], 15)
+        self.assertEqual(frame['totals']['visible_outflow_yi'], 6)
+        self.assertEqual(frame['totals']['visible_balance_yi'], 9)
+        self.assertEqual(frame['totals']['inflow_count'], 1)
+        self.assertEqual(frame['totals']['outflow_count'], 1)
+
+    def test_industry_flow_timeline_keeps_leaders_from_both_neighboring_minutes(self):
+        start = DASHBOARD_FRONTEND.index('const INDUSTRY_FLOW_SIDE_LIMIT')
+        end = DASHBOARD_FRONTEND.index('function renderIndustryFlowPage', start)
+        functions = DASHBOARD_FRONTEND[start:end]
+        scenario = r"""
+const payload = {
+  nodes:[
+    {id:'new-in', name:'新流入', net_flow_yi:20},
+    {id:'new-out', name:'新流出', net_flow_yi:-20},
+  ],
+  timeline:[
+    {generated_at:'2026-07-20 10:00:00', nodes:[
+      {id:'old-in', name:'旧流入', net_flow_yi:10, inflow_yi:20, outflow_yi:10},
+      {id:'old-out', name:'旧流出', net_flow_yi:-8, inflow_yi:4, outflow_yi:12},
+    ]},
+    {generated_at:'2026-07-20 10:01:00', nodes:[
+      {id:'new-in', name:'新流入', net_flow_yi:20, inflow_yi:35, outflow_yi:15},
+      {id:'new-out', name:'新流出', net_flow_yi:-4, inflow_yi:10, outflow_yi:14},
+    ]},
+  ],
+};
+const frame = industryFlowTimelineFrame(0.5, payload);
+console.log(JSON.stringify(frame.nodes.map(node => node.id).sort()));
+"""
+        output = subprocess.check_output(
+            ['node', '-e', 'let industryFlowData = {};\n' + functions + scenario],
+            cwd=ROOT,
+            text=True,
+        )
+
+        self.assertEqual(json.loads(output), ['new-in', 'new-out', 'old-in', 'old-out'])
+
+    def test_industry_flow_timeline_respects_configured_industry_count(self):
+        start = DASHBOARD_FRONTEND.index('const INDUSTRY_FLOW_SIDE_LIMIT')
+        end = DASHBOARD_FRONTEND.index('function renderIndustryFlowPage', start)
+        functions = DASHBOARD_FRONTEND[start:end]
+        scenario = r"""
+const payload = {
+  settings:{side_limit:1},
+  nodes:[],
+  timeline:[
+    {generated_at:'2026-07-20 10:00:00', nodes:[
+      {id:'in-a', name:'流入A', net_flow_yi:10},
+      {id:'in-b', name:'流入B', net_flow_yi:8},
+      {id:'out-a', name:'流出A', net_flow_yi:-10},
+      {id:'out-b', name:'流出B', net_flow_yi:-8},
+    ]},
+    {generated_at:'2026-07-20 10:01:00', nodes:[
+      {id:'in-a', name:'流入A', net_flow_yi:12},
+      {id:'in-b', name:'流入B', net_flow_yi:9},
+      {id:'out-a', name:'流出A', net_flow_yi:-12},
+      {id:'out-b', name:'流出B', net_flow_yi:-9},
+    ]},
+  ],
+};
+const frame = industryFlowTimelineFrame(0.5, payload);
+console.log(JSON.stringify({ids:frame.nodes.map(node => node.id), totals:frame.totals}));
+"""
+        output = subprocess.check_output(
+            ['node', '-e', 'let industryFlowData = {};\n' + functions + scenario],
+            cwd=ROOT,
+            text=True,
+        )
+        result = json.loads(output)
+
+        self.assertEqual(set(result['ids']), {'in-a', 'out-a'})
+        self.assertEqual(result['totals']['inflow_count'], 1)
+        self.assertEqual(result['totals']['outflow_count'], 1)
+
+    def test_industry_flow_rank_changes_animate_rows_from_their_previous_positions(self):
+        start = DASHBOARD_FRONTEND.index('const INDUSTRY_FLOW_RANK_ANIMATION_MS')
+        end = DASHBOARD_FRONTEND.index('function industryFlowRenderBarRow', start)
+        functions = DASHBOARD_FRONTEND[start:end]
+        scenario = r"""
+const calls = [];
+const rows = [
+  {
+    dataset:{flowNodeId:'a'},
+    getBoundingClientRect:() => ({top:50}),
+    animate:(frames, options) => { calls.push({id:'a', frames, options}); return {cancel(){}}; },
+  },
+  {
+    dataset:{flowNodeId:'b'},
+    getBoundingClientRect:() => ({top:10}),
+    animate:(frames, options) => { calls.push({id:'b', frames, options}); return {cancel(){}}; },
+  },
+];
+const listEl = {querySelectorAll:() => rows};
+animateIndustryFlowRankChanges(
+  listEl,
+  new Map([['a', 10], ['b', 50]]),
+  ['a', 'b'],
+  ['b', 'a'],
+  'inflow',
+);
+console.log(JSON.stringify(calls));
+"""
+        output = subprocess.check_output(
+            ['node', '-e', 'const industryFlowMotionReduced = false;\n' + functions + scenario],
+            cwd=ROOT,
+            text=True,
+        )
+        calls = json.loads(output)
+
+        self.assertEqual([call['id'] for call in calls], ['a', 'b'])
+        self.assertEqual(calls[0]['frames'][0]['transform'], 'translateY(-40px)')
+        self.assertEqual(calls[1]['frames'][0]['transform'], 'translateY(40px)')
+        self.assertEqual(calls[0]['frames'][1]['transform'], 'translateY(0)')
+        self.assertEqual(calls[0]['options']['duration'], 420)
+        self.assertEqual(calls[0]['options']['easing'], 'cubic-bezier(.22,.8,.24,1)')
+
+    def test_industry_flow_playback_duration_keeps_sample_transitions_readable(self):
+        start = DASHBOARD_FRONTEND.index('const INDUSTRY_FLOW_SAMPLE_PLAYBACK_MS')
+        end = DASHBOARD_FRONTEND.index('function industryFlowSplitSortedNodes', start)
+        functions = DASHBOARD_FRONTEND[start:end]
+        scenario = r"""
+console.log(JSON.stringify([
+  industryFlowPlaybackDuration(2),
+  industryFlowPlaybackDuration(96),
+  industryFlowPlaybackDuration(242),
+]));
+"""
+        output = subprocess.check_output(
+            ['node', '-e', functions + scenario],
+            cwd=ROOT,
+            text=True,
+        )
+
+        self.assertEqual(json.loads(output), [9000, 43700, 110000])
+        self.assertIn('if (orderChanged) listEl.appendChild(row);', DASHBOARD_FRONTEND)
+        self.assertIn('if (bar.style.transform !== nextTransform) bar.style.transform = nextTransform;', DASHBOARD_FRONTEND)
+
     def test_indices_market_panel_switches_to_us_sectors_with_index_session(self):
         self.assertIn("let usSectorData = {items: []};", DASHBOARD_FRONTEND)
         self.assertIn("fetchJson('/api/us_sectors'", DASHBOARD_FRONTEND)
@@ -1743,9 +2099,12 @@ console.log(JSON.stringify(result));
         self.assertIn("let activeCategory = categoryFromLocation(initialParams);", DASHBOARD_FRONTEND)
         self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'dragon_tiger', 'x_monitor', 'us_ratings'];", DASHBOARD_FRONTEND)
         self.assertIn("practice:'模拟交易'", DASHBOARD_FRONTEND)
+        self.assertIn("industry_flow:'行业资金流'", DASHBOARD_FRONTEND)
+        self.assertIn("if (normalized === 'industry_flow') return normalized;", DASHBOARD_FRONTEND)
         self.assertIn("dragon_tiger:'龙虎榜'", DASHBOARD_FRONTEND)
         self.assertIn("practice: '/practice'", DASHBOARD_FRONTEND)
         self.assertIn("indices: '/indices'", DASHBOARD_FRONTEND)
+        self.assertIn("industry_flow: '/industry-flow'", DASHBOARD_FRONTEND)
         self.assertIn("dragon_tiger: '/dragon-tiger'", DASHBOARD_FRONTEND)
         self.assertIn('fetch(`/api/iwencai/dragon-tiger${query}`', DASHBOARD_FRONTEND)
         self.assertIn('function renderDragonTigerPanel()', DASHBOARD_FRONTEND)
@@ -2160,7 +2519,7 @@ process.stdout.write(JSON.stringify({
         unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
         unlocked_page.do_GET()
         self.assertEqual(unlocked_page.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=19" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
 
         unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
         unlocked_api.do_GET()
@@ -2821,7 +3180,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(handler.status, 200)
         self.assertEqual(len(payload['groups']), 13)
         self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        self.assertIn('<script src="/static/admin.js?v=19" defer></script>', index_body)
+        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', index_body)
         self.assertNotIn("name='env__", index_body)
         self.assertIn('function renderSettingsIndex()', ADMIN_FRONTEND)
         self.assertIn('function renderSettingsGroup(slug)', ADMIN_FRONTEND)
@@ -2853,7 +3212,7 @@ process.stdout.write(JSON.stringify({
             route = FakeHandler(path=f'/admin/settings/{slug}')
             route.do_GET()
             self.assertEqual(route.status, 200)
-            self.assertIn('<script src="/static/admin.js?v=19" defer></script>', route.wfile.getvalue().decode('utf-8'))
+            self.assertIn('<script src="/static/admin.js?v=20" defer></script>', route.wfile.getvalue().decode('utf-8'))
 
         self.assertEqual(len(groups), 13)
         self.assertEqual(len(slugs), len(set(slugs)))
@@ -2874,6 +3233,20 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(decision_group['name'], '选股与买卖设置')
         strategy_group = next(group for group in groups if group['slug'] == 'stock-strategy')
         self.assertEqual(strategy_group['name'], '选股与交易策略')
+        market_data_group = next(group for group in groups if group['slug'] == 'indices-refresh')
+        self.assertEqual(market_data_group['name'], '行情与资金流设置')
+        self.assertEqual(market_data_group['item_count'], 8)
+        self.assertIn('09:25～11:31、13:00～15:01', market_data_group['note'])
+        self.assertEqual(dashboard.admin_setting_group_env_names('indices-refresh'), {
+            'DASHBOARD_INDICES_TTL_SECONDS',
+            'DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED',
+            'DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT',
+            'DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS',
+            'DASHBOARD_INDUSTRY_FLOW_MORNING_START',
+            'DASHBOARD_INDUSTRY_FLOW_MORNING_END',
+            'DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START',
+            'DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END',
+        })
         decision_names = dashboard.admin_setting_group_env_names('decision-times')
         self.assertIn('DASHBOARD_DISPLAY_CANDIDATE_LIMIT', decision_names)
         self.assertIn('DASHBOARD_TRADE_CANDIDATE_LIMIT', decision_names)
@@ -2883,6 +3256,18 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(config_by_name['DASHBOARD_GROK_API_MODE']['default'], 'auto')
         self.assertEqual(config_by_name['DASHBOARD_NEWS_API_MODE']['kind'], 'api_mode')
         self.assertEqual(config_by_name['DASHBOARD_NEWS_API_MODE']['default'], 'auto')
+        self.assertEqual(config_by_name['DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED']['kind'], 'playback_speed')
+        self.assertEqual(config_by_name['DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED']['default'], '0.5')
+        self.assertEqual(config_by_name['DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT']['default'], '10')
+        self.assertEqual(config_by_name['DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS']['default'], '60')
+        self.assertEqual(config_by_name['DASHBOARD_INDUSTRY_FLOW_MORNING_START']['default'], '09:25')
+        self.assertEqual(config_by_name['DASHBOARD_INDUSTRY_FLOW_MORNING_END']['default'], '11:31')
+        self.assertEqual(config_by_name['DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START']['default'], '13:00')
+        self.assertEqual(config_by_name['DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END']['default'], '15:01')
+        self.assertTrue(all(
+            config_by_name[name]['kind'] == 'time'
+            for name in dashboard.INDUSTRY_FLOW_WINDOW_CONFIG_NAMES
+        ))
         self.assertIn('DASHBOARD_NEWS_API_MODE', dashboard.TRADER_RUNTIME_ENV_NAMES)
         self.assertEqual(dashboard.normalize_env_update('DASHBOARD_GROK_API_MODE', 'responses', 'api_mode'), 'responses')
         self.assertEqual(dashboard.normalize_env_update('DASHBOARD_GROK_API_MODE', 'chat-completions', 'api_mode'), 'chat')
@@ -2895,6 +3280,33 @@ process.stdout.write(JSON.stringify({
         with self.assertRaises(ValueError):
             dashboard.validate_business_updates({'X_WATCHLIST_REQUEST_TIMEOUT_SECONDS': '7'})
         self.assertIn("kind === 'api_mode'", ADMIN_FRONTEND)
+        self.assertIn("kind === 'playback_speed'", ADMIN_FRONTEND)
+        self.assertIn("item.min ?", ADMIN_FRONTEND)
+        dashboard.validate_business_updates({
+            'DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED': '0.75',
+            'DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT': '6',
+            'DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS': '120',
+            'DASHBOARD_INDUSTRY_FLOW_MORNING_START': '09:20',
+            'DASHBOARD_INDUSTRY_FLOW_MORNING_END': '11:32',
+            'DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START': '12:59',
+            'DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END': '15:02',
+        })
+        self.assertEqual(
+            dashboard.normalize_business_updates({'DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED': '1.0'}),
+            {'DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED': '1'},
+        )
+        for name, value in (
+            ('DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED', '0.6'),
+            ('DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT', '11'),
+            ('DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS', '30'),
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                dashboard.validate_business_updates({name: value})
+        with self.assertRaisesRegex(ValueError, '上午开始'):
+            dashboard.validate_business_updates({
+                'DASHBOARD_INDUSTRY_FLOW_MORNING_START': '11:40',
+                'DASHBOARD_INDUSTRY_FLOW_MORNING_END': '11:31',
+            })
         self.assertEqual(config_by_name['DASHBOARD_DISPLAY_CANDIDATE_LIMIT']['default'], '10')
         self.assertEqual(config_by_name['DASHBOARD_TRADE_CANDIDATE_LIMIT']['default'], '10')
         self.assertEqual(config_by_name['IWENCAI_ENABLED']['default'], '0')
@@ -2983,7 +3395,7 @@ process.stdout.write(JSON.stringify({
         locked.do_GET()
         locked_body = locked.wfile.getvalue().decode('utf-8')
         self.assertEqual(locked.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=19" defer></script>', locked_body)
+        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', locked_body)
         self.assertNotIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", locked_body)
 
         cookie = self.admin_cookie()
@@ -3007,7 +3419,7 @@ process.stdout.write(JSON.stringify({
         )
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        self.assertIn('<script src="/static/admin.js?v=19" defer></script>', missing.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', missing.wfile.getvalue().decode('utf-8'))
         self.assertIn('未找到该设置分组', ADMIN_FRONTEND)
 
     def test_group_save_ignores_fields_from_other_settings_groups(self):
@@ -3508,6 +3920,10 @@ process.stdout.write(JSON.stringify({
         original_b1_times = dashboard.B1_SCHEDULE_TIMES
         original_b1_enabled = dashboard.B1_SCHEDULE_ENABLED
         original_indices_ttl = dashboard.API_TTLS["indices"]
+        original_flow_speed = dashboard.INDUSTRY_FLOW_PLAYBACK_SPEED
+        original_flow_side_limit = dashboard.INDUSTRY_FLOW_SIDE_LIMIT
+        original_flow_sample_interval = dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS
+        original_flow_windows = dashboard.INDUSTRY_FLOW_SAMPLING_WINDOWS
         original_trader_module = dashboard.TRADER_MODULE
         original_trader_mtime = dashboard.TRADER_MODULE_MTIME
         original_env_values = {name: dashboard.os.environ.get(name) for name in dashboard.ADMIN_VISIBLE_ENV_NAMES}
@@ -3531,6 +3947,13 @@ process.stdout.write(JSON.stringify({
                 'env__DASHBOARD_DECISION_CONTEXT_LENGTH': '256K',
                 'env__DASHBOARD_B1_SCHEDULE_TIMES': ['', '09:25', '10:00', '', '14:50'],
                 'env__DASHBOARD_INDICES_TTL_SECONDS': '20',
+                'env__DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED': '0.75',
+                'env__DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT': '6',
+                'env__DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS': '120',
+                'env__DASHBOARD_INDUSTRY_FLOW_MORNING_START': '09:20',
+                'env__DASHBOARD_INDUSTRY_FLOW_MORNING_END': '11:32',
+                'env__DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START': '12:59',
+                'env__DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END': '15:02',
                 'env__DASHBOARD_US_MARKET_SUMMARY_CRON': '08:01',
                 'env__DASHBOARD_MARKET_AUCTION_CRON': '09:26',
                 'env__DASHBOARD_US_RATING_CRON': '10:30',
@@ -3559,6 +3982,12 @@ process.stdout.write(JSON.stringify({
             response = json.loads(response_text)
             runtime_b1_times = dashboard.B1_SCHEDULE_TIMES
             runtime_indices_ttl = dashboard.API_TTLS['indices']
+            runtime_flow_settings = (
+                dashboard.INDUSTRY_FLOW_PLAYBACK_SPEED,
+                dashboard.INDUSTRY_FLOW_SIDE_LIMIT,
+                dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
+                dashboard.INDUSTRY_FLOW_SAMPLING_WINDOWS,
+            )
         finally:
             dashboard.DASHBOARD_ENV_FILE = original_env_file
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
@@ -3566,6 +3995,10 @@ process.stdout.write(JSON.stringify({
             dashboard.B1_SCHEDULE_TIMES = original_b1_times
             dashboard.B1_SCHEDULE_ENABLED = original_b1_enabled
             dashboard.API_TTLS["indices"] = original_indices_ttl
+            dashboard.INDUSTRY_FLOW_PLAYBACK_SPEED = original_flow_speed
+            dashboard.INDUSTRY_FLOW_SIDE_LIMIT = original_flow_side_limit
+            dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = original_flow_sample_interval
+            dashboard.INDUSTRY_FLOW_SAMPLING_WINDOWS = original_flow_windows
             dashboard.TRADER_MODULE = original_trader_module
             dashboard.TRADER_MODULE_MTIME = original_trader_mtime
             for name, value in original_env_values.items():
@@ -3590,6 +4023,7 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(response['runtime']['ok'])
         self.assertIn('b1_schedule_times', response['runtime']['applied'])
         self.assertIn('indices_ttl', response['runtime']['applied'])
+        self.assertIn('industry_flow', response['runtime']['applied'])
         self.assertIn('active_strategy', response['runtime']['applied'])
         self.assertIn('strategy_settings', response['runtime']['applied'])
         self.assertIn('trader_runtime', response['runtime']['applied'])
@@ -3603,6 +4037,13 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(parsed['DASHBOARD_DECISION_CONTEXT_LENGTH'], '256000')
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
         self.assertEqual(parsed['DASHBOARD_INDICES_TTL_SECONDS'], '20')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED'], '0.75')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT'], '6')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS'], '120')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_MORNING_START'], '09:20')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_MORNING_END'], '11:32')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START'], '12:59')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END'], '15:02')
         self.assertEqual(parsed['DASHBOARD_US_MARKET_SUMMARY_CRON'], '1 8 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
@@ -3613,6 +4054,12 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(parsed['DASHBOARD_TELEGRAM_CHAT_ID'], telegram_chat_id)
         self.assertEqual(runtime_b1_times, ('09:25', '10:00', '14:50'))
         self.assertEqual(runtime_indices_ttl, 20)
+        self.assertEqual(runtime_flow_settings, (
+            0.75,
+            6,
+            120,
+            (("09:20", "11:32"), ("12:59", "15:02")),
+        ))
         self.assertNotIn('DASHBOARD_HOME', parsed)
 
     def test_admin_config_api_does_not_restart_without_changes(self):

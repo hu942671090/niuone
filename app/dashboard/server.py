@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlparse
 import urllib.request
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
-from dashboard_json_cache import write_json_cache
+from dashboard_json_cache import read_json_cache, write_json_cache
 from dashboard import practice_payload as practice_payload_impl
 from dashboard import practice_market_summary as practice_market_summary_impl
 from dashboard import security as security_impl
@@ -48,6 +48,16 @@ from dashboard.apis.iwencai_service import (
     read_dragon_tiger_snapshot,
     write_dragon_tiger_archive,
     write_dragon_tiger_snapshot,
+)
+from dashboard.apis.industry_flow import (
+    DEFAULT_PLAYBACK_SPEED as INDUSTRY_FLOW_DEFAULT_PLAYBACK_SPEED,
+    DEFAULT_SAMPLE_INTERVAL_SECONDS as INDUSTRY_FLOW_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+    DEFAULT_SIDE_LIMIT as INDUSTRY_FLOW_DEFAULT_SIDE_LIMIT,
+    SAMPLING_WINDOWS as INDUSTRY_FLOW_DEFAULT_SAMPLING_WINDOWS,
+    append_industry_flow_sample,
+    build_industry_flow_payload,
+    is_industry_flow_session_timestamp,
+    normalize_industry_flow_sampling_windows,
 )
 from market_data.iwencai_client import (
     DEFAULT_BASE_URL as IWENCAI_DEFAULT_BASE_URL,
@@ -121,6 +131,7 @@ DASHBOARD_PAGE_PATHS = frozenset({
     "/",
     "/practice",
     "/indices",
+    "/industry-flow",
     "/dragon-tiger",
     "/market-monitor",
     "/x-monitor",
@@ -138,6 +149,10 @@ IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = Path(
     or CRON_OUTPUT_DIR / "iwencai_dragon_tiger_latest.json"
 ).expanduser()
 B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
+MONEY_FLOW_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "industry_main_money_flow_cache.json"
+# Main-net samples use a new history file so legacy total-flow observations
+# remain recoverable but can never be replayed under the new metric label.
+INDUSTRY_FLOW_HISTORY_FILE = CRON_OUTPUT_DIR / "industry_main_flow_history.json"
 STATS_DB = DASHBOARD_HOME / "dashboard_stats.db"
 LEGACY_STATS_DB = DASHBOARD_HOME / "dashboard_users.db"
 LEGACY_STATS_MIGRATION_KEY = "dashboard_users_visit_stats_v1"
@@ -148,6 +163,59 @@ ACTION_HEADER_NAME = "X-NiuOne-Action"
 ACTION_HEADER_VALUES = {"1", "true", "yes", "on"}
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 US_FEATURE_CATEGORIES = {"x_monitor", "us_ratings"}
+INDUSTRY_FLOW_PLAYBACK_SPEED_OPTIONS = (0.5, 0.75, 1.0, 1.5, 2.0)
+INDUSTRY_FLOW_WINDOW_CONFIG_NAMES = (
+    "DASHBOARD_INDUSTRY_FLOW_MORNING_START",
+    "DASHBOARD_INDUSTRY_FLOW_MORNING_END",
+    "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START",
+    "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END",
+)
+
+
+def _bounded_int_value(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _industry_flow_playback_speed_value(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return INDUSTRY_FLOW_DEFAULT_PLAYBACK_SPEED
+    return parsed if parsed in INDUSTRY_FLOW_PLAYBACK_SPEED_OPTIONS else INDUSTRY_FLOW_DEFAULT_PLAYBACK_SPEED
+
+
+def _industry_flow_sampling_windows_value(
+    values: dict[str, Any],
+    *,
+    fallback: tuple[tuple[str, str], tuple[str, str]] = INDUSTRY_FLOW_DEFAULT_SAMPLING_WINDOWS,
+    strict: bool = False,
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    defaults = {
+        INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[0]: fallback[0][0],
+        INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[1]: fallback[0][1],
+        INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[2]: fallback[1][0],
+        INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[3]: fallback[1][1],
+    }
+    resolved = {
+        name: str(values.get(name) or default).strip()
+        for name, default in defaults.items()
+    }
+    windows = (
+        (resolved[INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[0]], resolved[INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[1]]),
+        (resolved[INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[2]], resolved[INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[3]]),
+    )
+    try:
+        return normalize_industry_flow_sampling_windows(windows)
+    except ValueError:
+        if strict:
+            raise
+        return fallback
+
+
 NIUONE_LAUNCHD_LABELS = (
     "ai.niuone.cron-scheduler",
     "ai.niuone.x-watchlist",
@@ -192,6 +260,24 @@ PENDING_DECISION_POLL_SECONDS = float(os.environ.get("DASHBOARD_PENDING_DECISION
 PRACTICE_EQUITY_HEARTBEAT_LOCK = threading.Lock()
 PRACTICE_EQUITY_HEARTBEAT_THREAD: threading.Thread | None = None
 PRACTICE_EQUITY_HEARTBEAT_POLL_SECONDS = 5.0
+INDUSTRY_FLOW_HISTORY_LOCK = threading.RLock()
+INDUSTRY_FLOW_SAMPLER_THREAD: threading.Thread | None = None
+INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = _bounded_int_value(
+    os.environ.get("DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS"),
+    INDUSTRY_FLOW_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+    60,
+    600,
+)
+INDUSTRY_FLOW_SIDE_LIMIT = _bounded_int_value(
+    os.environ.get("DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT"),
+    INDUSTRY_FLOW_DEFAULT_SIDE_LIMIT,
+    1,
+    10,
+)
+INDUSTRY_FLOW_PLAYBACK_SPEED = _industry_flow_playback_speed_value(
+    os.environ.get("DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED")
+)
+INDUSTRY_FLOW_SAMPLING_WINDOWS = _industry_flow_sampling_windows_value(os.environ)
 B1_CANDIDATE_REFRESH_LOCK = threading.Lock()
 B1_FULL_SCAN_LOCK = threading.Lock()
 B1_CANDIDATE_REFRESH_MIN_SECONDS = float(os.environ.get("DASHBOARD_B1_CANDIDATE_REFRESH_MIN_SECONDS", "0") or "0")
@@ -278,6 +364,7 @@ API_TTLS = {
     "us_sectors": int(os.environ.get("DASHBOARD_US_SECTORS_TTL_SECONDS", "300") or "300"),
     "hot_stocks": 60,
     "money_flow": 60,
+    "industry_flow": 30,
     "market_flow": 30,
     "us_quotes": 30,
     "us_profiles": int(os.environ.get("DASHBOARD_US_PROFILES_TTL_SECONDS", "86400") or "86400"),
@@ -428,7 +515,14 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "牛牛美股", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
     {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "牛牛美股", "kind": "int", "default": "240", "effect": "next_run"},
     {"name": "US_RATING_REQUEST_TIMEOUT_SECONDS", "label": "美股评级单次请求超时秒数", "group": "牛牛美股", "kind": "int", "default": "120", "effect": "next_run"},
-    {"name": "DASHBOARD_INDICES_TTL_SECONDS", "label": "指数行情更新间隔", "group": "指数行情更新周期", "kind": "int", "default": "60", "effect": "runtime"},
+    {"name": "DASHBOARD_INDICES_TTL_SECONDS", "label": "指数行情更新间隔（秒）", "group": "行情与资金流设置", "kind": "int", "default": "60", "effect": "runtime", "min": "1"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED", "label": "资金流默认播放速度", "group": "行情与资金流设置", "kind": "playback_speed", "default": "0.5", "effect": "runtime"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT", "label": "资金流每侧行业数量", "group": "行情与资金流设置", "kind": "int", "default": "10", "effect": "runtime", "min": "1", "max": "10"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS", "label": "资金流采样间隔（秒）", "group": "行情与资金流设置", "kind": "int", "default": "60", "effect": "runtime", "min": "60", "max": "600"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_MORNING_START", "label": "上午采样开始时间", "group": "行情与资金流设置", "kind": "time", "default": "09:25", "effect": "runtime"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_MORNING_END", "label": "上午采样结束时间", "group": "行情与资金流设置", "kind": "time", "default": "11:31", "effect": "runtime"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START", "label": "下午采样开始时间", "group": "行情与资金流设置", "kind": "time", "default": "13:00", "effect": "runtime"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END", "label": "下午采样结束时间", "group": "行情与资金流设置", "kind": "time", "default": "15:01", "effect": "runtime"},
 
     {"name": "X_WATCHLIST_STRICT_CONTEXT_HOLD", "label": "X 上下文缺失时暂缓发送", "group": "X 监控", "kind": "bool", "default": "0", "effect": "next_run"},
     {"name": "X_WATCHLIST_DEADLINE_SECONDS", "label": "X 总截止秒数", "group": "X 监控", "kind": "int", "default": "135", "effect": "next_run"},
@@ -539,6 +633,13 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_CRON_MAX_ATTEMPTS",
     "DASHBOARD_CRON_RETRY_DELAY_SECONDS",
     "DASHBOARD_INDICES_TTL_SECONDS",
+    "DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED",
+    "DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT",
+    "DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS",
+    "DASHBOARD_INDUSTRY_FLOW_MORNING_START",
+    "DASHBOARD_INDUSTRY_FLOW_MORNING_END",
+    "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START",
+    "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END",
 ]
 TRADER_RUNTIME_ENV_NAMES = {
     STOCK_UNIVERSE_ENV,
@@ -586,7 +687,7 @@ ENV_GROUP_ORDER = [
     "综合决策参考",
     "选股与交易策略",
     "盘面监控生产时间点",
-    "指数行情更新周期",
+    "行情与资金流设置",
     "基础路径",
     "访问控制",
     "限流与缓存",
@@ -2063,6 +2164,133 @@ def start_practice_equity_heartbeat() -> None:
     print("Practice equity heartbeat enabled: 60s", flush=True)
 
 
+def is_industry_flow_sampling_window(now: datetime | None = None) -> bool:
+    """Return whether Beijing time is inside either fixed sampling session."""
+
+    current = now or current_cn_datetime()
+    if not is_a_share_trading_day_for_dashboard(current):
+        return False
+    return is_industry_flow_session_timestamp(
+        current,
+        sampling_windows=INDUSTRY_FLOW_SAMPLING_WINDOWS,
+    )
+
+
+def _filter_industry_flow_session_samples(samples: list[Any]) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for item in samples:
+        if not isinstance(item, dict):
+            continue
+        generated_at = str(item.get("generated_at") or "")
+        try:
+            sample_time = datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if is_industry_flow_sampling_window(sample_time):
+            filtered.append(item)
+    return filtered
+
+
+def load_industry_flow_samples() -> list[dict[str, Any]]:
+    with INDUSTRY_FLOW_HISTORY_LOCK:
+        history = read_json_cache(INDUSTRY_FLOW_HISTORY_FILE, None) or {}
+        return _filter_industry_flow_session_samples(history.get("samples") or [])
+
+
+def record_industry_flow_sample(money_flow: dict[str, Any]) -> list[dict[str, Any]]:
+    """Persist one valid sample without replacing earlier same-day observations."""
+
+    generated_at = str(money_flow.get("generated_at") or "")
+    try:
+        sample_time = datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return load_industry_flow_samples()
+    if not is_industry_flow_sampling_window(sample_time):
+        return load_industry_flow_samples()
+
+    with INDUSTRY_FLOW_HISTORY_LOCK:
+        history = read_json_cache(INDUSTRY_FLOW_HISTORY_FILE, None) or {}
+        existing_samples = _filter_industry_flow_session_samples(history.get("samples") or [])
+        same_day_samples = [
+            item for item in existing_samples
+            if str(item.get("generated_at") or "")[:10] == generated_at[:10]
+        ]
+        if same_day_samples:
+            latest_time = datetime.strptime(
+                str(same_day_samples[-1].get("generated_at") or ""),
+                "%Y-%m-%d %H:%M:%S",
+            )
+            elapsed_seconds = (sample_time - latest_time).total_seconds()
+            if 0 < elapsed_seconds < INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS:
+                return existing_samples
+        updated = append_industry_flow_sample(
+            history,
+            money_flow,
+            interval_seconds=INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
+        )
+        if updated != history and updated.get("samples"):
+            write_json_cache(INDUSTRY_FLOW_HISTORY_FILE, updated)
+        return _filter_industry_flow_session_samples(updated.get("samples") or [])
+
+
+def refresh_industry_flow_sample() -> bool:
+    money_flow = run_dashboard_helper(
+        "money_flow_dashboard_api.py",
+        {"inflow": [], "outflow": []},
+        # Leave enough time in the minute for the next wall-clock sample even
+        # when the upstream request stalls.
+        timeout=50,
+        args=("--force-refresh",),
+    )
+    samples = record_industry_flow_sample(money_flow)
+    generated_at = str(money_flow.get("generated_at") or "")
+    recorded = bool(samples and str(samples[-1].get("generated_at") or "") == generated_at)
+    if recorded:
+        invalidate_api_cache("money_flow", "industry_flow")
+    return recorded
+
+
+def industry_flow_sampling_loop(
+    *,
+    stop_event: threading.Event | None = None,
+    poll_seconds: float | None = None,
+) -> None:
+    """Collect periodic industry-flow snapshots even when the page is closed."""
+
+    stop_event = stop_event or threading.Event()
+    next_due = time.monotonic()
+    while not stop_event.is_set():
+        interval = max(
+            60.0,
+            float(INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS if poll_seconds is None else poll_seconds),
+        )
+        if is_industry_flow_sampling_window():
+            try:
+                refresh_industry_flow_sample()
+            except Exception as exc:
+                print(f"[WARN] 行业资金流采样失败: {type(exc).__name__}: {exc}", flush=True)
+        next_due += interval
+        now = time.monotonic()
+        if next_due <= now:
+            skipped_intervals = int((now - next_due) // interval) + 1
+            next_due += skipped_intervals * interval
+        if stop_event.wait(max(0.1, next_due - now)):
+            return
+
+
+def start_industry_flow_sampler() -> None:
+    global INDUSTRY_FLOW_SAMPLER_THREAD
+    if INDUSTRY_FLOW_SAMPLER_THREAD and INDUSTRY_FLOW_SAMPLER_THREAD.is_alive():
+        return
+    INDUSTRY_FLOW_SAMPLER_THREAD = threading.Thread(
+        target=industry_flow_sampling_loop,
+        name="industry-flow-sampler",
+        daemon=True,
+    )
+    INDUSTRY_FLOW_SAMPLER_THREAD.start()
+    print(f"Industry flow sampler enabled: {INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS}s", flush=True)
+
+
 def start_pending_decision_executor() -> None:
     global PENDING_DECISION_THREAD
     if PENDING_DECISION_THREAD and PENDING_DECISION_THREAD.is_alive():
@@ -2470,6 +2698,32 @@ def produce_us_sector_data() -> dict[str, Any]:
         return {"items": [], "error": f"{type(exc).__name__}: {exc}"}
 
 
+def produce_money_flow_data() -> dict[str, Any]:
+    return run_dashboard_helper(
+        "money_flow_dashboard_api.py",
+        {"inflow": [], "outflow": []},
+        timeout=120,
+    )
+
+
+def produce_industry_flow_data() -> dict[str, Any]:
+    money_flow = cached_json_data(
+        "money_flow",
+        API_TTLS["money_flow"],
+        produce_money_flow_data,
+        {"inflow": [], "outflow": []},
+    )
+    history_samples = record_industry_flow_sample(money_flow)
+    return build_industry_flow_payload(
+        money_flow,
+        side_limit=INDUSTRY_FLOW_SIDE_LIMIT,
+        history_samples=history_samples,
+        sample_interval_seconds=INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
+        playback_speed=INDUSTRY_FLOW_PLAYBACK_SPEED,
+        sampling_windows=INDUSTRY_FLOW_SAMPLING_WINDOWS,
+    )
+
+
 def is_allowed_x_media_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -2648,6 +2902,16 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         return "1" if value.lower() in {"1", "true", "yes", "on"} else "0"
     if kind == "int" and value:
         int(value)
+    if kind == "playback_speed":
+        speed = _industry_flow_playback_speed_value(value)
+        try:
+            requested = float(value)
+        except (TypeError, ValueError):
+            requested = -1
+        if requested not in INDUSTRY_FLOW_PLAYBACK_SPEED_OPTIONS:
+            allowed = "、".join(f"{item:g}x" for item in INDUSTRY_FLOW_PLAYBACK_SPEED_OPTIONS)
+            raise ValueError(f"资金流播放速度必须是 {allowed} 之一")
+        return f"{speed:g}"
     if kind in {"max_tokens", "context_length"}:
         return normalize_context_length_update(value)
     if kind == "api_mode":
@@ -2899,7 +3163,7 @@ ADMIN_GROUP_NOTES = {
     "综合决策参考": "为买卖决策汇总指数、板块、资金流向、热门股票等参考数据。缓存秒数控制数据复用周期，单类参考数据上限可设置为 1～8。",
     "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
-    "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
+    "行情与资金流设置": "统一管理指数刷新和行业资金流动画。播放速度、每侧行业数量、采样间隔及上午/下午采样窗口均支持运行时保存后生效；时间使用北京时间 HH:MM，默认 09:25～11:31、13:00～15:01。",
 }
 ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
     {
@@ -2976,8 +3240,8 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
     },
     {
         "slug": "indices-refresh",
-        "name": "指数行情更新周期",
-        "summary": "调整指数行情数据的刷新频率。",
+        "name": "行情与资金流设置",
+        "summary": "调整指数刷新、资金流展示数量、播放速度、采样频率和时间窗口。",
         "icon": "行情",
     },
 )
@@ -3260,6 +3524,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_trade_discipline_text_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "api_mode":
             normalized[name] = normalize_env_update(name, normalized[name], "api_mode")
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "playback_speed":
+            normalized[name] = normalize_env_update(name, normalized[name], "playback_speed")
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"max_tokens", "context_length"}:
             normalized[name] = normalize_context_length_update(normalized[name])
     return normalized
@@ -3308,7 +3574,12 @@ def validate_business_updates(updates: dict[str, str]) -> None:
                 raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
         elif name == "DASHBOARD_B1_SCHEDULE_TIMES":
             normalize_time_list_update(value)
-        elif name in {"DASHBOARD_B3_EXIT_TIME", "DASHBOARD_TIME_EXIT_TIME", "DASHBOARD_TIME_STOP_EXIT_TIME"}:
+        elif name in {
+            "DASHBOARD_B3_EXIT_TIME",
+            "DASHBOARD_TIME_EXIT_TIME",
+            "DASHBOARD_TIME_STOP_EXIT_TIME",
+            *INDUSTRY_FLOW_WINDOW_CONFIG_NAMES,
+        }:
             normalize_env_update(name, value, "time")
         elif name == "X_WATCHLIST_ACCOUNTS":
             normalize_handle_list_update(value)
@@ -3336,6 +3607,16 @@ def validate_business_updates(updates: dict[str, str]) -> None:
         } and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
+        elif name == "DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED":
+            normalize_env_update(name, value, "playback_speed")
+        elif name == "DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT" and str(value or "").strip():
+            number = int(value)
+            if number < 1 or number > 10:
+                raise ValueError("资金流每侧行业数量必须在 1 到 10 之间")
+        elif name == "DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS" and str(value or "").strip():
+            number = int(value)
+            if number < 60 or number > 600:
+                raise ValueError("资金流采样间隔必须在 60 到 600 秒之间")
         elif name == "DASHBOARD_MAX_NEW_BUYS_PER_DECISION" and str(value or "").strip():
             if int(value) < 0:
                 raise ValueError(f"{name} 必须大于等于 0")
@@ -3365,6 +3646,12 @@ def validate_business_updates(updates: dict[str, str]) -> None:
                 raise ValueError(f"{name} 必须大于 0")
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"max_tokens", "context_length"}:
             normalize_context_length_update(value)
+    if set(updates) & set(INDUSTRY_FLOW_WINDOW_CONFIG_NAMES):
+        _industry_flow_sampling_windows_value(
+            updates,
+            fallback=INDUSTRY_FLOW_SAMPLING_WINDOWS,
+            strict=True,
+        )
 
 
 def sync_business_runtime_settings(
@@ -3373,6 +3660,8 @@ def sync_business_runtime_settings(
     sync_names: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     global ADMIN_PASSWORD, B1_CANDIDATE_REFRESH_LAST_TS, B1_SCHEDULE_TIMES
+    global INDUSTRY_FLOW_PLAYBACK_SPEED, INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS, INDUSTRY_FLOW_SIDE_LIMIT
+    global INDUSTRY_FLOW_SAMPLING_WINDOWS
     global TRADER_MODULE, TRADER_MODULE_MTIME, TRADER_SELL_SIGNALS_MTIME
     if isinstance(changed, dict):
         changed_names = set(changed.keys())
@@ -3406,6 +3695,33 @@ def sync_business_runtime_settings(
             applied.append("indices_ttl")
         except (TypeError, ValueError):
             pass
+
+    industry_flow_names = {
+        "DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED",
+        "DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT",
+        "DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS",
+        *INDUSTRY_FLOW_WINDOW_CONFIG_NAMES,
+    }
+    if changed_names & industry_flow_names:
+        INDUSTRY_FLOW_PLAYBACK_SPEED = _industry_flow_playback_speed_value(
+            env_values.get("DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED")
+            or ENV_CONFIG_BY_NAME["DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED"]["default"]
+        )
+        INDUSTRY_FLOW_SIDE_LIMIT = _bounded_int_value(
+            env_values.get("DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT"),
+            INDUSTRY_FLOW_DEFAULT_SIDE_LIMIT,
+            1,
+            10,
+        )
+        INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = _bounded_int_value(
+            env_values.get("DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS"),
+            INDUSTRY_FLOW_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+            60,
+            600,
+        )
+        INDUSTRY_FLOW_SAMPLING_WINDOWS = _industry_flow_sampling_windows_value(env_values)
+        invalidate_api_cache("industry_flow")
+        applied.append("industry_flow")
 
     iwencai_names = {
         "IWENCAI_ENABLED",
@@ -4415,10 +4731,25 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/money_flow":
             seed_api_cache_from_json_file(
                 "money_flow",
-                CRON_OUTPUT_DIR / "money_flow_dashboard_cache.json",
+                MONEY_FLOW_SNAPSHOT_FILE,
                 API_TTLS["money_flow"],
             )
-            self.send_json_cached("money_flow", API_TTLS["money_flow"], lambda: run_dashboard_helper("money_flow_dashboard_api.py", {"inflow": [], "outflow": []}, timeout=120), edge_ttl=API_TTLS["money_flow"], browser_ttl=15)
+            self.send_json_cached("money_flow", API_TTLS["money_flow"], produce_money_flow_data, edge_ttl=API_TTLS["money_flow"], browser_ttl=15)
+            return
+        if parsed.path == "/api/industry-flow":
+            seed_api_cache_from_json_file(
+                "money_flow",
+                MONEY_FLOW_SNAPSHOT_FILE,
+                API_TTLS["money_flow"],
+            )
+            ttl = API_TTLS["industry_flow"]
+            self.send_json_cached(
+                "industry_flow",
+                ttl,
+                produce_industry_flow_data,
+                edge_ttl=ttl,
+                browser_ttl=10,
+            )
             return
         if parsed.path == "/api/market_flow":
             self.send_json_cached("market_flow", API_TTLS["market_flow"], lambda: run_dashboard_helper("market_flow_dashboard_api.py", {"total_inflow_yi": None}, timeout=30), edge_ttl=API_TTLS["market_flow"], browser_ttl=10)
@@ -4791,6 +5122,7 @@ def main() -> None:
     start_b1_scheduler()
     start_pending_decision_executor()
     start_practice_equity_heartbeat()
+    start_industry_flow_sampler()
     print(f"牛牛1号：http://{args.host}:{args.port}")
     if ADMIN_PASSWORD:
         print("设置页：/admin（管理员密码保护已启用）")

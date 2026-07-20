@@ -135,6 +135,13 @@ function renderEnvInput(item) {
       "<option value='chat'" + (apiMode === 'chat' ? ' selected' : '') + ">Chat Completions（兼容模式）</option></select>" +
       "<div class='config-meta'>自动模式下，Grok 4.5 使用 Responses API，其他模型保持 Chat Completions</div>";
   }
+  if (kind === 'playback_speed') {
+    var playbackSpeed = ['0.5', '0.75', '1', '1.5', '2'].indexOf(value) >= 0 ? value : '0.5';
+    return "<select name='" + fieldName + "' aria-label='" + label + "'>" +
+      ['0.5', '0.75', '1', '1.5', '2'].map(function(speed) {
+        return "<option value='" + speed + "'" + (playbackSpeed === speed ? ' selected' : '') + ">" + speed + "x</option>";
+      }).join('') + "</select><div class='config-meta'>控制资金流页面首次播放和重播速度</div>";
+  }
   if (kind === 'cron_time' || kind === 'time') {
     var dayLabel = kind === 'cron_time' && item.day_label ? ' · ' + escapeHtml(item.day_label) : '';
     return "<input type='time' name='" + fieldName + "' aria-label='" + label + "' value='" + escapedValue + "'>" +
@@ -212,8 +219,11 @@ function renderEnvInput(item) {
       "' placeholder='默认 " + (context ? '128000；例如 128K、1M 或 1000000' : '4096；例如 2048 或 8192') +
       "' inputmode='numeric'><div class='config-meta'>默认 " + (context ? '128000 tokens；填写后保存为数字 tokens' : '4096 tokens；按所选接口映射为兼容的输出长度参数') + "</div>";
   }
+  var limits = kind === 'int'
+    ? (item.min ? " min='" + escapeHtml(item.min) + "'" : '') + (item.max ? " max='" + escapeHtml(item.max) + "'" : '')
+    : '';
   return "<input type='" + (kind === 'int' ? 'number' : 'text') + "' name='" + fieldName +
-    "' aria-label='" + label + "' value='" + escapedValue + "'>";
+    "' aria-label='" + label + "' value='" + escapedValue + "'" + limits + ">";
 }
 
 function renderNotificationField(item, compact) {

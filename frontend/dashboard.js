@@ -63,7 +63,26 @@ let usProfilesLoadingKey = '';
 let usQuotesLoadScheduled = false;
 let hotStocksData = {};
 let moneyFlowData = {inflow: [], outflow: []};
+let moneyFlowLastFetchAt = 0;
+const MONEY_FLOW_REFRESH_INTERVAL_MS = 60 * 1000;
 let marketFlowData = {total_inflow_yi: null, total_outflow_yi: null, net_flow_yi: null};
+let industryFlowData = {loading: true, loaded: false, available: false, nodes: [], links: []};
+let industryFlowLoadSeq = 0;
+let industryFlowRequestController = null;
+const industryFlowMotionReduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+const INDUSTRY_FLOW_SPEED_OPTIONS = [0.5, 0.75, 1, 1.5, 2];
+let industryFlowSpeedUserOverride = false;
+const industryFlowAnimation = {
+  frame: 0,
+  playing: !industryFlowMotionReduced,
+  speed: 0.5,
+  progress: industryFlowMotionReduced ? 1 : 0,
+  lastTime: 0,
+};
+const industryFlowSeekState = {
+  active: false,
+  wasPlaying: false,
+};
 let dragonTigerData = {loading: true, loaded: false, available: false, items: []};
 let dragonTigerSort = {key: 'net_amount_yuan', direction: 'desc'};
 let dragonTigerSelectedDate = '';
@@ -77,10 +96,11 @@ if (/^\d{4}-\d{2}-\d{2}$/.test(initialParams.get('date') || '')) {
   dragonTigerSelectedDate = initialParams.get('date') || '';
 }
 const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'dragon_tiger', 'x_monitor', 'us_ratings'];
-const CATEGORY_LABELS = {all:'全部', indices:'指数行情', practice:'模拟交易', dragon_tiger:'龙虎榜', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
+const CATEGORY_LABELS = {all:'全部', indices:'指数行情', industry_flow:'行业资金流', practice:'模拟交易', dragon_tiger:'龙虎榜', us_ratings:'美股机构买入评级', x_monitor:'推特监控', market_monitor:'盘面监控', other:'其他'};
 const CATEGORY_PATHS = {
   practice: '/practice',
   indices: '/indices',
+  industry_flow: '/industry-flow',
   market_monitor: '/market-monitor',
   dragon_tiger: '/dragon-tiger',
   x_monitor: '/x-monitor',
@@ -397,6 +417,7 @@ function visibleCategoryOrder() {
 }
 function normalizeActiveCategory(category) {
   const normalized = LEGACY_CATEGORY_ALIASES[category] || category;
+  if (normalized === 'industry_flow') return normalized;
   return visibleCategoryOrder().includes(normalized) ? normalized : 'practice';
 }
 const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v5';
@@ -481,7 +502,7 @@ function saveMarketPageState() {
 function saveViewState() {
   try {
     sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
-      data, indicesData, sectorData, usSectorData, hotStocksData, moneyFlowData, marketFlowData, dragonTigerData,
+      data, indicesData, sectorData, usSectorData, hotStocksData, moneyFlowData, marketFlowData, industryFlowData, dragonTigerData,
       usMarketSummaryData, practiceCandidatesData, niuniuPracticeData, practiceBenchmarksData, usQuotesData, usProfilesData,
       xPageOffset, xLoadedOffset, practiceCurveMode, practicePositionMode, practicePositionBriefMode, indicesViewMode,
       savedAt: Date.now()
@@ -520,6 +541,7 @@ function restoreViewState() {
     hotStocksData = cached.hotStocksData || hotStocksData;
     moneyFlowData = cached.moneyFlowData || moneyFlowData;
     marketFlowData = cached.marketFlowData || marketFlowData;
+    industryFlowData = cached.industryFlowData || industryFlowData;
     dragonTigerData = cached.dragonTigerData || dragonTigerData;
     usMarketSummaryData = (cachedMarketPageFresh && cachedMarketPageState.usMarketSummaryData)
       || cached.usMarketSummaryData
@@ -561,6 +583,7 @@ function restoreViewState() {
 }
 function hasWarmData(category) {
   if (category === 'indices') return Array.isArray(indicesData.items) && indicesData.items.length;
+  if (category === 'industry_flow') return industryFlowData.loaded === true;
   if (category === 'practice') return (Array.isArray(practiceCandidatesData.items) && practiceCandidatesData.items.length) || Array.isArray(niuniuPracticeData.equity_history);
   if (category === 'dragon_tiger') return dragonTigerData.loaded === true;
   if (category === 'x_monitor') return xLoadedOffset === xPageOffset && !!cachedXPage(xPageOffset) && Array.isArray(data.records);
@@ -686,6 +709,7 @@ function cancelXMediaRequests() {
   });
 }
 function autoRefreshIntervalMs(category = activeCategory) {
+  if (category === 'industry_flow') return 60 * 1000;
   if (category === 'dragon_tiger') return 60 * 1000;
   return category === 'us_ratings' ? US_RATINGS_AUTO_REFRESH_MS : AUTO_REFRESH_TICK_MS;
 }
@@ -697,6 +721,7 @@ async function autoRefresh() {
 }
 function loadActiveCategoryData(category = activeCategory) {
   if (category === 'indices') return loadIndices();
+  if (category === 'industry_flow') return loadIndustryFlow();
   if (category === 'practice') return loadPracticePage();
   if (category === 'market_monitor') return loadMarketMonitorAuxData();
   return null;
@@ -986,7 +1011,14 @@ async function loadIndices() {
     const secPromise = fetchJson('/api/sectors', {sectors: []});
     const usSecPromise = fetchJson('/api/us_sectors', {items: []});
     const hotPromise = fetchJson('/api/hot_stocks', {items: []});
-    const mfPromise = fetchJson('/api/money_flow', {inflow: [], outflow: []});
+    const hasMoneyFlowRows = (moneyFlowData.inflow || []).length || (moneyFlowData.outflow || []).length;
+    const moneyFlowDue = !hasMoneyFlowRows || Date.now() - moneyFlowLastFetchAt >= MONEY_FLOW_REFRESH_INTERVAL_MS;
+    const mfPromise = moneyFlowDue
+      ? fetchJson('/api/money_flow', {inflow: [], outflow: []}).then(payload => {
+          if (!payload.error) moneyFlowLastFetchAt = Date.now();
+          return payload;
+        })
+      : Promise.resolve(moneyFlowData);
     const mkfPromise = fetchJson('/api/market_flow', {total_inflow_yi: null});
     const [sec, usSec, hot, mf, mkf] = await Promise.all([secPromise, usSecPromise, hotPromise, mfPromise, mkfPromise]);
     sectorData = sec || sectorData || {sectors: []};
@@ -1000,6 +1032,63 @@ async function loadIndices() {
     console.error('indices load error', e);
     indicesData = {items: [], error: String(e)};
     if (activeCategory === 'indices') render();
+  }
+}
+async function loadIndustryFlow() {
+  const seq = ++industryFlowLoadSeq;
+  if (industryFlowRequestController) industryFlowRequestController.abort();
+  const controller = new AbortController();
+  industryFlowRequestController = controller;
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  if (!industryFlowData.loaded) {
+    industryFlowData = {...industryFlowData, loading: true};
+    if (activeCategory === 'industry_flow') render();
+  }
+  try {
+    const response = await fetch('/api/industry-flow', {
+      signal: controller.signal,
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`industry flow failed: ${response.status}`);
+    const payload = await response.json();
+    if (seq !== industryFlowLoadSeq) return;
+    if (payload?.money_flow && (Array.isArray(payload.money_flow.inflow) || Array.isArray(payload.money_flow.outflow))) {
+      moneyFlowData = payload.money_flow;
+      moneyFlowLastFetchAt = Date.now();
+    }
+    const configuredSpeed = Number(payload?.settings?.playback_speed);
+    if (!industryFlowSpeedUserOverride && INDUSTRY_FLOW_SPEED_OPTIONS.includes(configuredSpeed)) {
+      industryFlowAnimation.speed = configuredSpeed;
+    }
+    const hadIndustryFlowData = industryFlowData.loaded === true;
+    industryFlowData = {...(payload || {}), loading: false, loaded: true};
+    const timelineFrames = industryFlowTimelineFrames(industryFlowData);
+    if (timelineFrames.length > 1) {
+      industryFlowAnimation.progress = hadIndustryFlowData
+        ? Math.max(0, (timelineFrames.length - 2) / (timelineFrames.length - 1))
+        : 0;
+      industryFlowAnimation.playing = !industryFlowMotionReduced;
+    }
+    if (activeCategory === 'industry_flow') {
+      $('updated').textContent = String(industryFlowData.generated_at || '').slice(11, 19) || '--';
+      render();
+    }
+    saveViewState();
+  } catch (error) {
+    if (error?.name === 'AbortError' && seq !== industryFlowLoadSeq) return;
+    if (seq !== industryFlowLoadSeq) return;
+    console.error('industry flow load error', error);
+    industryFlowData = {
+      ...industryFlowData,
+      loading: false,
+      loaded: true,
+      error: error?.name === 'AbortError' ? '行业资金流请求超时' : String(error),
+    };
+    if (activeCategory === 'industry_flow') render();
+  } finally {
+    clearTimeout(timeout);
+    if (industryFlowRequestController === controller) industryFlowRequestController = null;
   }
 }
 function mergePracticeTimedRows(...sources) {
@@ -1192,19 +1281,21 @@ async function loadPracticePage() {
   await Promise.allSettled(tasks);
 }
 function renderTabs() {
+  const topLevelActiveCategory = activeCategory === 'industry_flow' ? 'indices' : activeCategory;
   $('categoryTabs').innerHTML = visibleCategoryOrder().map(key => {
     const count = key === 'dragon_tiger'
       ? (dragonTigerData.loaded ? ` · ${Number(dragonTigerData.unique_count ?? (dragonTigerData.items || []).length)}` : '')
       : (key === 'indices' || key === 'practice')
       ? ''
       : ` · ${data.categories?.[key]?.count || 0}`;
-    return `<a class="tab ${activeCategory === key ? 'active' : ''}" data-category="${key}" href="${CATEGORY_PATHS[key]}">${CATEGORY_LABELS[key]}${count}</a>`;
+    return `<a class="tab ${topLevelActiveCategory === key ? 'active' : ''}" data-category="${key}" href="${CATEGORY_PATHS[key]}">${CATEGORY_LABELS[key]}${count}</a>`;
   }).join('');
   document.querySelectorAll('.tab[data-category]').forEach(tab => tab.onclick = (event) => {
     event.preventDefault();
     const nextCategory = tab.dataset.category;
     if (!nextCategory || !categoryAvailable(nextCategory) || nextCategory === activeCategory) return;
     if (activeCategory === 'x_monitor') cancelXMediaRequests();
+    if (activeCategory === 'industry_flow') cancelIndustryFlowActivity();
     activeCategory = nextCategory;
     usRatingDayIndex = 0;
     ratingExpandedRowId = '';
@@ -1252,7 +1343,9 @@ function applyViewStateFromLocation() {
 }
 window.addEventListener('popstate', () => {
   const wasXMonitor = activeCategory === 'x_monitor';
+  const wasIndustryFlow = activeCategory === 'industry_flow';
   if (wasXMonitor) cancelXMediaRequests();
+  if (wasIndustryFlow) cancelIndustryFlowActivity();
   applyViewStateFromLocation();
   if (location.pathname + location.search !== currentViewUrl()) syncViewUrl();
   renderTabs();
@@ -2748,10 +2841,34 @@ function renderPracticePanel() {
   </section>`;
 }
 
+function renderIndicesViewSwitch(activePanel) {
+  const panel = ['index', 'market', 'flow'].includes(activePanel) ? activePanel : 'index';
+  return `<div class="indices-switch" role="group" aria-label="指数行情与资金流动切换">
+    <button type="button" class="indices-switch-btn ${panel === 'index' ? 'active' : ''}" aria-pressed="${panel === 'index' ? 'true' : 'false'}" onclick="setIndicesViewMode('index')">指数</button>
+    <button type="button" class="indices-switch-btn ${panel === 'market' ? 'active' : ''}" aria-pressed="${panel === 'market' ? 'true' : 'false'}" onclick="setIndicesViewMode('market')">行情</button>
+    <button type="button" class="indices-switch-btn ${panel === 'flow' ? 'active' : ''}" aria-pressed="${panel === 'flow' ? 'true' : 'false'}" onclick="setIndicesViewMode('flow')">资金流动</button>
+  </div>`;
+}
+
 function setIndicesViewMode(mode) {
-  indicesViewMode = mode === 'market' ? 'market' : 'index';
-  syncViewUrl();
-  if (activeCategory === 'indices') render();
+  const nextCategory = mode === 'flow' ? 'industry_flow' : 'indices';
+  const nextMode = mode === 'market' ? 'market' : 'index';
+  const categoryChanged = activeCategory !== nextCategory;
+  const panelChanged = nextCategory === 'indices' && indicesViewMode !== nextMode;
+  if (!categoryChanged && !panelChanged) return;
+  if (activeCategory === 'industry_flow' && nextCategory !== 'industry_flow') cancelIndustryFlowActivity();
+  activeCategory = nextCategory;
+  if (nextCategory === 'indices') indicesViewMode = nextMode;
+  syncViewUrl({push:categoryChanged});
+  renderTabs();
+  if (hasWarmData(nextCategory)) render();
+  else $('feed').innerHTML = '<div class="loading">加载中…</div>';
+  if (categoryChanged) {
+    load({background:true}).catch(error => {
+      if (error && error.name === 'AbortError') return;
+      console.error(error);
+    });
+  }
   saveViewState();
 }
 
@@ -2815,7 +2932,8 @@ function renderIndicesPanel() {
   }
   let mfHtml = '';
   if (mf.inflow && mf.inflow.length && mf.outflow && mf.outflow.length) {
-    mfHtml = `<div class="sector-cloud"><h3 style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span>主力资金流向</span></h3><div style="display:flex;gap:16px;flex-wrap:wrap"><div style="flex:1;min-width:260px">${renderFlowBlock('主力净流入前十', mf.inflow, true)}</div><div style="flex:1;min-width:260px">${renderFlowBlock('主力净流出前十', mf.outflow, false)}</div></div></div>`;
+    const moneyFlowUpdated = String(mf.generated_at || '').slice(11, 16);
+    mfHtml = `<div class="sector-cloud"><h3 style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span>主力资金流向</span><span class="flow-val">1分钟刷新${moneyFlowUpdated ? ` · 更新 ${esc(moneyFlowUpdated)}` : ''}</span></h3><div style="display:flex;gap:16px;flex-wrap:wrap"><div style="flex:1;min-width:260px">${renderFlowBlock('主力净流入前十', mf.inflow, true)}</div><div style="flex:1;min-width:260px">${renderFlowBlock('主力净流出前十', mf.outflow, false)}</div></div></div>`;
   }
   function renderMarketFlowBlock() {
     const mf = marketFlowData;
@@ -2988,10 +3106,7 @@ function renderIndicesPanel() {
     ? (marketHtml || `<div class="empty" style="padding:18px">${hasMarketPayload ? '暂无行情数据' : '行情加载中...'}</div>`)
     : (indexHtml || '<div class="empty" style="padding:18px">暂无指数数据</div>');
   return `${errorHtml}${cacheNoticeHtml}<div class="indices-page">
-    <div class="indices-switch" role="group" aria-label="指数行情切换">
-      <button type="button" class="indices-switch-btn ${activePanel === 'index' ? 'active' : ''}" aria-pressed="${activePanel === 'index' ? 'true' : 'false'}" onclick="setIndicesViewMode('index')">指数</button>
-      <button type="button" class="indices-switch-btn ${activePanel === 'market' ? 'active' : ''}" aria-pressed="${activePanel === 'market' ? 'true' : 'false'}" onclick="setIndicesViewMode('market')">行情</button>
-    </div>
+    ${renderIndicesViewSwitch(activePanel)}
     <section class="indices-part" id="${activePanel === 'market' ? 'market-overview' : 'indices-overview'}">
       <div class="indices-part-head"><div class="indices-part-title-row">${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}</div><div class="indices-part-meta">${activeMeta}</div></div>
       <div class="${activePanel === 'market' ? 'indices-market-stack' : 'indices-index-stack'}">${activeHtml}</div>
@@ -4536,7 +4651,468 @@ function renderDragonTigerPanel() {
     <div class="dragon-tiger-foot">列表按股票去重，净买入优先采用单日榜；点击股票可查看上榜理由、买卖前五机构及营业部席位与榜单明细。每日成功数据按交易日归档。数据仅用于研究和信息展示，不构成投资建议。</div>
   </section>`;
 }
+function industryFlowSizeScale(role, progress) {
+  // Kept for animation wiring tests / reduced-motion compatibility.
+  const clamped = Math.max(0, Math.min(1, Number(progress || 0)));
+  const eased = clamped * clamped * (3 - 2 * clamped);
+  return role === 'inflow' ? 0.55 + eased * 0.45 : 1 - eased * 0.45;
+}
+function industryFlowBarWidthPercent(magnitude, maxMagnitude) {
+  const maxValue = Math.max(1e-6, Number(maxMagnitude || 0));
+  const value = Math.max(0, Number(magnitude || 0));
+  return Math.max(4, Math.min(100, value / maxValue * 100));
+}
+const INDUSTRY_FLOW_SIDE_LIMIT = 10;
+const INDUSTRY_FLOW_RANK_ANIMATION_MS = 420;
+const INDUSTRY_FLOW_SAMPLE_PLAYBACK_MS = 460;
+const INDUSTRY_FLOW_MIN_PLAYBACK_MS = 9000;
+const INDUSTRY_FLOW_MAX_PLAYBACK_MS = 110000;
+function industryFlowPlaybackDuration(frameCount) {
+  const intervals = Math.max(1, Number(frameCount || 0) - 1);
+  return Math.max(
+    INDUSTRY_FLOW_MIN_PLAYBACK_MS,
+    Math.min(INDUSTRY_FLOW_MAX_PLAYBACK_MS, intervals * INDUSTRY_FLOW_SAMPLE_PLAYBACK_MS),
+  );
+}
+function industryFlowConfiguredSideLimit(payload = industryFlowData) {
+  const configured = Math.round(Number(payload?.settings?.side_limit));
+  return Number.isFinite(configured)
+    ? Math.max(1, Math.min(INDUSTRY_FLOW_SIDE_LIMIT, configured))
+    : INDUSTRY_FLOW_SIDE_LIMIT;
+}
+function industryFlowSplitSortedNodes(nodes, sideLimit = industryFlowConfiguredSideLimit()) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const limit = Math.max(1, Math.min(INDUSTRY_FLOW_SIDE_LIMIT, Math.round(Number(sideLimit) || INDUSTRY_FLOW_SIDE_LIMIT)));
+  const outflow = list
+    .filter(node => Number(node.net_flow_yi || 0) < 0)
+    .sort((left, right) => Math.abs(Number(right.net_flow_yi || 0)) - Math.abs(Number(left.net_flow_yi || 0)))
+    .slice(0, limit);
+  const inflow = list
+    .filter(node => Number(node.net_flow_yi || 0) > 0)
+    .sort((left, right) => Number(right.net_flow_yi || 0) - Number(left.net_flow_yi || 0))
+    .slice(0, limit);
+  return {outflow, inflow};
+}
+function animateIndustryFlowRankChanges(listEl, previousPositions, previousOrder, nextOrder, role) {
+  if (industryFlowMotionReduced || !listEl || !previousOrder.length) return;
+  if (previousOrder.length === nextOrder.length && previousOrder.every((id, index) => id === nextOrder[index])) return;
+  listEl.querySelectorAll('[data-flow-node-id]').forEach(row => {
+    if (typeof row.animate !== 'function') return;
+    const previousTop = previousPositions.get(row.dataset.flowNodeId);
+    const currentTop = row.getBoundingClientRect().top;
+    if (row._industryFlowRankAnimation) row._industryFlowRankAnimation.cancel();
+    if (Number.isFinite(previousTop)) {
+      const deltaY = previousTop - currentTop;
+      if (Math.abs(deltaY) < 0.5) return;
+      row._industryFlowRankAnimation = row.animate([
+        {transform:`translateY(${deltaY}px)`},
+        {transform:'translateY(0)'},
+      ], {
+        duration: INDUSTRY_FLOW_RANK_ANIMATION_MS,
+        easing: 'cubic-bezier(.22,.8,.24,1)',
+      });
+      return;
+    }
+    row._industryFlowRankAnimation = row.animate([
+      {opacity:0, transform:`translateY(${role === 'inflow' ? 8 : -8}px)`},
+      {opacity:1, transform:'translateY(0)'},
+    ], {
+      duration: Math.round(INDUSTRY_FLOW_RANK_ANIMATION_MS * 0.72),
+      easing: 'cubic-bezier(.22,.8,.24,1)',
+    });
+  });
+}
+function industryFlowRenderBarRow(node, maxMagnitude, rank) {
+  const net = Number(node.net_flow_yi || 0);
+  const role = net >= 0 ? 'inflow' : 'outflow';
+  const magnitude = Math.abs(net);
+  const width = industryFlowBarWidthPercent(magnitude, maxMagnitude);
+  const scale = width / 100;
+  const signed = industryFlowSignedYi(net);
+  const accessibleLabel = `${node.name}：主力${role === 'inflow' ? '净流入' : '净流出'} ${signed}`;
+  return `<div class="flow-bar-row ${role}" data-flow-node-id="${esc(node.id)}" data-flow-role="${role}" style="order:${rank}" aria-label="${esc(accessibleLabel)}">
+    <div class="flow-bar-meta">
+      <span class="flow-bar-name" data-flow-name>${esc(node.name)}</span>
+      <b class="flow-bar-value" data-flow-value>${signed}</b>
+    </div>
+    <span class="flow-bar-track"><i data-flow-bar style="transform:scaleX(${scale.toFixed(4)})"></i></span>
+  </div>`;
+}
+function industryFlowYi(value, digits = 1) {
+  return `${fmtNumber(value, digits)}亿`;
+}
+function industryFlowSignedYi(value) {
+  const raw = Number(value || 0);
+  const number = Math.abs(raw) < 0.05 ? 0 : raw;
+  return `${number >= 0 ? '+' : ''}${fmtNumber(number, 1)}亿`;
+}
+function industryFlowTimelineFrames(payload = industryFlowData) {
+  return (Array.isArray(payload?.timeline) ? payload.timeline : [])
+    .filter(frame => frame && Array.isArray(frame.nodes) && frame.nodes.length)
+    .sort((left, right) => String(left.generated_at || '').localeCompare(String(right.generated_at || '')));
+}
+function industryFlowInterpolatedTime(leftTime, rightTime, ratio) {
+  const parseClock = value => {
+    const match = String(value || '').match(/^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (!match) return null;
+    return {date: match[1], seconds: Number(match[2]) * 3600 + Number(match[3]) * 60 + Number(match[4])};
+  };
+  const left = parseClock(leftTime);
+  const right = parseClock(rightTime);
+  if (!left || !right || left.date !== right.date) return ratio < 0.5 ? String(leftTime || '') : String(rightTime || '');
+  const seconds = Math.round(left.seconds + (right.seconds - left.seconds) * ratio);
+  const clock = [Math.floor(seconds / 3600), Math.floor(seconds % 3600 / 60), seconds % 60]
+    .map(value => String(value).padStart(2, '0')).join(':');
+  return `${left.date} ${clock}`;
+}
+function industryFlowTimelineFrame(progress, payload = industryFlowData) {
+  const frames = industryFlowTimelineFrames(payload);
+  if (frames.length < 2) return null;
+  const clamped = Math.max(0, Math.min(1, Number(progress || 0)));
+  const position = clamped * (frames.length - 1);
+  const leftIndex = Math.min(frames.length - 1, Math.floor(position));
+  const rightIndex = Math.min(frames.length - 1, leftIndex + 1);
+  const ratio = Math.max(0, Math.min(1, position - leftIndex));
+  const left = frames[leftIndex];
+  const right = frames[rightIndex];
+  const leftById = new Map(left.nodes.map(node => [node.id, node]));
+  const rightById = new Map(right.nodes.map(node => [node.id, node]));
+  const universeById = new Map();
+  for (const node of [...(Array.isArray(payload.nodes) ? payload.nodes : []), ...left.nodes, ...right.nodes]) {
+    if (!node?.id) continue;
+    universeById.set(node.id, {...(universeById.get(node.id) || {}), ...node});
+  }
+  const nodes = industryFlowApplyEqualChipVolumes([...universeById.values()].map(base => {
+    const before = leftById.get(base.id) || {net_flow_yi: 0, inflow_yi: 0, outflow_yi: 0};
+    const after = rightById.get(base.id) || {net_flow_yi: 0, inflow_yi: 0, outflow_yi: 0};
+    const interpolate = key => Number(before[key] || 0) + (Number(after[key] || 0) - Number(before[key] || 0)) * ratio;
+    const netFlow = interpolate('net_flow_yi');
+    return {
+      ...base,
+      role: Math.abs(netFlow) < 0.0001 ? base.role : (netFlow > 0 ? 'inflow' : 'outflow'),
+      net_flow_yi: netFlow,
+      magnitude_yi: Math.abs(netFlow),
+      inflow_yi: interpolate('inflow_yi'),
+      outflow_yi: interpolate('outflow_yi'),
+    };
+  }));
+  const visible = industryFlowSplitSortedNodes(nodes, industryFlowConfiguredSideLimit(payload));
+  const visibleNodes = [...visible.outflow, ...visible.inflow];
+  const visibleInflow = visible.inflow.reduce((sum, node) => sum + Math.max(0, Number(node.net_flow_yi || 0)), 0);
+  const visibleOutflow = visible.outflow.reduce((sum, node) => sum + Math.max(0, -Number(node.net_flow_yi || 0)), 0);
+  return {
+    generated_at: industryFlowInterpolatedTime(left.generated_at, right.generated_at, ratio),
+    nodes: visibleNodes,
+    totals: {
+      visible_inflow_yi: visibleInflow,
+      visible_outflow_yi: visibleOutflow,
+      visible_balance_yi: visibleInflow - visibleOutflow,
+      inflow_count: visible.inflow.length,
+      outflow_count: visible.outflow.length,
+    },
+  };
+}
+function industryFlowApplyEqualChipVolumes(nodes) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  if (!list.length) return list;
+  const base = 1;
+  const alpha = 0.8;
+  const scaleMin = 8;
+  const scale = Math.max(scaleMin, ...list.map(node => Math.abs(Number(node.net_flow_yi || 0))));
+  return list.map(node => {
+    const net = Number(node.net_flow_yi || 0);
+    const score = Math.max(-1, Math.min(1, net / scale));
+    return {
+      ...node,
+      base_volume_yi: base,
+      volume_scale_yi: scale,
+      volume_score: score,
+      volume_yi: base + alpha * score,
+      magnitude_yi: Math.abs(net),
+    };
+  });
+}
+function industryFlowMaxMagnitude(nodes) {
+  const values = (Array.isArray(nodes) ? nodes : []).map(node => Math.abs(Number(node.net_flow_yi || 0)));
+  return Math.max(1, ...values, 1);
+}
+function renderIndustryFlowPage() {
+  const payload = industryFlowData || {};
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+  const sectionSwitch = renderIndicesViewSwitch('flow');
+  if (payload.loading && !payload.loaded) {
+    return `<div class="indices-page">${sectionSwitch}<div class="industry-flow-loading">正在加载行业资金流…</div></div>`;
+  }
+  if (!nodes.length) {
+    const detail = payload.error ? `：${esc(payload.error)}` : '';
+    return `<div class="indices-page">${sectionSwitch}<section class="sector-cloud industry-flow-empty"><h2>行业主力资金流</h2><div class="empty">行业主力资金流暂不可用${detail}</div></section></div>`;
+  }
+
+  const timelineFrames = industryFlowTimelineFrames(payload);
+  const actualPlayback = timelineFrames.length > 1;
+  const visualProgress = Math.min(1, industryFlowAnimation.progress / 0.82);
+  const maxMagnitude = industryFlowMaxMagnitude(nodes);
+  const {outflow: outflowNodes, inflow: inflowNodes} = industryFlowSplitSortedNodes(
+    nodes,
+    industryFlowConfiguredSideLimit(payload),
+  );
+  const outflowMarkup = outflowNodes.map((node, index) => industryFlowRenderBarRow(node, maxMagnitude, index)).join('');
+  const inflowMarkup = inflowNodes.map((node, index) => industryFlowRenderBarRow(node, maxMagnitude, index)).join('');
+  const staleNotice = payload.stale_cache
+    ? '<div class="industry-flow-notice">当前展示最近一次有效快照，后台数据源正在重试。</div>'
+    : '';
+  const errorNotice = payload.error && nodes.length
+    ? `<div class="industry-flow-notice warning">实时更新失败，继续展示可用快照：${esc(payload.error)}</div>`
+    : '';
+  const samplingStatus = actualPlayback
+    ? `${timelineFrames.length} 个真实采样点 · ${String(timelineFrames[0].generated_at || '').slice(11, 16)}—${String(timelineFrames.at(-1)?.generated_at || '').slice(11, 16)}`
+    : `采样积累中 · ${Number(payload.sampling?.interval_seconds || 60)} 秒/点`;
+  const playLabel = industryFlowAnimation.playing ? '暂停' : '播放';
+  const speedOptions = INDUSTRY_FLOW_SPEED_OPTIONS.map(speed =>
+    `<option value="${speed}" ${industryFlowAnimation.speed === speed ? 'selected' : ''}>${speed}x</option>`
+  ).join('');
+  const samplingWindows = Array.isArray(payload.sampling?.windows) && payload.sampling.windows.length >= 2
+    ? payload.sampling.windows
+    : [{start:'09:25', end:'11:31'}, {start:'13:00', end:'15:01'}];
+  const morningWindow = samplingWindows[0] || {};
+  const afternoonWindow = samplingWindows[1] || {};
+  return `<div class="indices-page">
+    ${sectionSwitch}
+    <div class="industry-flow-page">
+    ${staleNotice}${errorNotice}
+    <section class="industry-flow-hero">
+      <div class="industry-flow-heading">
+        <div>
+          <h2>行业主力资金流动</h2>
+        </div>
+        <div class="industry-flow-meta">
+          <span>更新 ${esc(payload.generated_at || '--')}</span>
+          <span>${esc(payload.source || '行业主力净额即时快照')}</span>
+          <span id="industryFlowSampleTime">${esc(samplingStatus)}</span>
+        </div>
+      </div>
+      <div class="industry-flow-toolbar">
+        <div class="industry-flow-controls">
+          <button type="button" id="industryFlowPlay" onclick="toggleIndustryFlowAnimation()" aria-pressed="${industryFlowAnimation.playing ? 'true' : 'false'}">${playLabel}</button>
+          <button type="button" onclick="replayIndustryFlowAnimation()">重播</button>
+          <label>速度<select aria-label="资金流动画速度" onchange="setIndustryFlowSpeed(this.value)">${speedOptions}</select></label>
+        </div>
+      </div>
+      <div id="industryFlowStage" class="flow-bars-stage" data-actual-playback="${actualPlayback ? 'true' : 'false'}" role="img" aria-label="行业主力资金中心对称条形图：左侧主力净流出，右侧主力净流入，均按主力净额绝对值从大到小排序">
+        <div class="flow-bars-split">
+          <div class="flow-bars-col outflow">
+            <div class="flow-bars-col-list" data-flow-out-list>${outflowMarkup || '<div class="flow-bars-empty">暂无净流出板块</div>'}</div>
+          </div>
+          <div class="flow-bars-axis" aria-hidden="true"><span></span></div>
+          <div class="flow-bars-col inflow">
+            <div class="flow-bars-col-list" data-flow-in-list>${inflowMarkup || '<div class="flow-bars-empty">暂无净流入板块</div>'}</div>
+          </div>
+        </div>
+      </div>
+      <div class="industry-flow-progress" aria-label="动画进度">
+        <div class="industry-flow-progress-main">
+          <div class="industry-flow-progress-track">
+            <span id="industryFlowProgressBar" style="width:${((actualPlayback ? industryFlowAnimation.progress : visualProgress) * 100).toFixed(1)}%"></span>
+            <input type="range" id="industryFlowSeek" class="industry-flow-progress-seek" min="0" max="1000" step="1" value="${Math.round((actualPlayback ? industryFlowAnimation.progress : visualProgress) * 1000)}" aria-label="拖动资金流播放进度" onpointerdown="beginIndustryFlowSeek()" onpointerup="endIndustryFlowSeek()" onpointercancel="endIndustryFlowSeek()" onkeydown="beginIndustryFlowSeek()" onkeyup="endIndustryFlowSeek()" onblur="endIndustryFlowSeek()" oninput="seekIndustryFlowAnimation(this.value)">
+          </div>
+          <div class="industry-flow-progress-times" aria-label="采样时间段">
+            <span>${esc(morningWindow.start || '--')}</span>
+            <span>${esc(morningWindow.end || '--')} / ${esc(afternoonWindow.start || '--')}</span>
+            <span>${esc(afternoonWindow.end || '--')}</span>
+          </div>
+        </div>
+        <span id="industryFlowProgressText">${actualPlayback ? `采样 ${String(timelineFrames[0].generated_at || '').slice(11, 19)}` : `进度 ${Math.round(visualProgress * 100)}%`}</span>
+      </div>
+    </section>
+    </div>
+  </div>`;
+}
+function updateIndustryFlowFrame(progress) {
+  const stage = $('industryFlowStage');
+  if (!stage) return;
+  const sampledFrame = industryFlowTimelineFrame(progress);
+  const nodes = sampledFrame?.nodes || (Array.isArray(industryFlowData.nodes) ? industryFlowData.nodes : []);
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const visualProgress = Math.min(1, Math.max(0, Number(progress || 0)) / 0.82);
+  const playbackProgress = Math.max(0, Math.min(1, Number(progress || 0)));
+  const actualPlayback = stage.dataset.actualPlayback === 'true' && sampledFrame;
+  const maxMagnitude = industryFlowMaxMagnitude(nodes);
+  const {outflow, inflow} = industryFlowSplitSortedNodes(nodes, industryFlowConfiguredSideLimit());
+  const outList = stage.querySelector('[data-flow-out-list]');
+  const inList = stage.querySelector('[data-flow-in-list]');
+  const placeRows = (listEl, sortedNodes, role) => {
+    if (!listEl) return;
+    const previousRows = [...listEl.querySelectorAll('[data-flow-node-id]')];
+    const previousOrder = previousRows.map(row => row.dataset.flowNodeId);
+    const nextOrder = sortedNodes.map(node => node.id);
+    const orderChanged = previousOrder.length !== nextOrder.length
+      || previousOrder.some((id, index) => id !== nextOrder[index]);
+    const previousPositions = orderChanged
+      ? new Map(previousRows.map(row => [row.dataset.flowNodeId, row.getBoundingClientRect().top]))
+      : new Map();
+    const empty = listEl.querySelector('.flow-bars-empty');
+    if (!sortedNodes.length) {
+      if (!empty) listEl.innerHTML = `<div class="flow-bars-empty">暂无净${role === 'inflow' ? '流入' : '流出'}板块</div>`;
+      return;
+    }
+    if (empty) empty.remove();
+    const existing = new Map([...listEl.querySelectorAll('[data-flow-node-id]')].map(row => [row.dataset.flowNodeId, row]));
+    sortedNodes.forEach((node, index) => {
+      let row = existing.get(node.id);
+      if (!row) {
+        listEl.insertAdjacentHTML('beforeend', industryFlowRenderBarRow(node, maxMagnitude, index));
+        row = [...listEl.querySelectorAll('[data-flow-node-id]')].find(el => el.dataset.flowNodeId === node.id);
+      }
+      if (!row) return;
+      existing.delete(node.id);
+      row.style.order = String(index);
+      row.classList.toggle('inflow', role === 'inflow');
+      row.classList.toggle('outflow', role === 'outflow');
+      row.dataset.flowRole = role;
+      const magnitude = Math.abs(Number(node.net_flow_yi || 0));
+      const signed = industryFlowSignedYi(node.net_flow_yi);
+      const value = row.querySelector('[data-flow-value]');
+      const name = row.querySelector('[data-flow-name]');
+      const bar = row.querySelector('[data-flow-bar]');
+      const accessibleLabel = `${node.name}：主力${role === 'inflow' ? '净流入' : '净流出'} ${signed}`;
+      if (value && value.textContent !== signed) value.textContent = signed;
+      if (name && name.textContent !== node.name) name.textContent = node.name;
+      if (bar) {
+        const nextTransform = `scaleX(${(industryFlowBarWidthPercent(magnitude, maxMagnitude) / 100).toFixed(4)})`;
+        if (bar.style.transform !== nextTransform) bar.style.transform = nextTransform;
+      }
+      if (row.getAttribute('aria-label') !== accessibleLabel) row.setAttribute('aria-label', accessibleLabel);
+      if (orderChanged) listEl.appendChild(row);
+    });
+    existing.forEach(row => row.remove());
+    if (orderChanged && !industryFlowSeekState.active) {
+      animateIndustryFlowRankChanges(listEl, previousPositions, previousOrder, nextOrder, role);
+    }
+  };
+  placeRows(outList, outflow, 'outflow');
+  placeRows(inList, inflow, 'inflow');
+
+  const bar = $('industryFlowProgressBar');
+  const seek = $('industryFlowSeek');
+  const text = $('industryFlowProgressText');
+  const displayedProgress = actualPlayback ? playbackProgress : visualProgress;
+  if (bar) bar.style.width = `${(displayedProgress * 100).toFixed(1)}%`;
+  if (seek) seek.value = String(Math.round(displayedProgress * 1000));
+  if (text) {
+    text.textContent = actualPlayback
+      ? `${industryFlowAnimation.playing ? '采样' : '已暂停'} ${String(sampledFrame.generated_at || '').slice(11, 19)}`
+      : `${industryFlowAnimation.playing ? '播放' : '已暂停'} ${Math.round(visualProgress * 100)}%`;
+  }
+  if (seek && text) seek.setAttribute('aria-valuetext', text.textContent || '');
+  if (actualPlayback && $('industryFlowSampleTime')) {
+    $('industryFlowSampleTime').textContent = `播放时间 ${String(sampledFrame.generated_at || '').slice(11, 19)} · ${industryFlowTimelineFrames().length} 个真实采样点`;
+  }
+}
+function syncIndustryFlowControls() {
+  const button = $('industryFlowPlay');
+  if (!button) return;
+  button.textContent = industryFlowAnimation.playing ? '暂停' : '播放';
+  button.setAttribute('aria-pressed', industryFlowAnimation.playing ? 'true' : 'false');
+}
+function beginIndustryFlowSeek() {
+  if (industryFlowSeekState.active) return;
+  industryFlowSeekState.active = true;
+  industryFlowSeekState.wasPlaying = industryFlowAnimation.playing;
+  industryFlowAnimation.playing = false;
+  if (industryFlowAnimation.frame) cancelAnimationFrame(industryFlowAnimation.frame);
+  industryFlowAnimation.frame = 0;
+  syncIndustryFlowControls();
+}
+function seekIndustryFlowAnimation(value) {
+  const requested = Math.max(0, Math.min(1, Number(value || 0) / 1000));
+  const actualPlayback = industryFlowTimelineFrames().length > 1;
+  industryFlowAnimation.progress = actualPlayback ? requested : requested * 0.82;
+  industryFlowAnimation.lastTime = performance.now();
+  updateIndustryFlowFrame(industryFlowAnimation.progress);
+}
+function endIndustryFlowSeek() {
+  if (!industryFlowSeekState.active) return;
+  const shouldResume = industryFlowSeekState.wasPlaying;
+  industryFlowSeekState.active = false;
+  industryFlowSeekState.wasPlaying = false;
+  if (shouldResume) {
+    industryFlowAnimation.playing = true;
+    startIndustryFlowAnimation();
+  } else {
+    syncIndustryFlowControls();
+  }
+}
+function startIndustryFlowAnimation() {
+  if (industryFlowAnimation.frame) cancelAnimationFrame(industryFlowAnimation.frame);
+  industryFlowAnimation.frame = 0;
+  if (!$('industryFlowStage')) return;
+  industryFlowAnimation.lastTime = performance.now();
+  updateIndustryFlowFrame(industryFlowAnimation.progress);
+  syncIndustryFlowControls();
+  if (!industryFlowAnimation.playing) return;
+  const timelineFrames = industryFlowTimelineFrames();
+  const actualPlayback = timelineFrames.length > 1;
+  const tick = now => {
+    if (activeCategory !== 'industry_flow' || !industryFlowAnimation.playing) {
+      industryFlowAnimation.frame = 0;
+      return;
+    }
+    const delta = Math.min(80, Math.max(0, now - industryFlowAnimation.lastTime));
+    industryFlowAnimation.lastTime = now;
+    const baseDuration = actualPlayback ? industryFlowPlaybackDuration(timelineFrames.length) : 7200;
+    const duration = baseDuration / industryFlowAnimation.speed;
+    const nextProgress = industryFlowAnimation.progress + delta / duration;
+    if (actualPlayback && nextProgress >= 1) {
+      industryFlowAnimation.progress = 1;
+      industryFlowAnimation.playing = false;
+      updateIndustryFlowFrame(1);
+      syncIndustryFlowControls();
+      industryFlowAnimation.frame = 0;
+      return;
+    }
+    industryFlowAnimation.progress = actualPlayback ? nextProgress : nextProgress % 1;
+    updateIndustryFlowFrame(industryFlowAnimation.progress);
+    industryFlowAnimation.frame = requestAnimationFrame(tick);
+  };
+  industryFlowAnimation.frame = requestAnimationFrame(tick);
+}
+function toggleIndustryFlowAnimation() {
+  industryFlowAnimation.playing = !industryFlowAnimation.playing;
+  if (industryFlowAnimation.playing) {
+    if (industryFlowTimelineFrames().length > 1 && industryFlowAnimation.progress >= 1) industryFlowAnimation.progress = 0;
+    startIndustryFlowAnimation();
+  }
+  else {
+    if (industryFlowAnimation.frame) cancelAnimationFrame(industryFlowAnimation.frame);
+    industryFlowAnimation.frame = 0;
+    updateIndustryFlowFrame(industryFlowAnimation.progress);
+    syncIndustryFlowControls();
+  }
+}
+function replayIndustryFlowAnimation() {
+  industryFlowAnimation.progress = 0;
+  industryFlowAnimation.playing = true;
+  startIndustryFlowAnimation();
+}
+function setIndustryFlowSpeed(value) {
+  const speed = Number(value);
+  if (!INDUSTRY_FLOW_SPEED_OPTIONS.includes(speed)) return;
+  industryFlowSpeedUserOverride = true;
+  industryFlowAnimation.speed = speed;
+  industryFlowAnimation.lastTime = performance.now();
+}
+function stopIndustryFlowAnimation() {
+  if (industryFlowAnimation.frame) cancelAnimationFrame(industryFlowAnimation.frame);
+  industryFlowAnimation.frame = 0;
+}
+function cancelIndustryFlowActivity() {
+  stopIndustryFlowAnimation();
+  industryFlowLoadSeq += 1;
+  if (industryFlowRequestController) industryFlowRequestController.abort();
+  industryFlowRequestController = null;
+}
 function render() {
+  if (activeCategory !== 'industry_flow') stopIndustryFlowAnimation();
   if (activeCategory === 'indices') {
     $('feed').innerHTML = renderIndicesPanel();
     return;
@@ -4544,6 +5120,11 @@ function render() {
   if (activeCategory === 'practice') {
     renderPracticePage();
     renderPracticeCalendarModal();
+    return;
+  }
+  if (activeCategory === 'industry_flow') {
+    $('feed').innerHTML = renderIndustryFlowPage();
+    startIndustryFlowAnimation();
     return;
   }
   if (activeCategory === 'dragon_tiger') {

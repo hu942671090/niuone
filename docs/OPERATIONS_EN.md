@@ -105,7 +105,26 @@ The trading-decision intelligence bundle is enabled by default. Each model decis
 
 The canonical URL for the Practice page is `/?category=practice`. The candidate query and refresh endpoints are `/api/practice_candidates` and `/api/practice_candidates/refresh`, respectively. The old `category=b1_screen` and `/api/b1_screen` paths are retained only as compatibility entry points.
 
-### 3.1 Practice-Strategy Scheduling and Process Ownership
+### 3.1 Market Data and Fund-Flow Settings
+
+The **Market Data and Fund-Flow Settings** page groups index refresh and industry fund-flow controls:
+
+| Setting | Default | Allowed range | Application |
+|---|---:|---:|---|
+| `DASHBOARD_INDICES_TTL_SECONDS` | `60` | Greater than 0 seconds | Hot-applied |
+| `DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED` | `0.5` | `0.5`, `0.75`, `1`, `1.5`, or `2` | Hot-applied; used on the next fund-flow page load |
+| `DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT` | `10` | `1`–`10` industries per side | Hot-applied; used by the next fund-flow request |
+| `DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS` | `60` | `60`–`600` seconds | Hot-applied; used by the next sampler cycle |
+| `DASHBOARD_INDUSTRY_FLOW_MORNING_START` | `09:25` | China-time `HH:MM` | Hot-applied; used by the next sampler check |
+| `DASHBOARD_INDUSTRY_FLOW_MORNING_END` | `11:31` | China-time `HH:MM` | Hot-applied; used by the next sampler check |
+| `DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START` | `13:00` | China-time `HH:MM` | Hot-applied; used by the next sampler check |
+| `DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END` | `15:01` | China-time `HH:MM` | Hot-applied; used by the next sampler check |
+
+By default, industry fund flow is sampled only on A-share trading days during 09:25–11:31 and 13:00–15:01 China time. All four boundaries can be edited on the settings page and must satisfy morning start < morning end < afternoon start < afternoon end. Changing the window or interval does not delete stored real samples; points outside the active window are excluded from playback, and new samples follow the updated window and minimum spacing.
+
+The **Main Fund Flow** ranking on the indices page and the fund-flow animation share Eastmoney's industry-board **Today Main Net Amount** metric (`f62`, converted from yuan to CNY 100 million) and the same 60-second cache. New snapshots and samples are stored in `industry_main_money_flow_cache.json` and `industry_main_flow_history.json`, respectively. Legacy files based on total inflow minus total outflow are retained but are never mixed into main-net playback.
+
+### 3.2 Practice-Strategy Scheduling and Process Ownership
 
 Individual practice strategies do not own separate candidate-scan timers. At every configured time, the B1 scheduler inside the Dashboard starts the shared scanner. The scanner reads `DASHBOARD_ACTIVE_STRATEGY` and runs only the scorers in that active suite. After a successful scan, the scheduled path synchronously runs the model assessment and simulated execution-layer checks.
 
