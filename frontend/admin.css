@@ -344,3 +344,51 @@ textarea:focus { border-color:var(--accent); outline-color:var(--accent); }
   .admin-header-actions { width:auto; }
   .admin-header-actions .toplink { width:auto; flex:0 1 auto; }
 }
+
+.model-test-panel {
+  margin:16px 18px 4px;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:var(--surface2);
+  overflow:hidden;
+}
+.model-test-panel-head { padding:14px 16px; border-bottom:1px solid var(--line); }
+.model-test-panel-title { color:var(--text); font-size:14px; font-weight:850; }
+.model-test-panel-note { margin-top:4px; color:var(--muted); font-size:12px; line-height:1.5; }
+.model-test-list { display:grid; }
+.model-test-row {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(240px,.8fr);
+  gap:16px;
+  align-items:center;
+  padding:14px 16px;
+  border-top:1px solid var(--line);
+  background:var(--surface);
+}
+.model-test-row:first-child { border-top:0; }
+.model-test-copy,
+.model-test-action { display:grid; gap:5px; min-width:0; }
+.model-test-label { color:var(--text); font-size:13px; font-weight:850; }
+.model-test-description,
+.model-test-status { color:var(--muted); font-size:12px; line-height:1.45; overflow-wrap:anywhere; }
+.model-test-button {
+  justify-self:start;
+  border:1px solid var(--accent-border);
+  background:var(--accent-soft);
+  color:var(--accent-text);
+  box-shadow:none;
+  min-width:132px;
+}
+.model-test-button:hover:not(:disabled) { border-color:var(--accent); background:var(--accent-soft); }
+.model-test-button:disabled { cursor:wait; opacity:.78; }
+.model-test-button.is-ok { border-color:var(--green-border); background:var(--green-soft); color:var(--green-text); }
+.model-test-button.is-error { border-color:var(--red-border); background:var(--red-soft); color:var(--red-text); }
+.model-test-status.is-busy { color:var(--accent-text); }
+.model-test-status.is-ok { color:var(--green-text); }
+.model-test-status.is-error { color:var(--red-text); }
+
+@media(max-width:620px) {
+  .model-test-panel { margin:12px; }
+  .model-test-row { grid-template-columns:1fr; gap:10px; padding:13px; }
+  .model-test-button { width:100%; }
+}

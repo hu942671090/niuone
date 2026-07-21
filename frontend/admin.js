@@ -287,6 +287,24 @@ function renderNotificationSettings(items) {
     "<div class='notification-channel-grid' data-notification-channel-list>" + cards + "</div></div></div>";
 }
 
+function renderModelTests(slug) {
+  var tests = (adminConfig.model_tests || []).filter(function(test) { return test.group_slug === slug; });
+  if (!tests.length) return '';
+  var rows = tests.map(function(test) {
+    var statusId = 'model-test-status-' + escapeHtml(test.id);
+    return "<div class='model-test-row'><div class='model-test-copy'><div class='model-test-label'>" +
+      escapeHtml(test.label || '模型') + "</div><div class='model-test-description'>" +
+      escapeHtml(test.description || '验证当前模型配置是否可用。') + "</div></div>" +
+      "<div class='model-test-action'><button type='button' class='model-test-button' data-model-test='" +
+      escapeHtml(test.id) + "' aria-describedby='" + statusId + "'>测试模型连接</button>" +
+      "<div class='model-test-status' id='" + statusId + "' data-model-test-status role='status' aria-live='polite'></div></div></div>";
+  }).join('');
+  return "<section class='model-test-panel' aria-label='模型连通性测试'><div class='model-test-panel-head'>" +
+    "<div><div class='model-test-panel-title'>模型连通性测试</div>" +
+    "<div class='model-test-panel-note'>测试页面当前填写值，不会自动保存；API Key 留空时安全复用已保存密钥。</div></div></div>" +
+    "<div class='model-test-list'>" + rows + "</div></section>";
+}
+
 function renderSettingsGroup(slug) {
   var group = (adminConfig.groups || []).find(function(entry) { return entry.slug === slug; });
   if (!group) {
@@ -301,6 +319,7 @@ function renderSettingsGroup(slug) {
   var usEnabled = !!toggle && isTruthy(toggle.effective || toggle.file_value);
   var gatedNames = new Set((adminConfig.ui && adminConfig.ui.us_feature_gated_names) || []);
   var strategyPreset = adminConfig.ui && adminConfig.ui.strategy_preset_name;
+  var modelTests = renderModelTests(slug);
   var body;
   var countLabel;
   if (group.name === '交易通知') {
@@ -329,7 +348,7 @@ function renderSettingsGroup(slug) {
     "<input type='hidden' name='settings_group' value='" + escapeHtml(slug) + "'>" +
     "<section class='settings-group' id='settings-" + escapeHtml(slug) + "'><div class='settings-group-head'><div><h2>" +
     escapeHtml(group.name) + "</h2>" + (group.note ? "<p class='settings-group-note'>" + escapeHtml(group.note) + "</p>" : '') +
-    "</div><span class='settings-count'>" + escapeHtml(countLabel) + "</span></div>" + body +
+    "</div><span class='settings-count'>" + escapeHtml(countLabel) + "</span></div>" + body + modelTests +
     "<div class='settings-actions'><div class='settings-save-status' data-env-save-status role='status' aria-live='polite'></div>" +
     "<button class='save-button' data-env-save-button type='submit'>保存本组设置</button></div></section></form></div>";
   syncUsFeatureSettings();
@@ -624,11 +643,13 @@ document.addEventListener('input', function(event) {
   var target = event.target;
   var form = target && target.closest ? target.closest('#env-config-form') : null;
   resetEnvSaveIfDirty(form);
+  clearModelTestFeedback(form);
 });
 document.addEventListener('change', function(event) {
   var target = event.target;
   var form = target && target.closest ? target.closest('#env-config-form') : null;
   resetEnvSaveIfDirty(form);
+  clearModelTestFeedback(form);
 });
 document.addEventListener('keydown', function(event) {
   if (!event || String(event.key || '').toLowerCase() !== 's' || (!event.metaKey && !event.ctrlKey) || event.altKey) return;
@@ -717,6 +738,39 @@ function notificationTestBody(card) {
   if (timeout) params.set(timeout.name, String(timeout.value || '').trim());
   return params;
 }
+function setModelTestFeedback(button, state, message) {
+  if (!button) return;
+  var row = button.closest('.model-test-row');
+  var status = row ? row.querySelector('[data-model-test-status]') : null;
+  if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent || '测试模型连接';
+  button.classList.remove('is-busy', 'is-ok', 'is-error');
+  button.disabled = state === 'busy';
+  if (state) button.classList.add('is-' + state);
+  button.textContent = state === 'busy' ? '测试中...' : button.dataset.defaultText;
+  if (status) {
+    status.textContent = message || '';
+    status.className = 'model-test-status' + (state ? ' is-' + state : '');
+  }
+}
+function clearModelTestFeedback(form) {
+  if (!form) return;
+  form.querySelectorAll('[data-model-test]').forEach(function(button) {
+    if (!button.disabled) setModelTestFeedback(button, '', '');
+  });
+}
+function modelTestBody(button) {
+  var params = new URLSearchParams();
+  var targetId = button ? button.getAttribute('data-model-test') : '';
+  params.set('target', targetId || '');
+  var test = (adminConfig.model_tests || []).find(function(item) { return item.id === targetId; });
+  var form = button ? button.closest('form') : null;
+  if (!test || !form) return params;
+  (test.field_names || []).forEach(function(name) {
+    var input = form.elements.namedItem('env__' + name);
+    if (input && typeof input.value !== 'undefined') params.set('env__' + name, String(input.value || '').trim());
+  });
+  return params;
+}
 document.addEventListener('submit', function(event) {
   var form = event.target;
   if (!form || form.id !== 'env-config-form') return;
@@ -774,6 +828,35 @@ window.addEventListener('beforeunload', function(event) {
 document.addEventListener('click', function(event) {
   var target = event.target;
   if (!target || !target.closest) return;
+  var modelTestButton = target.closest('[data-model-test]');
+  if (modelTestButton) {
+    event.preventDefault();
+    if (!window.fetch || !window.URLSearchParams) {
+      setModelTestFeedback(modelTestButton, 'error', '当前浏览器不支持在线测试');
+      return;
+    }
+    setModelTestFeedback(modelTestButton, 'busy', '正在连接模型...');
+    fetch('/api/admin/models/test', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'Accept': 'application/json', 'X-NiuOne-Action': '1'},
+      body: modelTestBody(modelTestButton)
+    }).then(function(response) {
+      return response.json().catch(function() { return null; }).then(function(payload) {
+        if (!response.ok || !payload || payload.ok !== true) {
+          var message = payload && payload.error;
+          if (message === 'rate_limited') message = '测试过于频繁，请稍后重试';
+          throw new Error(message || '模型连接失败，请确认配置后重试');
+        }
+        return payload;
+      });
+    }).then(function(payload) {
+      setModelTestFeedback(modelTestButton, 'ok', payload.message || '模型已接通');
+    }).catch(function(error) {
+      setModelTestFeedback(modelTestButton, 'error', error && error.message ? error.message : '模型连接失败');
+    });
+    return;
+  }
   var notificationActivationButton = target.closest('[data-notification-channel-activation]');
   if (notificationActivationButton) {
     var activationCard = notificationActivationButton.closest('[data-notification-channel-card]');

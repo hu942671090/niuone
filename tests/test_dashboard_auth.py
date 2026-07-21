@@ -143,8 +143,8 @@ class DashboardAuthTests(unittest.TestCase):
         admin.do_GET()
         self.assertEqual(admin.status, 200)
         admin_body = admin.wfile.getvalue().decode('utf-8')
-        self.assertIn('<link rel="stylesheet" href="/static/admin.css?v=10">', admin_body)
-        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', admin_body)
+        self.assertIn('<link rel="stylesheet" href="/static/admin.css?v=11">', admin_body)
+        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', admin_body)
         self.assertIn('id="adminThemeToggle"', admin_body)
         self.assertIn('class="theme-icon theme-icon-moon"', admin_body)
         self.assertIn('class="theme-icon theme-icon-sun"', admin_body)
@@ -2528,7 +2528,7 @@ process.stdout.write(JSON.stringify({
         unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
         unlocked_page.do_GET()
         self.assertEqual(unlocked_page.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
 
         unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
         unlocked_api.do_GET()
@@ -2945,6 +2945,140 @@ process.stdout.write(JSON.stringify({
             },
         )])
 
+    def test_model_test_api_requires_admin_action_and_whitelists_target_fields(self):
+        original_sender = dashboard.send_model_connection_test
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        original_test_limit = dashboard.RATE_LIMIT_MODEL_TEST
+        calls = []
+        body = urllib.parse.urlencode({
+            'target': 'decision-model',
+            'env__DASHBOARD_DECISION_MODEL': 'unsaved-model',
+            'env__DASHBOARD_DECISION_BASE_URL': 'https://unsaved.example/v1',
+            'env__DASHBOARD_DECISION_API_KEY': 'unsaved-key',
+            'env__DASHBOARD_NEWS_API_KEY': 'must-be-ignored',
+            'env__DASHBOARD_ADMIN_PASSWORD': 'must-be-ignored',
+            'unrelated': 'must-be-ignored',
+        }).encode('utf-8')
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.RATE_LIMIT_MODEL_TEST = 100
+            dashboard.send_model_connection_test = (
+                lambda target, overrides: calls.append((target, dict(overrides)))
+                or {'ok': True, 'target': target, 'message': '买卖决策模型已接通'}
+            )
+
+            unauthorized = FakeHandler(
+                path='/api/admin/models/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            unauthorized.do_POST()
+            self.assertEqual(unauthorized.status, 403)
+            self.assertEqual(unauthorized.rfile.tell(), 0)
+
+            missing_action = FakeHandler(
+                path='/api/admin/models/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                },
+                body=body,
+            )
+            missing_action.do_POST()
+            self.assertEqual(missing_action.status, 403)
+            self.assertEqual(missing_action.rfile.tell(), 0)
+
+            handler = FakeHandler(
+                path='/api/admin/models/test',
+                method='POST',
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            handler.do_POST()
+            response = json.loads(handler.wfile.getvalue().decode('utf-8'))
+        finally:
+            dashboard.send_model_connection_test = original_sender
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            dashboard.RATE_LIMIT_MODEL_TEST = original_test_limit
+
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(response['ok'])
+        self.assertEqual(calls, [(
+            'decision-model',
+            {
+                'DASHBOARD_DECISION_MODEL': 'unsaved-model',
+                'DASHBOARD_DECISION_BASE_URL': 'https://unsaved.example/v1',
+                'DASHBOARD_DECISION_API_KEY': 'unsaved-key',
+            },
+        )])
+
+    def test_model_test_uses_saved_secret_when_password_input_is_blank(self):
+        original_config_path = dashboard.CONFIG_PATH
+        names = dashboard.model_test_setting_names()
+        original_env = {name: dashboard.os.environ.get(name) for name in names}
+        captured = {}
+
+        class Response:
+            headers = {'Content-Type': 'application/json'}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        def opener(request, timeout=0):
+            captured['url'] = request.full_url
+            captured['authorization'] = request.get_header('Authorization')
+            captured['payload'] = json.loads(request.data.decode('utf-8'))
+            captured['timeout'] = timeout
+            return Response()
+
+        try:
+            for name in names:
+                dashboard.os.environ.pop(name, None)
+            dashboard.CONFIG_PATH = self.tmp_path / 'missing-config.yaml'
+            dashboard.DASHBOARD_ENV_FILE.write_text(
+                'DASHBOARD_DECISION_MODEL=saved-model\n'
+                'DASHBOARD_DECISION_BASE_URL=https://saved.example/v1\n'
+                'DASHBOARD_DECISION_API_KEY=saved-key\n',
+                encoding='utf-8',
+            )
+            result = dashboard.send_model_connection_test(
+                'decision-model',
+                {
+                    'DASHBOARD_DECISION_MODEL': 'unsaved-model',
+                    'DASHBOARD_DECISION_API_KEY': '',
+                },
+                opener=opener,
+            )
+        finally:
+            dashboard.CONFIG_PATH = original_config_path
+            for name, value in original_env.items():
+                if value is None:
+                    dashboard.os.environ.pop(name, None)
+                else:
+                    dashboard.os.environ[name] = value
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(captured['url'], 'https://saved.example/v1/chat/completions')
+        self.assertEqual(captured['authorization'], 'Bearer saved-key')
+        self.assertEqual(captured['payload']['model'], 'unsaved-model')
+        self.assertLessEqual(captured['timeout'], 30)
+
     def test_practice_market_summary_status_is_public_and_generation_requires_admin_action(self):
         original_status = dashboard.get_practice_market_summary_status
         original_generate = dashboard.generate_practice_market_summary
@@ -3087,16 +3221,76 @@ process.stdout.write(JSON.stringify({
             'request_too_large',
         )
 
-    def test_notification_test_api_get_and_head_are_method_not_allowed(self):
-        get_handler = FakeHandler(path='/api/admin/notifications/test')
-        get_handler.do_GET()
-        head_handler = FakeHandler(path='/api/admin/notifications/test', method='HEAD')
-        head_handler.do_HEAD()
+    def test_model_test_api_has_dedicated_rate_limit_and_body_limit(self):
+        original_sender = dashboard.send_model_connection_test
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        original_test_limit = dashboard.RATE_LIMIT_MODEL_TEST
+        calls = []
+        body = b'target=decision-model&env__DASHBOARD_DECISION_MODEL=test-model'
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.RATE_LIMIT_MODEL_TEST = 1
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+            dashboard.send_model_connection_test = (
+                lambda target, overrides: calls.append((target, dict(overrides)))
+                or {'ok': True, 'target': target, 'message': 'ok'}
+            )
+            headers = {
+                'Content-Length': str(len(body)),
+                'Cookie': self.admin_cookie(),
+                dashboard.ACTION_HEADER_NAME: '1',
+            }
+            first = FakeHandler(
+                path='/api/admin/models/test', method='POST', headers=headers, body=body,
+            )
+            first.do_POST()
+            second = FakeHandler(
+                path='/api/admin/models/test', method='POST', headers=headers, body=body,
+            )
+            second.do_POST()
 
-        self.assertEqual(get_handler.status, 405)
-        self.assertEqual(get_handler.header('Allow'), 'POST')
-        self.assertEqual(head_handler.status, 405)
-        self.assertEqual(head_handler.header('Allow'), 'POST')
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+            dashboard.RATE_LIMIT_MODEL_TEST = 100
+            oversized = FakeHandler(
+                path='/api/admin/models/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(dashboard.MAX_POST_BODY_BYTES + 1),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=b'credential-must-not-be-read',
+            )
+            oversized.do_POST()
+        finally:
+            dashboard.send_model_connection_test = original_sender
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            dashboard.RATE_LIMIT_MODEL_TEST = original_test_limit
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+
+        self.assertEqual(first.status, 200)
+        self.assertEqual(second.status, 429)
+        self.assertEqual(second.rfile.tell(), 0)
+        self.assertEqual(calls, [('decision-model', {'DASHBOARD_DECISION_MODEL': 'test-model'})])
+        self.assertEqual(oversized.status, 413)
+        self.assertEqual(oversized.rfile.tell(), 0)
+        self.assertEqual(
+            json.loads(oversized.wfile.getvalue().decode('utf-8'))['error'],
+            'request_too_large',
+        )
+
+    def test_admin_test_apis_get_and_head_are_method_not_allowed(self):
+        for path in ('/api/admin/notifications/test', '/api/admin/models/test'):
+            with self.subTest(path=path):
+                get_handler = FakeHandler(path=path)
+                get_handler.do_GET()
+                head_handler = FakeHandler(path=path, method='HEAD')
+                head_handler.do_HEAD()
+
+                self.assertEqual(get_handler.status, 405)
+                self.assertEqual(get_handler.header('Allow'), 'POST')
+                self.assertEqual(head_handler.status, 405)
+                self.assertEqual(head_handler.header('Allow'), 'POST')
 
     def test_unauthenticated_config_writes_are_rejected_before_reading_body(self):
         original_config_path = dashboard.CONFIG_PATH
@@ -3189,7 +3383,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(handler.status, 200)
         self.assertEqual(len(payload['groups']), 13)
         self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', index_body)
+        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', index_body)
         self.assertNotIn("name='env__", index_body)
         self.assertIn('function renderSettingsIndex()', ADMIN_FRONTEND)
         self.assertIn('function renderSettingsGroup(slug)', ADMIN_FRONTEND)
@@ -3205,6 +3399,20 @@ process.stdout.write(JSON.stringify({
         self.assertIn('function brieflyShowEnvSaved(form)', ADMIN_FRONTEND)
         self.assertIn("String(event.key || '').toLowerCase() !== 's'", ADMIN_FRONTEND)
         self.assertIn('function renderEnvInput(item)', ADMIN_FRONTEND)
+        self.assertEqual(
+            [item['id'] for item in payload['model_tests']],
+            [
+                'news-precheck',
+                'decision-model',
+                'grok-model',
+                'us-rating-model',
+                'a-share-summary-model',
+            ],
+        )
+        self.assertIn("function renderModelTests(slug)", ADMIN_FRONTEND)
+        self.assertIn("data-model-test='", ADMIN_FRONTEND)
+        self.assertIn("fetch('/api/admin/models/test'", ADMIN_FRONTEND)
+        self.assertIn('API Key 留空时安全复用已保存密钥', ADMIN_FRONTEND)
         self.assertNotIn('HIDDEN-CODE', ADMIN_FRONTEND)
         self.assertNotIn('/admin/invite', ADMIN_FRONTEND)
 
@@ -3221,7 +3429,7 @@ process.stdout.write(JSON.stringify({
             route = FakeHandler(path=f'/admin/settings/{slug}')
             route.do_GET()
             self.assertEqual(route.status, 200)
-            self.assertIn('<script src="/static/admin.js?v=20" defer></script>', route.wfile.getvalue().decode('utf-8'))
+            self.assertIn('<script src="/static/admin.js?v=21" defer></script>', route.wfile.getvalue().decode('utf-8'))
 
         self.assertEqual(len(groups), 13)
         self.assertEqual(len(slugs), len(set(slugs)))
@@ -3404,7 +3612,7 @@ process.stdout.write(JSON.stringify({
         locked.do_GET()
         locked_body = locked.wfile.getvalue().decode('utf-8')
         self.assertEqual(locked.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', locked_body)
+        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', locked_body)
         self.assertNotIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", locked_body)
 
         cookie = self.admin_cookie()
@@ -3428,7 +3636,7 @@ process.stdout.write(JSON.stringify({
         )
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        self.assertIn('<script src="/static/admin.js?v=20" defer></script>', missing.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', missing.wfile.getvalue().decode('utf-8'))
         self.assertIn('未找到该设置分组', ADMIN_FRONTEND)
 
     def test_group_save_ignores_fields_from_other_settings_groups(self):

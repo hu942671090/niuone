@@ -37,6 +37,13 @@ from dashboard_json_cache import read_json_cache, write_json_cache
 from dashboard import practice_payload as practice_payload_impl
 from dashboard import practice_market_summary as practice_market_summary_impl
 from dashboard import security as security_impl
+from dashboard.model_connectivity import (
+    MODEL_TEST_TARGET_BY_ID,
+    model_test_metadata,
+    model_test_override_names,
+    model_test_setting_names,
+    test_model_connection,
+)
 from dashboard.apis.iwencai_service import (
     DEFAULT_LIMIT as IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT,
     dragon_tiger_archive_path,
@@ -338,6 +345,13 @@ RATE_LIMIT_API = int(os.environ.get("DASHBOARD_RATE_LIMIT_API", "900") or "900")
 RATE_LIMIT_ADMIN = int(os.environ.get("DASHBOARD_RATE_LIMIT_ADMIN", "90") or "90")
 RATE_LIMIT_ADMIN_LOGIN = int(os.environ.get("DASHBOARD_RATE_LIMIT_ADMIN_LOGIN", "10") or "10")
 RATE_LIMIT_NOTIFICATION_TEST = int(os.environ.get("DASHBOARD_NOTIFICATION_TEST_RATE_LIMIT", "10") or "10")
+RATE_LIMIT_MODEL_TEST = int(os.environ.get("DASHBOARD_MODEL_TEST_RATE_LIMIT", "10") or "10")
+MODEL_TEST_TIMEOUT_SECONDS = max(
+    5,
+    min(30, int(os.environ.get("DASHBOARD_MODEL_TEST_TIMEOUT_SECONDS", "20") or "20")),
+)
+MODEL_TEST_MAX_CONCURRENCY = 2
+MODEL_TEST_SEMAPHORE = threading.BoundedSemaphore(MODEL_TEST_MAX_CONCURRENCY)
 RATE_LIMIT_BUCKETS: dict[tuple[str, str], tuple[float, int]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
 ADMIN_TOKEN_LOCK = threading.Lock()
@@ -3821,6 +3835,119 @@ def crossdesk_provider_values() -> dict[str, str]:
     return {}
 
 
+def model_test_provider_fallbacks() -> dict[str, dict[str, str]]:
+    """Load complete YAML provider fallbacks without exposing their secrets."""
+
+    try:
+        cfg = load_yaml_config()
+    except Exception:
+        cfg = {}
+
+    providers = cfg.get("custom_providers", []) if isinstance(cfg, dict) else []
+    providers = providers if isinstance(providers, list) else []
+    crossdesk: dict[str, str] = {}
+    grok: dict[str, str] = {}
+    for raw_provider in providers:
+        if not isinstance(raw_provider, dict):
+            continue
+        provider = {
+            "base_url": str(raw_provider.get("base_url") or "").strip(),
+            "api_key": str(raw_provider.get("api_key") or "").strip(),
+        }
+        if not all(provider.values()):
+            continue
+        identity = " ".join(
+            (
+                str(raw_provider.get("name") or ""),
+                provider["base_url"],
+            )
+        ).lower()
+        if not crossdesk and "crossdesk" in identity:
+            crossdesk = provider
+        if not grok and (
+            "grok" in str(raw_provider.get("name") or "").lower()
+            or "crossdesk.ccwu.cc" in provider["base_url"].lower()
+        ):
+            grok = provider
+
+    raw_model = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    model_provider = {
+        "base_url": str(raw_model.get("base_url") or "").strip(),
+        "api_key": str(raw_model.get("api_key") or "").strip(),
+    } if isinstance(raw_model, dict) else {}
+    if not all(model_provider.values()):
+        model_provider = {}
+
+    return {
+        "decision-model": crossdesk,
+        "grok-model": crossdesk,
+        "us-rating-model": crossdesk or model_provider,
+        "a-share-summary-model": grok or crossdesk or model_provider,
+    }
+
+
+def model_test_settings_snapshot(
+    target_id: str,
+    overrides: dict[str, str] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Resolve saved settings plus unsaved form values for one model test."""
+
+    allowed_names = model_test_override_names(target_id)
+    settings: dict[str, str] = {}
+    for name in model_test_setting_names():
+        default = str(ENV_CONFIG_BY_NAME.get(name, {}).get("default") or "").strip()
+        if default:
+            settings[name] = default
+
+    file_values = parse_env_file()
+    for name in model_test_setting_names():
+        if name in file_values:
+            settings[name] = str(file_values[name])
+        if name in os.environ:
+            settings[name] = str(os.environ[name])
+
+    for name, raw_value in (overrides or {}).items():
+        if name not in allowed_names:
+            continue
+        value = str(raw_value or "").strip()
+        if is_secret_config_key(name) and not value:
+            continue
+        settings[name] = value
+
+    fallback = model_test_provider_fallbacks().get(target_id, {})
+    return settings, fallback
+
+
+def send_model_connection_test(
+    target_id: str,
+    overrides: dict[str, str] | None = None,
+    *,
+    opener=None,
+) -> dict[str, Any]:
+    """Run one rate-limited caller's test under a small process-wide cap."""
+
+    if target_id not in MODEL_TEST_TARGET_BY_ID:
+        return {"ok": False, "target": "", "error": "不支持的模型测试目标"}
+    if not MODEL_TEST_SEMAPHORE.acquire(blocking=False):
+        return {
+            "ok": False,
+            "target": target_id,
+            "error": "当前模型测试较多，请稍后重试",
+            "error_code": "busy",
+        }
+    try:
+        settings, fallback = model_test_settings_snapshot(target_id, overrides)
+        kwargs: dict[str, Any] = {
+            "provider_fallback": fallback,
+            "timeout": MODEL_TEST_TIMEOUT_SECONDS,
+        }
+        if opener is not None:
+            kwargs["opener"] = opener
+        return test_model_connection(target_id, settings, **kwargs)
+    finally:
+        MODEL_TEST_SEMAPHORE.release()
+
+
 def business_config_fallback_value(
     name: str,
     *,
@@ -4001,6 +4128,7 @@ def build_admin_config_payload() -> dict[str, Any]:
             for channel in NOTIFICATION_CHANNEL_SETTINGS
         ],
         "notification_general_names": list(NOTIFICATION_GENERAL_CONFIG_NAMES),
+        "model_tests": model_test_metadata(),
         "ui": {
             "us_feature_toggle_name": "DASHBOARD_US_FEATURES_ENABLED",
             "us_feature_gated_names": sorted(US_FEATURE_GATED_NAMES),
@@ -4474,7 +4602,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
-        if parsed.path == "/api/admin/notifications/test":
+        if parsed.path in {"/api/admin/notifications/test", "/api/admin/models/test"}:
             self.send_method_not_allowed("POST")
             return
         if parsed.path == "/api/admin/session":
@@ -4528,7 +4656,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json_uncached(build_admin_config_payload())
             return
-        if parsed.path == "/api/admin/notifications/test":
+        if parsed.path in {"/api/admin/notifications/test", "/api/admin/models/test"}:
             self.send_method_not_allowed("POST")
             return
         if parsed.path in DASHBOARD_PAGE_PATHS:
@@ -4884,6 +5012,34 @@ class Handler(BaseHTTPRequestHandler):
             from self_optimizer import apply_optimization
             payload = json.dumps(apply_optimization(), ensure_ascii=False).encode("utf-8")
             self.send_payload(payload, edge_ttl=0)
+            return
+        if parsed.path == "/api/admin/models/test":
+            if not self.require_admin():
+                return
+            if not self.require_action_request():
+                return
+            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
+                return
+            if not self.enforce_rate_limit(
+                "model-test",
+                self.client_ip(),
+                RATE_LIMIT_MODEL_TEST,
+            ):
+                return
+            try:
+                form = self.read_form()
+            except RequestTooLarge:
+                self.send_json_error(413, "request_too_large")
+                return
+
+            target_id = str(form.get("target") or "").strip()
+            allowed_names = model_test_override_names(target_id)
+            overrides = {
+                key[len("env__"):]: value
+                for key, value in form.items()
+                if key.startswith("env__") and key[len("env__"):] in allowed_names
+            }
+            self.send_json_uncached(send_model_connection_test(target_id, overrides))
             return
         if parsed.path == "/api/admin/notifications/test":
             if not self.require_admin():

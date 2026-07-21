@@ -87,7 +87,7 @@ Recommended configuration:
 | Trading decisions after stock selection | DeepSeek recommended; other compatible models may be used | `DASHBOARD_DECISION_BASE_URL`, `DASHBOARD_DECISION_API_KEY`, `DASHBOARD_DECISION_MODEL` |
 | Trading-decision intelligence bundle | Aggregated locally; no additional model required | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED`, `DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS`, `DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS` |
 
-After startup, click the settings button on the page to manage models, task schedules, and monitored X/Twitter authors. Enter X/Twitter handles without `@`.
+After startup, click the settings button on the page to manage models, task schedules, and monitored X/Twitter authors. Every section that requires a model and API key includes **Test Model Connection**; it tests the current form values without saving them and reuses the saved secret when the API key input is empty. Enter X/Twitter handles without `@`.
 Tweet monitoring and U.S. ratings settings are controlled by the “Enable NiuNiu U.S. Stocks” switch. When disabled, those settings are collapsed and hidden, and the background X monitoring and U.S. ratings scheduled tasks are skipped.
 `DASHBOARD_GROK_API_MODE` defaults to `auto`: Grok 4.5 uses the Responses API with search tools, while other models use Chat Completions; set `responses` or `chat` to force a mode. `X_WATCHLIST_REQUEST_TIMEOUT_SECONDS` defaults to `45` seconds.
 `DASHBOARD_NEWS_API_MODE` defaults to `auto`: Grok 4.5 and GPT-5 search models use the Responses API with the `web_search` tool; set `responses` or `chat` to force a mode.
