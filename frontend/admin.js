@@ -305,6 +305,21 @@ function renderModelTests(slug) {
     "<div class='model-test-list'>" + rows + "</div></section>";
 }
 
+function renderIwencaiTest(slug) {
+  var test = adminConfig.iwencai_test || {};
+  if (test.group_slug !== slug) return '';
+  var statusId = 'iwencai-test-status';
+  return "<section class='model-test-panel' aria-label='问财接口连通性测试'><div class='model-test-panel-head'>" +
+    "<div><div class='model-test-panel-title'>问财接口连通性测试</div>" +
+    "<div class='model-test-panel-note'>测试页面当前填写值，不会自动保存；API Key 留空时安全复用已保存密钥。</div></div></div>" +
+    "<div class='model-test-list'><div class='model-test-row'><div class='model-test-copy'><div class='model-test-label'>" +
+    escapeHtml(test.label || '问财接口') + "</div><div class='model-test-description'>" +
+    escapeHtml(test.description || '验证问财网关地址和 API Key。') + "</div></div>" +
+    "<div class='model-test-action'><button type='button' class='model-test-button' data-iwencai-test aria-describedby='" +
+    statusId + "'>测试问财接口</button><div class='model-test-status' id='" + statusId +
+    "' data-model-test-status role='status' aria-live='polite'></div></div></div></div></section>";
+}
+
 function renderSettingsGroup(slug) {
   var group = (adminConfig.groups || []).find(function(entry) { return entry.slug === slug; });
   if (!group) {
@@ -320,6 +335,7 @@ function renderSettingsGroup(slug) {
   var gatedNames = new Set((adminConfig.ui && adminConfig.ui.us_feature_gated_names) || []);
   var strategyPreset = adminConfig.ui && adminConfig.ui.strategy_preset_name;
   var modelTests = renderModelTests(slug);
+  var iwencaiTest = renderIwencaiTest(slug);
   var body;
   var countLabel;
   if (group.name === '交易通知') {
@@ -348,7 +364,7 @@ function renderSettingsGroup(slug) {
     "<input type='hidden' name='settings_group' value='" + escapeHtml(slug) + "'>" +
     "<section class='settings-group' id='settings-" + escapeHtml(slug) + "'><div class='settings-group-head'><div><h2>" +
     escapeHtml(group.name) + "</h2>" + (group.note ? "<p class='settings-group-note'>" + escapeHtml(group.note) + "</p>" : '') +
-    "</div><span class='settings-count'>" + escapeHtml(countLabel) + "</span></div>" + body + modelTests +
+    "</div><span class='settings-count'>" + escapeHtml(countLabel) + "</span></div>" + body + modelTests + iwencaiTest +
     "<div class='settings-actions'><div class='settings-save-status' data-env-save-status role='status' aria-live='polite'></div>" +
     "<button class='save-button' data-env-save-button type='submit'>保存本组设置</button></div></section></form></div>";
   syncUsFeatureSettings();
@@ -754,7 +770,7 @@ function setModelTestFeedback(button, state, message) {
 }
 function clearModelTestFeedback(form) {
   if (!form) return;
-  form.querySelectorAll('[data-model-test]').forEach(function(button) {
+  form.querySelectorAll('[data-model-test], [data-iwencai-test]').forEach(function(button) {
     if (!button.disabled) setModelTestFeedback(button, '', '');
   });
 }
@@ -765,6 +781,17 @@ function modelTestBody(button) {
   var test = (adminConfig.model_tests || []).find(function(item) { return item.id === targetId; });
   var form = button ? button.closest('form') : null;
   if (!test || !form) return params;
+  (test.field_names || []).forEach(function(name) {
+    var input = form.elements.namedItem('env__' + name);
+    if (input && typeof input.value !== 'undefined') params.set('env__' + name, String(input.value || '').trim());
+  });
+  return params;
+}
+function iwencaiTestBody(button) {
+  var params = new URLSearchParams();
+  var test = adminConfig.iwencai_test || {};
+  var form = button ? button.closest('form') : null;
+  if (!form) return params;
   (test.field_names || []).forEach(function(name) {
     var input = form.elements.namedItem('env__' + name);
     if (input && typeof input.value !== 'undefined') params.set('env__' + name, String(input.value || '').trim());
@@ -828,6 +855,35 @@ window.addEventListener('beforeunload', function(event) {
 document.addEventListener('click', function(event) {
   var target = event.target;
   if (!target || !target.closest) return;
+  var iwencaiTestButton = target.closest('[data-iwencai-test]');
+  if (iwencaiTestButton) {
+    event.preventDefault();
+    if (!window.fetch || !window.URLSearchParams) {
+      setModelTestFeedback(iwencaiTestButton, 'error', '当前浏览器不支持在线测试');
+      return;
+    }
+    setModelTestFeedback(iwencaiTestButton, 'busy', '正在连接问财接口...');
+    fetch('/api/admin/iwencai/test', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'Accept': 'application/json', 'X-NiuOne-Action': '1'},
+      body: iwencaiTestBody(iwencaiTestButton)
+    }).then(function(response) {
+      return response.json().catch(function() { return null; }).then(function(payload) {
+        if (!response.ok || !payload || payload.ok !== true) {
+          var message = payload && payload.error;
+          if (message === 'rate_limited') message = '测试过于频繁，请稍后重试';
+          throw new Error(message || '问财接口连接失败，请确认配置后重试');
+        }
+        return payload;
+      });
+    }).then(function(payload) {
+      setModelTestFeedback(iwencaiTestButton, 'ok', payload.message || '问财接口已接通');
+    }).catch(function(error) {
+      setModelTestFeedback(iwencaiTestButton, 'error', error && error.message ? error.message : '问财接口连接失败');
+    });
+    return;
+  }
   var modelTestButton = target.closest('[data-model-test]');
   if (modelTestButton) {
     event.preventDefault();

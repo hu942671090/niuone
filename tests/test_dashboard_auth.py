@@ -144,7 +144,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(admin.status, 200)
         admin_body = admin.wfile.getvalue().decode('utf-8')
         self.assertIn('<link rel="stylesheet" href="/static/admin.css?v=11">', admin_body)
-        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', admin_body)
+        self.assertIn('<script src="/static/admin.js?v=22" defer></script>', admin_body)
         self.assertIn('id="adminThemeToggle"', admin_body)
         self.assertIn('class="theme-icon theme-icon-moon"', admin_body)
         self.assertIn('class="theme-icon theme-icon-sun"', admin_body)
@@ -2528,7 +2528,7 @@ process.stdout.write(JSON.stringify({
         unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
         unlocked_page.do_GET()
         self.assertEqual(unlocked_page.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=22" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
 
         unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
         unlocked_api.do_GET()
@@ -3022,6 +3022,134 @@ process.stdout.write(JSON.stringify({
             },
         )])
 
+    def test_iwencai_test_api_requires_admin_action_whitelists_and_rate_limits(self):
+        original_sender = dashboard.send_iwencai_connection_test
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        original_test_limit = dashboard.RATE_LIMIT_IWENCAI_TEST
+        calls = []
+        body = urllib.parse.urlencode({
+            'env__IWENCAI_BASE_URL': 'https://unsaved.example',
+            'env__IWENCAI_API_KEY': 'unsaved-key',
+            'env__IWENCAI_TIMEOUT_SECONDS': '12',
+            'env__IWENCAI_MAX_RETRIES': '2',
+            'env__DASHBOARD_DECISION_API_KEY': 'must-be-ignored',
+            'unrelated': 'must-be-ignored',
+        }).encode('utf-8')
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.RATE_LIMIT_IWENCAI_TEST = 1
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+            dashboard.send_iwencai_connection_test = (
+                lambda overrides: calls.append(dict(overrides))
+                or {'ok': True, 'target': 'iwencai', 'message': '问财接口已接通'}
+            )
+
+            unauthorized = FakeHandler(
+                path='/api/admin/iwencai/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            unauthorized.do_POST()
+            self.assertEqual(unauthorized.status, 403)
+            self.assertEqual(unauthorized.rfile.tell(), 0)
+
+            missing_action = FakeHandler(
+                path='/api/admin/iwencai/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                },
+                body=body,
+            )
+            missing_action.do_POST()
+            self.assertEqual(missing_action.status, 403)
+            self.assertEqual(missing_action.rfile.tell(), 0)
+
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': str(len(body)),
+                'Cookie': self.admin_cookie(),
+                dashboard.ACTION_HEADER_NAME: '1',
+            }
+            handler = FakeHandler(
+                path='/api/admin/iwencai/test', method='POST', headers=headers, body=body,
+            )
+            handler.do_POST()
+            response = json.loads(handler.wfile.getvalue().decode('utf-8'))
+            limited = FakeHandler(
+                path='/api/admin/iwencai/test', method='POST', headers=headers, body=body,
+            )
+            limited.do_POST()
+        finally:
+            dashboard.send_iwencai_connection_test = original_sender
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            dashboard.RATE_LIMIT_IWENCAI_TEST = original_test_limit
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(response['ok'])
+        self.assertEqual(limited.status, 429)
+        self.assertEqual(limited.rfile.tell(), 0)
+        self.assertEqual(calls, [{
+            'IWENCAI_BASE_URL': 'https://unsaved.example',
+            'IWENCAI_API_KEY': 'unsaved-key',
+            'IWENCAI_TIMEOUT_SECONDS': '12',
+        }])
+
+    def test_iwencai_test_uses_saved_secret_when_password_input_is_blank(self):
+        names = dashboard.IWENCAI_TEST_FIELD_NAMES
+        original_env = {name: dashboard.os.environ.get(name) for name in names}
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, limit=-1):
+                return b'{"datas":[]}'
+
+        def opener(request, timeout=0):
+            captured['url'] = request.full_url
+            captured['authorization'] = request.get_header('Authorization')
+            captured['timeout'] = timeout
+            return Response()
+
+        try:
+            for name in names:
+                dashboard.os.environ.pop(name, None)
+            dashboard.DASHBOARD_ENV_FILE.write_text(
+                'IWENCAI_BASE_URL=https://saved.example\n'
+                'IWENCAI_API_KEY=saved-key\n'
+                'IWENCAI_TIMEOUT_SECONDS=18\n',
+                encoding='utf-8',
+            )
+            result = dashboard.send_iwencai_connection_test(
+                {
+                    'IWENCAI_BASE_URL': 'https://unsaved.example',
+                    'IWENCAI_API_KEY': '',
+                },
+                opener=opener,
+            )
+        finally:
+            for name, value in original_env.items():
+                if value is None:
+                    dashboard.os.environ.pop(name, None)
+                else:
+                    dashboard.os.environ[name] = value
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(captured['url'], 'https://unsaved.example/v1/query2data')
+        self.assertEqual(captured['authorization'], 'Bearer saved-key')
+        self.assertEqual(captured['timeout'], 18)
+
     def test_model_test_uses_saved_secret_when_password_input_is_blank(self):
         original_config_path = dashboard.CONFIG_PATH
         names = dashboard.model_test_setting_names()
@@ -3280,7 +3408,11 @@ process.stdout.write(JSON.stringify({
         )
 
     def test_admin_test_apis_get_and_head_are_method_not_allowed(self):
-        for path in ('/api/admin/notifications/test', '/api/admin/models/test'):
+        for path in (
+            '/api/admin/notifications/test',
+            '/api/admin/models/test',
+            '/api/admin/iwencai/test',
+        ):
             with self.subTest(path=path):
                 get_handler = FakeHandler(path=path)
                 get_handler.do_GET()
@@ -3383,7 +3515,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(handler.status, 200)
         self.assertEqual(len(payload['groups']), 13)
         self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', index_body)
+        self.assertIn('<script src="/static/admin.js?v=22" defer></script>', index_body)
         self.assertNotIn("name='env__", index_body)
         self.assertIn('function renderSettingsIndex()', ADMIN_FRONTEND)
         self.assertIn('function renderSettingsGroup(slug)', ADMIN_FRONTEND)
@@ -3413,6 +3545,16 @@ process.stdout.write(JSON.stringify({
         self.assertIn("data-model-test='", ADMIN_FRONTEND)
         self.assertIn("fetch('/api/admin/models/test'", ADMIN_FRONTEND)
         self.assertIn('API Key 留空时安全复用已保存密钥', ADMIN_FRONTEND)
+        self.assertEqual(payload['iwencai_test']['group_slug'], 'iwencai')
+        self.assertEqual(payload['iwencai_test']['field_names'], [
+            'IWENCAI_BASE_URL',
+            'IWENCAI_API_KEY',
+            'IWENCAI_TIMEOUT_SECONDS',
+        ])
+        self.assertIn('function renderIwencaiTest(slug)', ADMIN_FRONTEND)
+        self.assertIn("data-iwencai-test", ADMIN_FRONTEND)
+        self.assertIn("fetch('/api/admin/iwencai/test'", ADMIN_FRONTEND)
+        self.assertIn('测试问财接口', ADMIN_FRONTEND)
         self.assertNotIn('HIDDEN-CODE', ADMIN_FRONTEND)
         self.assertNotIn('/admin/invite', ADMIN_FRONTEND)
 
@@ -3429,7 +3571,7 @@ process.stdout.write(JSON.stringify({
             route = FakeHandler(path=f'/admin/settings/{slug}')
             route.do_GET()
             self.assertEqual(route.status, 200)
-            self.assertIn('<script src="/static/admin.js?v=21" defer></script>', route.wfile.getvalue().decode('utf-8'))
+            self.assertIn('<script src="/static/admin.js?v=22" defer></script>', route.wfile.getvalue().decode('utf-8'))
 
         self.assertEqual(len(groups), 13)
         self.assertEqual(len(slugs), len(set(slugs)))
@@ -3612,7 +3754,7 @@ process.stdout.write(JSON.stringify({
         locked.do_GET()
         locked_body = locked.wfile.getvalue().decode('utf-8')
         self.assertEqual(locked.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', locked_body)
+        self.assertIn('<script src="/static/admin.js?v=22" defer></script>', locked_body)
         self.assertNotIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", locked_body)
 
         cookie = self.admin_cookie()
@@ -3636,7 +3778,7 @@ process.stdout.write(JSON.stringify({
         )
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        self.assertIn('<script src="/static/admin.js?v=21" defer></script>', missing.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<script src="/static/admin.js?v=22" defer></script>', missing.wfile.getvalue().decode('utf-8'))
         self.assertIn('未找到该设置分组', ADMIN_FRONTEND)
 
     def test_group_save_ignores_fields_from_other_settings_groups(self):
