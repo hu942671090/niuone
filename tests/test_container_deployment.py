@@ -14,6 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ContainerDeploymentTests(unittest.TestCase):
+    def test_runtime_requirements_include_fastapi_test_client_transport(self):
+        requirements = {
+            line.strip()
+            for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertIn("httpx2>=2.0.0", requirements)
+
     def test_image_builds_vue_assets_and_packages_the_fastapi_runtime(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
