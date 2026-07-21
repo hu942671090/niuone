@@ -127,7 +127,58 @@ class PracticeMarketSummaryTests(unittest.TestCase):
         self.assertIn("实时核心指数：上证指数", snapshot["content"])
         self.assertIn("行业板块涨幅前列：半导体 +2.30%", snapshot["content"])
         self.assertIn("行业主力净流入前列：半导体 +18.60亿", snapshot["content"])
+        self.assertIn("实时热门行业综合榜：半导体", snapshot["content"])
+        self.assertEqual(snapshot["snapshot"]["hot_sectors"][0]["name"], "半导体")
         self.assertEqual(snapshot["snapshot"]["captured_at"], "2026-07-14 12:00:00")
+
+    def test_realtime_snapshot_does_not_let_concepts_displace_leading_industry(self):
+        snapshot = practice_market_summary.build_realtime_market_snapshot(
+            {
+                "items": [
+                    {"key": "sh", "name": "上证指数", "market_type": "a_index", "price": 3520.1, "change_pct": 1.2},
+                ],
+            },
+            {
+                "gain_top": [
+                    {"name": "国家大基金持股", "pct": 10.78, "source": "概念"},
+                    {"name": "半导体", "pct": 9.83, "source": "行业"},
+                ],
+                "loss_top": [
+                    {"name": "可燃冰", "pct": -2.27, "source": "概念"},
+                    {"name": "油气开采及服务", "pct": -3.84, "source": "行业"},
+                ],
+                "industry_gain_top": [
+                    {"name": "半导体", "pct": 9.83, "source": "行业"},
+                    {"name": "通信设备", "pct": 4.92, "source": "行业"},
+                ],
+                "industry_loss_top": [
+                    {"name": "油气开采及服务", "pct": -3.84, "source": "行业"},
+                ],
+                "concept_gain_top": [
+                    {"name": "国家大基金持股", "pct": 10.78, "source": "概念"},
+                ],
+                "concept_loss_top": [
+                    {"name": "可燃冰", "pct": -2.27, "source": "概念"},
+                ],
+            },
+            {
+                "inflow": [
+                    {"name": "半导体", "pct": 9.85, "net_flow_yi": 166.18},
+                    {"name": "通信设备", "pct": 4.92, "net_flow_yi": 47.04},
+                ],
+                "outflow": [
+                    {"name": "银行Ⅱ", "pct": -1.88, "net_flow_yi": -28.70},
+                ],
+            },
+            datetime(2026, 7, 21, 11, 40, 0),
+        )
+
+        self.assertTrue(snapshot["complete"])
+        self.assertEqual(snapshot["snapshot"]["sectors"]["gain_top"][0]["name"], "半导体")
+        self.assertEqual(snapshot["snapshot"]["sectors"]["concept_gain_top"][0]["name"], "国家大基金持股")
+        self.assertEqual(snapshot["snapshot"]["hot_sectors"][0]["name"], "半导体")
+        self.assertTrue(snapshot["snapshot"]["hot_sectors"][0]["confirmed"])
+        self.assertIn("实时热门行业综合榜为半导体", snapshot["summary"])
 
     def test_model_prompt_requires_live_snapshot_comparison_conclusion(self):
         sources = practice_market_summary.collect_market_replay_sources(self.records, "2026-07-14")
@@ -138,6 +189,8 @@ class PracticeMarketSummaryTests(unittest.TestCase):
 
         self.assertIn("手动按钮刚抓取的实时A股盘面", prompt)
         self.assertIn("行业主力净流入前列", prompt)
+        self.assertIn("实时热门行业综合榜", prompt)
+        self.assertIn("不得用单个概念标签替代", prompt)
         self.assertIn('"comparison_lines"', prompt)
         self.assertIn("延续/强化/弱化/反转/轮动", prompt)
 
@@ -201,8 +254,29 @@ class PracticeMarketSummaryTests(unittest.TestCase):
         self.assertEqual(result["live_snapshot_count"], 1)
         self.assertEqual(result["previous_summary_count"], 1)
         self.assertEqual(result["realtime_snapshot"]["industry_fund_flow"]["inflow"][0]["name"], "半导体")
+        self.assertTrue(result["hot_sector_lines"][0].startswith("半导体"))
         self.assertFalse(status["stale"])
         self.assertEqual(status["live_snapshot_count"], 1)
+
+    def test_status_marks_live_snapshot_stale_after_five_minutes_during_session(self):
+        now = datetime(2026, 7, 14, 10, 10, 1)
+        scans = practice_market_summary.collect_market_replay_sources(self.records, "2026-07-14")
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_file = Path(tmp) / "summary.json"
+            cache_file.write_text(json.dumps({
+                "ok": True,
+                "available": True,
+                "date": "2026-07-14",
+                "schema_version": practice_market_summary.SUMMARY_SCHEMA_VERSION,
+                "summary": "旧实时总结",
+                "source_fingerprint": practice_market_summary.source_fingerprint(scans),
+                "live_snapshot_at": "2026-07-14 10:05:00",
+            }, ensure_ascii=False), encoding="utf-8")
+
+            status = practice_market_summary.summary_status(self.records, cache_file, now)
+
+        self.assertTrue(status["stale"])
+        self.assertIn("实时快照已超过5分钟", status["stale_reasons"])
 
     def test_required_realtime_snapshot_rejects_stale_or_incomplete_data(self):
         now = datetime(2026, 7, 14, 12, 0, 0)

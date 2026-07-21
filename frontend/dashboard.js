@@ -2571,17 +2571,20 @@ function renderPracticeMarketSummary() {
   if (previousSummaryCount) sourceParts.push(`上一版 ${previousSummaryCount} 份`);
   if (liveSnapshotCount) sourceParts.push(`实时快照 ${liveSnapshotCount} 份`);
   const sourceCountText = sourceParts.join(' · ');
+  const staleReasons = Array.isArray(d.stale_reasons) ? d.stale_reasons.filter(Boolean) : [];
   const buttonText = generating ? '正在抓取实时盘面并对比…' : '生成今日盘面总结';
   const statusText = d.loading
     ? '正在读取今日盘面扫描'
     : (scanCount ? `复盘资料：${sourceCountText}` : '今日暂无A股盘面扫描');
+  const staleText = d.stale ? ` · ${staleReasons.join('、') || '盘面资料已更新'}，建议重新生成` : '';
   const action = `<div class="practice-market-summary-action">
     <button type="button" class="practice-market-summary-btn" onclick="triggerPracticeMarketSummary()" ${generating ? 'disabled aria-busy="true"' : ''}>${generating ? '处理中 · ' : ''}${esc(buttonText)}</button>
-    <span>${esc(statusText)}${d.stale ? ' · 有新增扫描，建议重新生成' : ''}</span>
+    <span>${esc(statusText)}${esc(staleText)}</span>
   </div>`;
   const error = d.error ? `<div class="practice-market-summary-error">${esc(d.error)}</div>` : '';
   if (!d.available || !d.summary) return `${action}${error}`;
   const comparisons = Array.isArray(d.comparison_lines) ? d.comparison_lines.filter(Boolean).slice(0, 5) : [];
+  const hotSectorLines = Array.isArray(d.hot_sector_lines) ? d.hot_sector_lines.filter(Boolean).slice(0, 5) : [];
   const trendLines = Array.isArray(d.trend_lines) ? d.trend_lines.filter(Boolean).slice(0, 5) : [];
   const structureLines = Array.isArray(d.structure_lines) ? d.structure_lines.filter(Boolean).slice(0, 5) : [];
   const risks = Array.isArray(d.risk_lines) ? d.risk_lines.filter(Boolean).slice(0, 4) : [];
@@ -2598,6 +2601,7 @@ function renderPracticeMarketSummary() {
     </button>
     <div class="practice-market-summary-body"${expanded ? '' : ' hidden'}>
       <p>${esc(d.summary)}</p>
+      ${renderList('实时热门行业（涨幅与主力净流入交叉确认）', hotSectorLines)}
       ${renderList('实时对比结论', comparisons)}
       ${renderList('走势脉络', trendLines)}
       ${renderList('市场结构', structureLines)}

@@ -2404,7 +2404,18 @@ def fetch_practice_realtime_market_snapshot(now: datetime) -> dict[str, Any]:
     """Force-refresh current A-share channels in isolated helper processes."""
     jobs = {
         "indices": ("indices_dashboard_api.py", {"items": []}),
-        "sectors": ("sectors_dashboard_api.py", {"gain_top": [], "loss_top": [], "items": []}),
+        "sectors": (
+            "sectors_dashboard_api.py",
+            {
+                "gain_top": [],
+                "loss_top": [],
+                "industry_gain_top": [],
+                "industry_loss_top": [],
+                "concept_gain_top": [],
+                "concept_loss_top": [],
+                "items": [],
+            },
+        ),
         "money_flow": ("money_flow_dashboard_api.py", {"inflow": [], "outflow": []}),
     }
     payloads: dict[str, dict[str, Any]] = {}
@@ -4678,7 +4689,26 @@ class Handler(BaseHTTPRequestHandler):
                 CRON_OUTPUT_DIR / "sectors_dashboard_cache.json",
                 API_TTLS["sectors"],
             )
-            self.send_json_cached("sectors", API_TTLS["sectors"], lambda: run_dashboard_helper("sectors_dashboard_api.py", {"sectors": [], "items": [], "gain_top": [], "loss_top": []}, timeout=120), edge_ttl=API_TTLS["sectors"], browser_ttl=15)
+            self.send_json_cached(
+                "sectors",
+                API_TTLS["sectors"],
+                lambda: run_dashboard_helper(
+                    "sectors_dashboard_api.py",
+                    {
+                        "sectors": [],
+                        "items": [],
+                        "gain_top": [],
+                        "loss_top": [],
+                        "industry_gain_top": [],
+                        "industry_loss_top": [],
+                        "concept_gain_top": [],
+                        "concept_loss_top": [],
+                    },
+                    timeout=120,
+                ),
+                edge_ttl=API_TTLS["sectors"],
+                browser_ttl=15,
+            )
             return
         if parsed.path == "/api/hot_stocks":
             params = parse_qs(parsed.query)

@@ -2189,6 +2189,8 @@ console.log(JSON.stringify([
         self.assertIn('class="practice-market-summary-body"${expanded ? \'\' : \' hidden\'}', DASHBOARD_FRONTEND)
         self.assertIn('function togglePracticeMarketSummary()', DASHBOARD_FRONTEND)
         self.assertIn("disabled aria-busy=\"true\"", DASHBOARD_FRONTEND)
+        self.assertIn('实时热门行业（涨幅与主力净流入交叉确认）', DASHBOARD_FRONTEND)
+        self.assertIn("实时快照已超过5分钟", SRC.joinpath('dashboard', 'practice_market_summary.py').read_text(encoding='utf-8'))
 
     def test_index_snapshot_merge_handles_business_errors_and_stale_full_responses(self):
         start = DASHBOARD_FRONTEND.index('function mergePracticeTimedRows')

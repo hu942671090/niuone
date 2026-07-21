@@ -92,11 +92,28 @@ def _compute():
         rows = _fallback_rows()
     gain_top = sorted(rows, key=lambda x: x.get('pct', 0), reverse=True)[:10]
     loss_top = sorted(rows, key=lambda x: x.get('pct', 0))[:10]
+    industry_rows = [row for row in rows if row.get("source") in {"行业", "指数"}]
+    concept_rows = [row for row in rows if row.get("source") == "概念"]
     return {
         "generated_at": time.strftime('%Y-%m-%d %H:%M:%S'),
         "count": len(rows),
         "gain_top": gain_top,
         "loss_top": loss_top,
+        # Keep industries and concepts independently ranked for consumers that
+        # need to identify the market's primary industry instead of treating
+        # several overlapping concepts as separate leading sectors.
+        "industry_gain_top": sorted(
+            industry_rows, key=lambda x: x.get('pct', 0), reverse=True
+        )[:10],
+        "industry_loss_top": sorted(
+            industry_rows, key=lambda x: x.get('pct', 0)
+        )[:10],
+        "concept_gain_top": sorted(
+            concept_rows, key=lambda x: x.get('pct', 0), reverse=True
+        )[:10],
+        "concept_loss_top": sorted(
+            concept_rows, key=lambda x: x.get('pct', 0)
+        )[:10],
         # 兼容旧前端：sectors/items 默认给涨幅榜
         "sectors": gain_top,
         "items": gain_top,
@@ -104,7 +121,16 @@ def _compute():
 
 
 def fetch_sector_data(force_refresh=False):
-    empty = {"sectors": [], "items": [], "gain_top": [], "loss_top": []}
+    empty = {
+        "sectors": [],
+        "items": [],
+        "gain_top": [],
+        "loss_top": [],
+        "industry_gain_top": [],
+        "industry_loss_top": [],
+        "concept_gain_top": [],
+        "concept_loss_top": [],
+    }
     return load_cached_payload(
         CACHE_PATH,
         CACHE_TTL,
