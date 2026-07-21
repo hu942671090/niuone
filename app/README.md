@@ -7,7 +7,7 @@
 | `automation/` | Cron 规则与调度服务 |
 | `compat/` | 历史裸模块名适配器，不承载业务实现 |
 | `core/` | 路径、缓存等基础设施 |
-| `dashboard/` | Dashboard 服务、API 与安全辅助 |
+| `dashboard/` | Dashboard 服务、公开投影、版本化快照、API 与安全辅助 |
 | `entrypoints/` | Dashboard、调度器、监控与报告等可执行入口 |
 | `market_data/` | 行情访问、证券代码规范化与问财研究数据客户端 |
 | `messaging/` | 通知模型、渠道、分发与兼容层 |
@@ -20,3 +20,5 @@
 | `trading/` | 模拟交易服务、优化器和卖出信号 |
 
 `entrypoints/` 中的脚本是项目支持的启动路径。`compat/` 通过 `_compat.py` 在历史模块命名空间中运行迁移后的实现，供内部裸模块导入和迁移期集成使用。新增业务代码不得写入 `entrypoints/` 或 `compat/`。
+
+Dashboard 继续由 `niuone_dashboard.py` 单端口启动并保留原页面布局。浏览器展示模型由 `dashboard/public_projection.py` 构建，并由 `dashboard/public_snapshots.py` 原子发布；`dashboard/server.py` 在同一端口提供快照、兼容 API 和受管理员密码保护的设置路由，交易和外部请求不得下沉到前端。

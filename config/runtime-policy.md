@@ -40,6 +40,8 @@
 | `.local-data/runtime/logs/` | 服务和任务日志 |
 | `.local-data/backups/` | 部署备份，可能包含旧配置 |
 
+Dashboard 增量接口只允许返回 `.local-data/runtime/public-data/` 中由 `public_projection.py` 字段白名单生成的内容。不要把其父目录、数据库或 `cron/output/` 配置为静态站点根目录。若同步到 CDN，必须以 `objects/`、`manifests/`、`latest.json` 为精确边界，并在每次 schema 变更后重新检查脱敏测试。
+
 不要把上述内容复制到 issue、PR、README、文档示例或聊天上下文。排查问题时只提供脱敏后的错误类型、时间点和必要字段。
 
 ## 模型密钥

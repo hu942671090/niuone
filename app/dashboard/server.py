@@ -151,6 +151,10 @@ DASHBOARD_PAGE_PATHS = frozenset({
 })
 LOCAL_DATA_DIR = get_local_data_dir(PROJECT_ROOT)
 DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
+PUBLIC_DATA_DIR = Path(
+    os.environ.get("DASHBOARD_PUBLIC_DATA_DIR") or DASHBOARD_HOME / "public-data"
+).expanduser()
+PUBLIC_SNAPSHOT_PUBLISHER: Any = None
 CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG") or str(DASHBOARD_HOME / "config.yaml")).expanduser()
 DASHBOARD_ENV_FILE = get_dashboard_env_file(PROJECT_ROOT)
 CRON_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
@@ -420,6 +424,8 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_CN_STOCK_TOOLS", "label": "A股行情工具脚本", "group": "基础路径", "kind": "path", "default": str(ENTRYPOINT_DIR / "cn_stock_tools.py"), "effect": "restart"},
     {"name": "DASHBOARD_CRON_JOBS", "label": "Cron jobs JSON", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "jobs.json"), "effect": "next_run"},
     {"name": "DASHBOARD_X_WATCHLIST_STATE", "label": "X 监控状态文件", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "state" / "x_watchlist_latest.json"), "effect": "next_run"},
+    {"name": "DASHBOARD_PUBLIC_DATA_DIR", "label": "公开快照目录", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "public-data"), "effect": "restart"},
+    {"name": "DASHBOARD_PUBLIC_PROJECTION_ENABLED", "label": "公开增量快照", "group": "基础路径", "kind": "bool", "default": "1", "effect": "restart"},
 
     {"name": "DASHBOARD_ADMIN_PASSWORD", "label": "设置页管理员密码", "group": "访问控制", "kind": "secret", "default": "", "effect": "runtime"},
     {"name": "DASHBOARD_EDGE_CACHE_ENABLED", "label": "允许 CDN 缓存 API", "group": "访问控制", "kind": "bool", "default": "0", "effect": "restart"},
@@ -435,6 +441,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_MEDIA_CACHE_MAX_ENTRIES", "label": "X 图片缓存条目上限", "group": "限流与缓存", "kind": "int", "default": "96", "effect": "restart"},
     {"name": "DASHBOARD_X_MEDIA_CACHE_TTL_SECONDS", "label": "X 图片缓存 TTL 秒数", "group": "限流与缓存", "kind": "int", "default": str(7 * 24 * 3600), "effect": "restart"},
     {"name": "DASHBOARD_X_MEDIA_MAX_BYTES", "label": "X 图片代理最大字节", "group": "限流与缓存", "kind": "int", "default": str(8 * 1024 * 1024), "effect": "restart"},
+    {"name": "DASHBOARD_PUBLIC_REFRESH_SECONDS", "label": "公开快照刷新秒数", "group": "行情与资金流设置", "kind": "int", "default": "15", "effect": "restart"},
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时选股", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股与买卖设置", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
@@ -568,6 +575,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
 ENV_CONFIG_BY_NAME = {item["name"]: item for item in ENV_CONFIG_SCHEMA}
 ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_ADMIN_PASSWORD",
+    "DASHBOARD_PUBLIC_REFRESH_SECONDS",
     "DASHBOARD_US_FEATURES_ENABLED",
     "DASHBOARD_GROK_MODEL",
     "DASHBOARD_GROK_API_MODE",
@@ -3196,7 +3204,7 @@ ADMIN_GROUP_NOTES = {
     "综合决策参考": "为买卖决策汇总指数、板块、资金流向、热门股票等参考数据。缓存秒数控制数据复用周期，单类参考数据上限可设置为 1～8。",
     "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
-    "行情与资金流设置": "统一管理指数刷新和行业资金流动画。播放速度、每侧行业数量、采样间隔及上午/下午采样窗口均支持运行时保存后生效；时间使用北京时间 HH:MM，默认 09:25～11:31、13:00～15:01。",
+    "行情与资金流设置": "统一管理公开快照、指数刷新和行业资金流动画。播放速度、每侧行业数量、采样间隔及上午/下午采样窗口均支持运行时保存后生效；时间使用北京时间 HH:MM，默认 09:25～11:31、13:00～15:01。",
 }
 ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
     {
@@ -4365,6 +4373,15 @@ def admin_setting_group_env_names(group_slug: str) -> set[str]:
     }
 
 
+def public_snapshot_publisher() -> Any:
+    global PUBLIC_SNAPSHOT_PUBLISHER
+    if PUBLIC_SNAPSHOT_PUBLISHER is None:
+        from app.dashboard.public_snapshots import SnapshotPublisher
+
+        PUBLIC_SNAPSHOT_PUBLISHER = SnapshotPublisher(PUBLIC_DATA_DIR)
+    return PUBLIC_SNAPSHOT_PUBLISHER
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "NiuOneDashboard"
     sys_version = ""
@@ -4623,9 +4640,102 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
         self.send_payload(payload, edge_ttl=0 if no_store else 1)
 
+    def send_cacheable_json(
+        self,
+        result: dict[str, Any],
+        *,
+        cache_control: str,
+        etag: str | None = None,
+        head_only: bool = False,
+        status: int = 200,
+    ) -> None:
+        payload = (
+            json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        resolved_etag = f'"{etag or hashlib.sha256(payload).hexdigest()}"'
+        if status == 200 and self.headers.get("If-None-Match", "").strip() == resolved_etag:
+            self.send_response(304)
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("ETag", resolved_etag)
+            self.end_headers()
+            return
+        body, gzipped = self.maybe_gzip_payload(payload, "application/json")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("ETag", resolved_etag)
+        self.send_compression_headers(gzipped, len(body))
+        self.end_headers()
+        if not head_only:
+            self.write_response(body)
+
+    def send_public_snapshot_route(self, path: str, *, head_only: bool = False) -> bool:
+        publisher = public_snapshot_publisher()
+        if path == "/healthz":
+            latest = publisher.read_latest()
+            self.send_cacheable_json(
+                {
+                    "ok": True,
+                    "plane": "unified",
+                    "snapshot_ready": latest is not None,
+                    "revision": int((latest or {}).get("revision") or 0),
+                },
+                cache_control="no-store",
+                head_only=head_only,
+            )
+            return True
+        if path == "/api/v2/public/latest":
+            latest = publisher.read_latest()
+            if latest is None:
+                self.send_cacheable_json(
+                    {"error": "public_snapshot_not_ready"},
+                    cache_control="no-store",
+                    head_only=head_only,
+                    status=503,
+                )
+            else:
+                self.send_cacheable_json(
+                    latest,
+                    cache_control="public, max-age=5, s-maxage=5, stale-while-revalidate=30",
+                    head_only=head_only,
+                )
+            return True
+        manifest_match = re.fullmatch(r"/api/v2/public/manifests/([1-9][0-9]*)\.json", path)
+        if manifest_match:
+            manifest = publisher.read_manifest(int(manifest_match.group(1)))
+            if manifest is None:
+                self.send_json_error(404, "manifest_not_found")
+            else:
+                self.send_cacheable_json(
+                    manifest,
+                    cache_control="public, max-age=31536000, immutable",
+                    head_only=head_only,
+                )
+            return True
+        object_match = re.fullmatch(r"/api/v2/public/objects/([0-9a-f]{64})\.json", path)
+        if object_match:
+            digest = object_match.group(1)
+            value = publisher.read_object(digest)
+            if value is None:
+                self.send_json_error(404, "object_not_found")
+            else:
+                self.send_cacheable_json(
+                    value,
+                    cache_control="public, max-age=31536000, immutable",
+                    etag=digest,
+                    head_only=head_only,
+                )
+            return True
+        if path.startswith("/api/v2/public/"):
+            self.send_json_error(404, "not_found")
+            return True
+        return False
+
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
         if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
+            return
+        if self.send_public_snapshot_route(parsed.path, head_only=True):
             return
         if self.send_static_asset(parsed.path, head_only=True):
             return
@@ -4690,6 +4800,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
+            return
+        if self.send_public_snapshot_route(parsed.path):
             return
         if self.send_static_asset(parsed.path):
             return
@@ -5389,6 +5501,18 @@ def main() -> None:
     start_pending_decision_executor()
     start_practice_equity_heartbeat()
     start_industry_flow_sampler()
+    projection_service = None
+    projection_enabled = str(
+        os.environ.get("DASHBOARD_PUBLIC_PROJECTION_ENABLED", "1") or "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    if projection_enabled:
+        from app.dashboard.projection_service import LegacyDashboardSources, ProjectionService
+        projection_service = ProjectionService(
+            LegacyDashboardSources(sys.modules[__name__]),
+            public_snapshot_publisher(),
+            interval_seconds=float(os.environ.get("DASHBOARD_PUBLIC_REFRESH_SECONDS") or 15),
+        )
+        projection_service.start()
     print(f"牛牛1号：http://{args.host}:{args.port}")
     if ADMIN_PASSWORD:
         print("设置页：/admin（管理员密码保护已启用）")
@@ -5400,6 +5524,9 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if projection_service is not None:
+            projection_service.stop()
 
 
 if __name__ == "__main__":

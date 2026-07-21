@@ -69,6 +69,8 @@ http://127.0.0.1:8787/
 
 The administrator password is saved to `.local-data/dashboard.env`. Treat both the password and the bootstrap administrator key as sensitive credentials; do not commit them or copy them into public contexts.
 
+Public deployments continue to run `./run-dashboard.sh`: the public page and password-protected `/admin` share port `8787`. The server publishes content-addressed snapshots every 15 seconds; the browser checks a lightweight version pointer and fetches data only for changed sections. See [Dashboard Incremental Delivery and Deployment](DASHBOARD_V2_EN.md) for caching and reverse-proxy guidance.
+
 ## 3. Model Configuration
 
 NiuOne requires a large language model to run the complete workflow. Grok is recommended for X watchlist monitoring and the daily U.S. institutional ratings report. Enhanced A-share market summaries can use any model compatible with `/chat/completions`. The news pre-check for A-share candidates can be configured separately with a model that supports real-time search. Trading decisions after stock selection can use a compatible model, with DeepSeek recommended.

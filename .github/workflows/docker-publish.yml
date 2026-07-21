@@ -134,7 +134,7 @@ jobs:
           trap cleanup EXIT
           ready=0
           for _ in {1..120}; do
-            if curl --fail --silent --show-error --head http://127.0.0.1:18787/ >/dev/null; then
+            if curl --fail --silent --show-error http://127.0.0.1:18787/healthz >/dev/null; then
               ready=1
               break
             fi
@@ -145,7 +145,7 @@ jobs:
             exit 1
           fi
           curl --fail --silent --show-error \
-            'http://127.0.0.1:18787/api/messages?limit=1' >/dev/null
+            'http://127.0.0.1:18787/api/v2/public/latest' >/dev/null
 
       - name: Build and push multi-platform image
         id: build

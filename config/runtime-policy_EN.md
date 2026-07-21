@@ -40,6 +40,8 @@ Private runtime directory:
 | `.local-data/runtime/logs/` | Service and task logs |
 | `.local-data/backups/` | Deployment backups, which may contain older configuration |
 
+The Dashboard incremental API may return only content inside `.local-data/runtime/public-data/` that was generated through the field allow-lists in `public_projection.py`. Never configure its parent directory, databases, or `cron/output/` as a static-site root. CDN synchronisation must be limited precisely to `objects/`, `manifests/`, and `latest.json`, and sanitisation tests must be reviewed after every schema change.
+
 Do not copy any of the content above into issues, pull requests, the README, documentation examples, or chat contexts. When troubleshooting, provide only sanitized error types, timestamps, and strictly necessary fields.
 
 ## Model Keys

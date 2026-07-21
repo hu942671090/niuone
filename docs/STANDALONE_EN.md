@@ -45,6 +45,8 @@ Windows:
 run.bat --port 8877
 ```
 
+The public page and complete settings UI use one Dashboard process and port, at `8787/` and `8787/admin` by default. The settings page may be accessed through the domain, while configuration and action APIs still require an administrator session. See [Dashboard Incremental Delivery and Deployment](DASHBOARD_V2_EN.md) for snapshot and CDN guidance.
+
 ## Isolated Startup
 
 For debugging or acceptance testing, use a separate port and a temporary runtime directory to avoid affecting real data:

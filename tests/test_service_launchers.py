@@ -13,6 +13,13 @@ class ServiceLauncherTests(unittest.TestCase):
         self.assertIn('"$ROOT/scripts/manage-long-running.sh" install', text)
         self.assertLess(text.index('if [[ "$SERVICE_MODE" == "1" ]]'), text.index('exec "$ROOT/run-dashboard.sh"'))
 
+    def test_dashboard_launcher_keeps_public_and_admin_routes_on_one_port(self):
+        text = (ROOT / "run-dashboard.sh").read_text(encoding="utf-8")
+        self.assertIn('DASHBOARD_PUBLIC_PROJECTION_ENABLED="${DASHBOARD_PUBLIC_PROJECTION_ENABLED:-1}"', text)
+        self.assertNotIn('V2_FRONTEND_DIR/index.html', text)
+        self.assertNotIn('exec "$BASE/run-dashboard-v2.sh"', text)
+        self.assertIn('exec "$PYTHON_BIN" "$BASE/app/entrypoints/niuone_dashboard.py"', text)
+
     def test_unix_manager_covers_macos_and_linux_processes(self):
         text = (ROOT / "scripts" / "manage-long-running.sh").read_text(encoding="utf-8")
         for value in (

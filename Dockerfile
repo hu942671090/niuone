@@ -45,7 +45,7 @@ EXPOSE 8787
 STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import os, urllib.request; u='http://127.0.0.1:%s/' % os.environ.get('NIUONE_CONTAINER_PORT', '8787'); urllib.request.urlopen(urllib.request.Request(u, method='HEAD'), timeout=3).close()"]
+    CMD ["python", "-c", "import os, urllib.request; u='http://127.0.0.1:%s/healthz' % os.environ.get('NIUONE_CONTAINER_PORT', '8787'); urllib.request.urlopen(u, timeout=3).close()"]
 
 ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
 CMD ["dashboard"]

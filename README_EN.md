@@ -39,6 +39,8 @@ The main README does not cover specific research methods or experimental strateg
 
 When contributing or extending the application, see the [app module architecture](docs/APP_ARCHITECTURE.md) for domain boundaries and compatibility-entrypoint conventions.
 
+The Dashboard keeps its existing page layout and uses same-origin incremental snapshots to reduce public traffic. Trading, market requests, and record computation remain server-side. See [Dashboard Incremental Delivery and Deployment](docs/DASHBOARD_V2_EN.md) for architecture, caching, and CDN/cloud/Tunnel deployment guidance.
+
 ## System Requirements
 
 | Dependency | Requirement | Purpose |
@@ -48,7 +50,7 @@ When contributing or extending the application, see the [app module architecture
 | Browser | A modern browser such as Chrome, Edge, Safari, or Firefox | Access the local workspace |
 | Network | Access to PyPI is required on the first run | Install Python dependencies |
 
-Node.js 18+ is also required when contributing to the project or running the full validation suite, as it is used to check the JavaScript in the dashboard.
+Node.js 18+ is also required when contributing or running the full validation suite, as it checks the Dashboard JavaScript.
 
 ## Quick Start
 
@@ -132,7 +134,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-By default, the service is available only at `127.0.0.1:8787` on the host. Open <http://127.0.0.1:8787/>. To view logs or stop the service:
+By default, the service is available at `127.0.0.1:8787`; the public page and password-protected `/admin` page share that port. To view logs or stop the service:
 
 ```bash
 docker compose logs -f
@@ -346,8 +348,8 @@ For platform-specific status, restart, uninstall, and unattended-operation instr
 After starting the service, run these health checks:
 
 ```bash
-curl -s -o /dev/null -w 'HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/
-curl -s -o /dev/null -w 'HTTP:%{http_code} TOTAL:%{time_total}\n' 'http://127.0.0.1:8787/api/messages?limit=1'
+curl -s -o /dev/null -w 'HEALTH HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/healthz
+curl -s -o /dev/null -w 'SNAPSHOT HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/api/v2/public/latest
 ```
 
 Both are expected to return `HTTP:200`.

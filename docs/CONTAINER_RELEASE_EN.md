@@ -79,7 +79,7 @@ The workflow performs the following steps in order on an `ubuntu-latest` runner:
 4. Configure QEMU and Docker Buildx, then log in to Docker Hub.
 5. Generate the image name, version tags, and OCI metadata from the Git tag.
 6. Build the test-only `linux/amd64` image `niuone:smoke` and load it into the runner's local Docker daemon.
-7. Start a test container and check `/` and `/api/messages?limit=1`. If a check fails, print the container logs and stop the release.
+7. Start a test container and check `/healthz` and `/api/v2/public/latest`. If a check fails, print the container logs and stop the release.
 8. Build the `linux/amd64` and `linux/arm64` multi-platform image and push it to Docker Hub.
 9. Decide whether to update `latest` based on version ordering.
 10. Write the image tags, digest, and `latest` update result to the GitHub Actions Summary.
@@ -120,6 +120,7 @@ By default, `.dockerignore` excludes the entire repository and allows only the f
 - `.dockerignore`
 - `requirements.txt`
 - `app/`
+- `frontend/`
 - `scripts/docker-entrypoint.sh`
 
 Tests, Git history, local runtime data, and other repository files are not included in the image. Runtime configuration, databases, logs, and credentials should be stored in the container's `/data` volume.

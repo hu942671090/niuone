@@ -157,6 +157,13 @@ let practiceCalendarSelectedDate = '';
 let practiceLoadSeq = 0;
 let practiceFullSnapshotStatus = 'idle';
 let practiceFullRequest = null;
+let practiceFullSnapshotLoaded = false;
+let practiceFullSnapshotLastAttemptAt = 0;
+const PRACTICE_FULL_HISTORY_RETRY_MS = 5 * 60 * 1000;
+let publicProjectionRevision = 0;
+let publicProjectionEtag = '';
+let publicProjectionSectionDigests = {};
+let publicProjectionRequest = null;
 let practiceManualCycleData = {running:false, stage:'idle', stage_label:'', error:''};
 let practiceManualCyclePollTimer = null;
 let practiceMarketSummaryData = {loading:true, available:false, scan_count:0};
@@ -1186,42 +1193,95 @@ function mergePracticePayloadSnapshots(current, incoming) {
   merged.last_error = live.last_error || '';
   return merged;
 }
+async function changedPublicProjectionSections() {
+  if (publicProjectionRequest) return publicProjectionRequest;
+  publicProjectionRequest = (async () => {
+    const headers = publicProjectionEtag ? {'If-None-Match': publicProjectionEtag} : {};
+    const latestResponse = await fetch('/api/v2/public/latest', {
+      headers,
+      cache: 'no-cache',
+      credentials: 'same-origin',
+    });
+    if (latestResponse.status === 304) return new Set();
+    if (!latestResponse.ok) throw new Error(`public latest HTTP ${latestResponse.status}`);
+    const latest = await latestResponse.json();
+    const revision = Number(latest?.revision || 0);
+    if (!Number.isInteger(revision) || revision < 1) throw new Error('invalid public revision');
+    publicProjectionEtag = latestResponse.headers.get('ETag') || '';
+    if (revision === publicProjectionRevision) return new Set();
+    const manifestPath = String(latest?.manifest || '');
+    if (!/^manifests\/[1-9][0-9]*\.json$/.test(manifestPath)) throw new Error('invalid public manifest path');
+    const manifestResponse = await fetch(`/api/v2/public/${manifestPath}`, {
+      cache: 'force-cache',
+      credentials: 'same-origin',
+    });
+    if (!manifestResponse.ok) throw new Error(`public manifest HTTP ${manifestResponse.status}`);
+    const manifest = await manifestResponse.json();
+    const nextDigests = {};
+    for (const [name, reference] of Object.entries(manifest?.sections || {})) {
+      const digest = String(reference?.digest || '');
+      if (/^[0-9a-f]{64}$/.test(digest)) nextDigests[name] = digest;
+    }
+    if (!Object.keys(nextDigests).length) throw new Error('public manifest has no sections');
+    const changed = new Set(
+      Object.keys(nextDigests).filter(name => publicProjectionSectionDigests[name] !== nextDigests[name]),
+    );
+    publicProjectionRevision = revision;
+    publicProjectionSectionDigests = nextDigests;
+    return changed;
+  })();
+  try {
+    return await publicProjectionRequest;
+  } finally {
+    publicProjectionRequest = null;
+  }
+}
 async function loadPracticePage() {
   const seq = ++practiceLoadSeq;
-  practiceFullSnapshotStatus = 'loading';
   const fetchJson = (url, options = {}) => fetch(url, options).then(response => {
     if (!response.ok) throw new Error(`${url} HTTP ${response.status}`);
     return response.json();
   });
-  // Start every source together. The fast portfolio no longer waits for the
-  // candidate scan, while the full snapshot hydrates richer historical data.
-  const candidatesPromise = fetchJson('/api/practice_candidates');
-  const manualCyclePromise = fetchJson('/api/niuniu_practice/manual-cycle', {cache: 'no-store'});
-  const marketSummaryPromise = fetchJson('/api/niuniu_practice/market-summary', {cache: 'no-store'});
-  const fastPracticePromise = fetchJson(
-    '/api/niuniu_practice?fast=1&calendar_schema=1',
-    {cache: 'no-cache'},
-  );
-  if (!practiceFullRequest) {
-    practiceFullRequest = fetchJson('/api/niuniu_practice?snapshot_schema=2').then(
-      payload => {
-        practiceFullRequest = null;
-        return payload;
-      },
-      error => {
-        practiceFullRequest = null;
-        throw error;
-      },
-    );
+  let changedSections = null;
+  try {
+    changedSections = await changedPublicProjectionSections();
+  } catch (error) {
+    console.error('public projection check failed; using compatibility APIs', error);
   }
-  const fullPracticePromise = practiceFullRequest;
-  const benchmarksPromise = fetchJson('/api/practice_benchmarks');
+  if (seq !== practiceLoadSeq) return;
+  const sectionChanged = name => changedSections === null || changedSections.has(name);
+  const fastPracticeChanged = ['metadata', 'account', 'history', 'activity'].some(sectionChanged);
+  const candidatesPromise = sectionChanged('candidates')
+    ? fetchJson('/api/practice_candidates')
+    : null;
+  const manualCyclePromise = fetchJson('/api/niuniu_practice/manual-cycle', {cache: 'no-store'});
+  const marketSummaryPromise = sectionChanged('market_summary')
+    ? fetchJson('/api/niuniu_practice/market-summary', {cache: 'no-store'})
+    : null;
+  const fastPracticePromise = fastPracticeChanged
+    ? fetchJson('/api/niuniu_practice?fast=1&calendar_schema=1', {cache: 'no-cache'})
+    : null;
+  if (
+    !practiceFullSnapshotLoaded
+    && !practiceFullRequest
+    && Date.now() - practiceFullSnapshotLastAttemptAt >= PRACTICE_FULL_HISTORY_RETRY_MS
+  ) {
+    practiceFullSnapshotLastAttemptAt = Date.now();
+    practiceFullSnapshotStatus = 'loading';
+    practiceFullRequest = fetchJson('/api/niuniu_practice?snapshot_schema=2').finally(() => {
+      practiceFullRequest = null;
+    });
+  }
+  const fullPracticePromise = practiceFullSnapshotLoaded ? null : practiceFullRequest;
+  const benchmarksPromise = sectionChanged('benchmarks')
+    ? fetchJson('/api/practice_benchmarks')
+    : null;
   const renderPracticeUpdate = () => {
     if (activeCategory === 'practice') render();
     saveViewState();
   };
-  const tasks = [
-    marketSummaryPromise.then(payload => {
+  const tasks = [];
+  if (marketSummaryPromise) tasks.push(marketSummaryPromise.then(payload => {
       if (seq !== practiceLoadSeq) return;
       practiceMarketSummaryData = {...(payload || {}), loading:false};
       renderPracticeUpdate();
@@ -1230,16 +1290,16 @@ async function loadPracticePage() {
       console.error('practice market summary status error', error);
       practiceMarketSummaryData = {...practiceMarketSummaryData, loading:false, error:String(error)};
       renderPracticeUpdate();
-    }),
-    manualCyclePromise.then(payload => {
+    }));
+  tasks.push(manualCyclePromise.then(payload => {
       if (seq !== practiceLoadSeq) return;
       practiceManualCycleData = payload || practiceManualCycleData;
       renderPracticeUpdate();
       if (practiceManualCycleData.running) schedulePracticeManualCyclePoll();
     }).catch(error => {
       if (seq === practiceLoadSeq) console.error('practice manual cycle status error', error);
-    }),
-    candidatesPromise.then(candidatePayload => {
+    }));
+  if (candidatesPromise) tasks.push(candidatesPromise.then(candidatePayload => {
       if (seq !== practiceLoadSeq) return;
       const candidateItems = candidatePayload.items || candidatePayload.candidates || [];
       practiceCandidatesData = {
@@ -1250,17 +1310,18 @@ async function loadPracticePage() {
       renderPracticeUpdate();
     }).catch(error => {
       if (seq === practiceLoadSeq) console.error('practice candidates load error', error);
-    }),
-    fastPracticePromise.then(payload => {
+    }));
+  if (fastPracticePromise) tasks.push(fastPracticePromise.then(payload => {
       if (seq !== practiceLoadSeq || !isUsablePracticePayload(payload)) return;
       niuniuPracticeData = mergePracticePayloadSnapshots(niuniuPracticeData, payload);
       renderPracticeUpdate();
     }).catch(error => {
       if (seq === practiceLoadSeq) console.error('practice fast load error', error);
-    }),
-    fullPracticePromise.then(payload => {
+    }));
+  if (fullPracticePromise) tasks.push(fullPracticePromise.then(payload => {
       if (seq !== practiceLoadSeq) return;
       if (!isUsablePracticePayload(payload)) throw new Error('invalid full practice snapshot');
+      practiceFullSnapshotLoaded = true;
       practiceFullSnapshotStatus = 'loaded';
       niuniuPracticeData = mergePracticePayloadSnapshots(niuniuPracticeData, payload);
       renderPracticeUpdate();
@@ -1269,15 +1330,14 @@ async function loadPracticePage() {
       practiceFullSnapshotStatus = 'error';
       console.error('practice full load error', error);
       if (activeCategory === 'practice') render();
-    }),
-    benchmarksPromise.then(payload => {
+    }));
+  if (benchmarksPromise) tasks.push(benchmarksPromise.then(payload => {
       if (seq !== practiceLoadSeq) return;
       practiceBenchmarksData = payload || {items: []};
       renderPracticeUpdate();
     }).catch(error => {
       if (seq === practiceLoadSeq) console.error('practice benchmarks load error', error);
-    }),
-  ];
+    }));
   await Promise.allSettled(tasks);
 }
 function renderTabs() {

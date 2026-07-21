@@ -78,6 +78,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.original_indices_snapshot_file = dashboard.INDICES_SNAPSHOT_FILE
         self.original_iwencai_snapshot_file = dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE
         self.original_admin_password = dashboard.ADMIN_PASSWORD
+        self.original_public_data_dir = dashboard.PUBLIC_DATA_DIR
+        self.original_public_snapshot_publisher = dashboard.PUBLIC_SNAPSHOT_PUBLISHER
         self.saved_env = {
             name: os.environ.get(name)
             for name in (
@@ -107,6 +109,8 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.CRON_STATE_DIR = self.tmp_path / 'cron' / 'state'
         dashboard.INDICES_SNAPSHOT_FILE = self.tmp_path / 'cron' / 'output' / 'indices_dashboard_cache.json'
         dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = self.tmp_path / 'cron' / 'output' / 'iwencai_dragon_tiger_latest.json'
+        dashboard.PUBLIC_DATA_DIR = self.tmp_path / 'public-data'
+        dashboard.PUBLIC_SNAPSHOT_PUBLISHER = None
         dashboard.API_RESPONSE_CACHE.clear()
         dashboard.API_CACHE_KEY_LOCKS.clear()
         dashboard.API_CACHE_KEY_GENERATIONS.clear()
@@ -123,6 +127,8 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.INDICES_SNAPSHOT_FILE = self.original_indices_snapshot_file
         dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = self.original_iwencai_snapshot_file
         dashboard.ADMIN_PASSWORD = self.original_admin_password
+        dashboard.PUBLIC_DATA_DIR = self.original_public_data_dir
+        dashboard.PUBLIC_SNAPSHOT_PUBLISHER = self.original_public_snapshot_publisher
         for name, value in self.saved_env.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -162,6 +168,44 @@ class DashboardAuthTests(unittest.TestCase):
             'admin_password_required',
         )
 
+    def test_incremental_snapshot_and_admin_share_the_dashboard_port(self):
+        publisher = dashboard.public_snapshot_publisher()
+        latest_value = publisher.publish({'account': {'cash': 100}}, generated_at='now')
+
+        health = FakeHandler(path='/healthz')
+        health.do_GET()
+        self.assertEqual(health.status, 200)
+        self.assertEqual(json.loads(health.wfile.getvalue())['plane'], 'unified')
+
+        latest = FakeHandler(path='/api/v2/public/latest')
+        latest.do_GET()
+        self.assertEqual(latest.status, 200)
+        self.assertIn('s-maxage=5', latest.header('Cache-Control'))
+        self.assertTrue(latest.header('ETag'))
+
+        unchanged = FakeHandler(
+            path='/api/v2/public/latest',
+            headers={'If-None-Match': latest.header('ETag')},
+        )
+        unchanged.do_GET()
+        self.assertEqual(unchanged.status, 304)
+        self.assertEqual(unchanged.wfile.getvalue(), b'')
+
+        manifest = FakeHandler(path=f"/api/v2/public/manifests/{latest_value['revision']}.json")
+        manifest.do_GET()
+        manifest_value = json.loads(manifest.wfile.getvalue())
+        self.assertIn('immutable', manifest.header('Cache-Control'))
+        digest = manifest_value['sections']['account']['digest']
+
+        section = FakeHandler(path=f'/api/v2/public/objects/{digest}.json')
+        section.do_GET()
+        self.assertEqual(json.loads(section.wfile.getvalue()), {'cash': 100})
+        self.assertEqual(section.header('ETag'), f'"{digest}"')
+
+        admin = FakeHandler(path='/admin')
+        admin.do_GET()
+        self.assertEqual(admin.status, 200)
+
     def test_frontend_pages_and_assets_are_served_from_native_static_files(self):
         home = FakeHandler(path='/')
         home.do_GET()
@@ -180,7 +224,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=72">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=86" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=87" defer></script>', DASHBOARD_FRONTEND)
         self.assertIn('id="themeToggle"', DASHBOARD_FRONTEND)
         self.assertIn('class="theme-icon theme-icon-moon"', DASHBOARD_FRONTEND)
         self.assertIn('class="theme-icon theme-icon-sun"', DASHBOARD_FRONTEND)
@@ -2076,7 +2120,11 @@ console.log(JSON.stringify([
         self.assertIn("const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v5';", DASHBOARD_FRONTEND)
         self.assertIn("'/api/niuniu_practice?fast=1&calendar_schema=1'", DASHBOARD_FRONTEND)
         self.assertIn("fetchJson('/api/niuniu_practice?snapshot_schema=2')", DASHBOARD_FRONTEND)
-        self.assertIn('const fullPracticePromise = practiceFullRequest;', DASHBOARD_FRONTEND)
+        self.assertIn('const fullPracticePromise = practiceFullSnapshotLoaded ? null : practiceFullRequest;', DASHBOARD_FRONTEND)
+        self.assertIn("fetch('/api/v2/public/latest'", DASHBOARD_FRONTEND)
+        self.assertIn('async function changedPublicProjectionSections()', DASHBOARD_FRONTEND)
+        self.assertIn('Date.now() - practiceFullSnapshotLastAttemptAt >= PRACTICE_FULL_HISTORY_RETRY_MS', DASHBOARD_FRONTEND)
+        self.assertIn('practiceFullSnapshotLoaded = true;', DASHBOARD_FRONTEND)
         self.assertIn('function mergePracticePayloadSnapshots', DASHBOARD_FRONTEND)
         self.assertIn('function mergePracticeEquityRows', DASHBOARD_FRONTEND)
         self.assertIn('function comparePracticePayloadFreshness', DASHBOARD_FRONTEND)
@@ -3594,10 +3642,11 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(strategy_group['name'], '选股与交易策略')
         market_data_group = next(group for group in groups if group['slug'] == 'indices-refresh')
         self.assertEqual(market_data_group['name'], '行情与资金流设置')
-        self.assertEqual(market_data_group['item_count'], 8)
+        self.assertEqual(market_data_group['item_count'], 9)
         self.assertIn('09:25～11:31、13:00～15:01', market_data_group['note'])
         self.assertEqual(dashboard.admin_setting_group_env_names('indices-refresh'), {
             'DASHBOARD_INDICES_TTL_SECONDS',
+            'DASHBOARD_PUBLIC_REFRESH_SECONDS',
             'DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED',
             'DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT',
             'DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS',

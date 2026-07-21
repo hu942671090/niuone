@@ -79,7 +79,7 @@ git push origin v1.2.3
 4. 配置 QEMU 与 Docker Buildx，并登录 Docker Hub。
 5. 根据 Git tag 生成镜像名称、版本标签和 OCI 元数据。
 6. 构建仅供测试的 `linux/amd64` 镜像 `niuone:smoke`，加载到 runner 本地。
-7. 启动测试容器，检查 `/` 和 `/api/messages?limit=1`；测试失败时输出容器日志并终止发布。
+7. 启动测试容器，检查 `/healthz` 和 `/api/v2/public/latest`；测试失败时输出容器日志并终止发布。
 8. 构建 `linux/amd64`、`linux/arm64` 多平台镜像并推送 Docker Hub。
 9. 根据版本顺序决定是否更新 `latest`。
 10. 将镜像标签、digest 和 `latest` 更新结果写入 GitHub Actions Summary。
@@ -120,6 +120,7 @@ NIUONE_VERSION=v1.2.3
 - `.dockerignore`
 - `requirements.txt`
 - `app/`
+- `frontend/`
 - `scripts/docker-entrypoint.sh`
 
 测试文件、Git 历史、本地运行数据和仓库中的其他文件不会打入镜像。运行配置、数据库、日志和凭据应保存在容器的 `/data` volume 中。
