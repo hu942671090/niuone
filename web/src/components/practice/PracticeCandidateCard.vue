@@ -18,6 +18,7 @@ const strategy = computed(() => props.strategyMeta[strategyName.value] || {
   color: '#94a3b8',
 })
 const tideStrategy = computed(() => ['tide_leader', 'tide_rotation', 'tide_recovery'].includes(strategyName.value))
+const zettarancStrategy = computed(() => ['shaofu_b1', 'b2_confirm', 'b3_accelerate', 'super_b1'].includes(strategyName.value))
 const hardBlockers = computed(() => Array.isArray(props.item.hard_blockers) ? props.item.hard_blockers : [])
 const riskFlags = computed(() => Array.isArray(props.item.risk_flags) ? props.item.risk_flags : [])
 const tier = computed(() => practiceCandidateTier(props.item))
@@ -95,6 +96,9 @@ const tradeDiscipline = computed(() => [props.item.position_hint, props.item.tim
         <span>BBI上行 {{ item.bbi_upward ? '✅' : '❌' }}</span>
         <span>站上BBI {{ item.above_bbi ? '✅' : '❌' }}</span>
         <span v-if="item.min_j_10d != null">J最低 {{ Number(item.min_j_10d).toFixed(1) }} {{ item.j_recovering ? '📈回升' : item.j_oversold ? '📉续降' : '--' }}</span>
+        <span v-if="zettarancStrategy && item.industry_flow_matched" style="color:var(--green-text)">
+          行业主力净流入第{{ item.industry_flow_rank }}名 · 评分+{{ Number(item.industry_flow_adjustment || 0).toFixed(2) }}
+        </span>
       </template>
       <span v-if="scoreBasis">{{ scoreBasis }}</span>
       <span v-if="tradeDiscipline">{{ tradeDiscipline }}</span>

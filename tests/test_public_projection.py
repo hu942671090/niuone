@@ -38,6 +38,10 @@ class PublicProjectionTests(unittest.TestCase):
                     "code": "600000",
                     "best_strategy": "trend_pullback",
                     "best_score": 8.5,
+                    "score_before_industry_flow": 8.0,
+                    "industry_flow_rank": 2,
+                    "industry_flow_adjustment": 0.55,
+                    "industry_flow_matched": True,
                     "hard_blockers": ["停牌"],
                     "private_note": "secret",
                 }],
@@ -55,6 +59,8 @@ class PublicProjectionTests(unittest.TestCase):
         self.assertNotIn("raw_payload", sections["messages"]["records"][0])
         self.assertTrue(sections["candidates"]["running"])
         self.assertEqual(sections["candidates"]["items"][0]["best_score"], 8.5)
+        self.assertEqual(sections["candidates"]["items"][0]["industry_flow_rank"], 2)
+        self.assertEqual(sections["candidates"]["items"][0]["industry_flow_adjustment"], 0.55)
         self.assertEqual(sections["candidates"]["items"][0]["hard_blockers"], ["停牌"])
         self.assertNotIn("private_note", sections["candidates"]["items"][0])
         self.assertEqual(

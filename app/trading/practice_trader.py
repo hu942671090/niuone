@@ -4981,6 +4981,13 @@ def call_model_decision(
     for c in compact_candidates:
         strat = c.get("best_strategy", "")
         strat_label = strategy_labels.get(strat, strat)
+        zettaranc_flow_detail = ""
+        if is_zettaranc_strategy(strat) and c.get("industry_flow_matched"):
+            zettaranc_flow_detail = (
+                f"行业主力净流入排名:{c.get('industry_flow_rank','-')}/"
+                f"{c.get('industry_flow_rank_total','-')} "
+                f"资金加分:+{c.get('industry_flow_adjustment',0)} "
+            )
         tide_detail = ""
         if is_sector_tide_strategy(strat):
             tide_detail = (
@@ -5008,6 +5015,7 @@ def call_model_decision(
             f"时间纪律:{c.get('time_stop','-')} "
             f"共识:{c.get('consensus_count',1)}/多战法 "
             f"{'距EMA20' if is_sector_tide_strategy(strat) else '距BBI'}:{c.get('distance_pct')}% "
+            f"{zettaranc_flow_detail}"
             f"{tide_detail}"
             f"硬过滤:{','.join(c.get('hard_blockers',[]) or ['无'])} "
             f"风险:{','.join(c.get('risk_flags',[]) or ['无'])}"

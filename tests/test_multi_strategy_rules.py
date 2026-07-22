@@ -412,6 +412,85 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["days_from_b1"], 3)
 
+    def test_zettaranc_prefers_higher_industry_main_flow_rank(self):
+        rows = [
+            {
+                "open": 10.0,
+                "close": 10.0,
+                "high": 10.1,
+                "low": 9.9,
+                "volume": 100,
+                "j": 20.0,
+                "bbi": 10.0,
+                "change_pct": 0.0,
+            }
+            for _ in range(40)
+        ]
+        rows[36]["j"] = -12.0
+        rows[-1].update({
+            "open": 10.0,
+            "close": 10.5,
+            "high": 11.2,
+            "low": 9.95,
+            "volume": 110,
+            "j": 50.0,
+            "bbi": 10.0,
+            "change_pct": 5.0,
+            "industry": "半导体行业",
+        })
+        inflow = [
+            {"name": name, "net_flow_yi": 100 - index * 5}
+            for index, name in enumerate([
+                "半导体", "通信设备", "银行", "证券", "软件开发",
+                "汽车零部件", "电池", "消费电子", "光伏设备", "家电",
+            ])
+        ]
+        context = {
+            "industry_money_flow": {
+                "metric": "industry_main_net_flow",
+                "source": "东方财富行业板块主力净额",
+                "generated_at": "2026-07-22 10:00:00",
+                "inflow": inflow,
+            },
+        }
+
+        high_rank = screen.analyze_enriched_rows(
+            rows,
+            {"b2_confirm": screen.score_b2_confirm},
+            context,
+        )["strategies"]["b2_confirm"]
+        low_rank_rows = [dict(row) for row in rows]
+        low_rank_rows[-1]["industry"] = "家电"
+        low_rank = screen.analyze_enriched_rows(
+            low_rank_rows,
+            {"b2_confirm": screen.score_b2_confirm},
+            context,
+        )["strategies"]["b2_confirm"]
+
+        self.assertEqual(high_rank["score_before_industry_flow"], 9.0)
+        self.assertEqual(high_rank["industry_flow_rank"], 1)
+        self.assertEqual(high_rank["industry_flow_adjustment"], 1.5)
+        self.assertEqual(high_rank["score"], 10.0)
+        self.assertEqual(low_rank["industry_flow_rank"], 10)
+        self.assertEqual(low_rank["industry_flow_adjustment"], 0.15)
+        self.assertEqual(low_rank["score"], 9.2)
+        self.assertGreater(high_rank["decision_score"], low_rank["decision_score"])
+
+    def test_zettaranc_ignores_stale_industry_flow_fallback(self):
+        rows = [{"industry": "半导体"}]
+        stale = screen.zettaranc_industry_flow_signal(rows, {
+            "industry_money_flow": {
+                "metric": "industry_main_net_flow",
+                "stale_cache": True,
+                "error": "request timeout",
+                "inflow": [{"name": "半导体", "net_flow_yi": 100}],
+            },
+        })
+
+        self.assertFalse(stale["industry_flow_available"])
+        self.assertFalse(stale["industry_flow_matched"])
+        self.assertEqual(stale["industry_flow_adjustment"], 0.0)
+
     def test_n_structure_filter_uses_local_swing_lows(self):
         rising = [{"low": low} for low in [10.4, 10.0, 9.5, 9.8, 10.5, 10.2, 10.0, 10.3, 10.8]]
         falling = [{"low": low} for low in [10.4, 10.0, 9.5, 9.8, 10.5, 9.4, 9.2, 9.5, 10.0]]

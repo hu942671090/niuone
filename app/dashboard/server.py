@@ -1285,8 +1285,21 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
 
         import multi_strategy_screen as scanner
 
+        active_scorers = scanner.active_strategy_scorers()
+        zettaranc_refresh = bool(
+            set(active_scorers).intersection(getattr(scanner, "ZETTARANC_STRATEGY_IDS", ()))
+        )
+        if zettaranc_refresh:
+            scanner.annotate_candidate_industries(base_items, max_workers=8)
         keys_by_code = {str(item.get("code") or ""): _tencent_key_for_code(str(item.get("code") or "")) for item in base_items}
         quote_map = scanner.tencent_batch_quote(list(keys_by_code.values()))
+        scoring_context = (
+            dict(parsed.get("sector_tide_context") or {})
+            if isinstance(parsed.get("sector_tide_context"), dict)
+            else {}
+        )
+        if zettaranc_refresh:
+            scoring_context["industry_money_flow"] = scanner.fetch_sector_tide_money_flow()
         refreshed: list[dict[str, Any]] = []
         previous_by_code = {str(item.get("code") or ""): item for item in base_items}
         for code, tencent_key in keys_by_code.items():
@@ -1307,7 +1320,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 quote=quote,
                 name=name,
                 industry=str(old.get("industry") or old.get("sector") or ""),
-                context=parsed.get("sector_tide_context") if isinstance(parsed.get("sector_tide_context"), dict) else None,
+                context=scoring_context or None,
+                scorers=active_scorers,
             )
             if not multi:
                 continue
@@ -1354,6 +1368,15 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "sector_score": best.get("sector_score"),
                 "stock_sector_rank": best.get("stock_sector_rank"),
                 "stock_market_rank": best.get("stock_market_rank"),
+                "score_before_industry_flow": best.get("score_before_industry_flow"),
+                "industry_flow_available": best.get("industry_flow_available"),
+                "industry_flow_matched": best.get("industry_flow_matched"),
+                "industry_flow_rank": best.get("industry_flow_rank"),
+                "industry_flow_rank_total": best.get("industry_flow_rank_total"),
+                "industry_flow_net_yi": best.get("industry_flow_net_yi"),
+                "industry_flow_adjustment": best.get("industry_flow_adjustment"),
+                "industry_flow_source": best.get("industry_flow_source"),
+                "industry_flow_generated_at": best.get("industry_flow_generated_at"),
                 "ema20": best.get("ema20"),
                 "ema50": best.get("ema50"),
                 "atr20": best.get("atr20"),

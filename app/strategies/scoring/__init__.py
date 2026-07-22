@@ -47,11 +47,14 @@ from .sector_tide import (
     score_tide_rotation,
 )
 from .zettaranc import (
+    ZETTARANC_INDUSTRY_FLOW_MAX_BONUS,
+    ZETTARANC_STRATEGY_IDS,
     recent_b1_indices,
     score_b2_confirm,
     score_b3_accelerate,
     score_shaofu_b1,
     score_super_b1,
+    zettaranc_industry_flow_signal,
 )
 
 
@@ -86,6 +89,8 @@ __all__ = [
     "LI_DAXIAO_MIN_AMOUNT",
     "STRATEGY_SCORERS",
     "SECTOR_TIDE_STRATEGY_IDS",
+    "ZETTARANC_INDUSTRY_FLOW_MAX_BONUS",
+    "ZETTARANC_STRATEGY_IDS",
     "StrategyScorer",
     "analyze_enriched_rows",
     "build_sector_tide_context",
@@ -121,4 +126,5 @@ __all__ = [
     "strategy_hard_blockers",
     "volatility_pct",
     "with_strategy_profile",
+    "zettaranc_industry_flow_signal",
 ]

@@ -89,6 +89,7 @@ from strategies.scoring import (
     LI_DAXIAO_MIN_AMOUNT,
     SECTOR_TIDE_STRATEGY_IDS,
     STRATEGY_SCORERS,
+    ZETTARANC_STRATEGY_IDS,
     analyze_enriched_rows,
     build_sector_tide_context,
     candle_amplitude_pct,
@@ -119,6 +120,7 @@ from strategies.scoring import (
     strategy_hard_blockers,
     volatility_pct,
     with_strategy_profile,
+    zettaranc_industry_flow_signal,
 )
 from strategies.selection import (
     candidate_is_trade_ready,
@@ -580,16 +582,21 @@ def load_previous_sector_tide_market() -> dict[str, Any] | None:
     return market if isinstance(market, dict) else None
 
 
-def fetch_sector_tide_money_flow() -> dict[str, Any]:
-    """Return cached industry flows; an empty result activates volume fallback."""
+def fetch_industry_money_flow() -> dict[str, Any]:
+    """Return the same cached industry main-flow snapshot used by Dashboard."""
     try:
         from dashboard.apis.money_flow_service import fetch_money_flow
 
         payload = fetch_money_flow()
         return payload if isinstance(payload, dict) else {"inflow": [], "outflow": []}
     except Exception as exc:
-        print(f"[WARN] sector tide money flow unavailable: {type(exc).__name__}; using volume fallback", file=sys.stderr)
+        print(f"[WARN] industry money flow unavailable: {type(exc).__name__}; using neutral fallback", file=sys.stderr)
         return {"inflow": [], "outflow": []}
+
+
+def fetch_sector_tide_money_flow() -> dict[str, Any]:
+    """Backward-compatible alias for integrations patching the old helper."""
+    return fetch_industry_money_flow()
 
 
 def sector_tide_dragon_tiger_archive_dir() -> Path:
@@ -1329,7 +1336,9 @@ def main():
     )
     scorers = active_strategy_scorers()
     sector_tide_enabled = bool(SECTOR_TIDE_STRATEGY_IDS.intersection(scorers))
+    zettaranc_enabled = bool(ZETTARANC_STRATEGY_IDS.intersection(scorers))
     sector_tide_context: dict[str, Any] | None = None
+    strategy_context: dict[str, Any] | None = None
     prepared_by_code: dict[str, list[dict[str, Any]]] = {}
     industry_by_code: dict[str, str] = {}
     prepared_items: list[dict[str, Any]] = []
@@ -1338,17 +1347,28 @@ def main():
     dragon_tiger_snapshot: dict[str, Any] | None = None
     overnight_us_snapshot: dict[str, Any] | None = None
 
-    if sector_tide_enabled:
-        print("  Building shared market/sector tide context...", file=sys.stderr)
-        sector_members = [
+    industry_members: list[dict[str, Any]] = []
+    if sector_tide_enabled or zettaranc_enabled:
+        print("  Resolving candidate industries for strategy scoring...", file=sys.stderr)
+        industry_members = [
             {"code": code, "name": name, "quote": q}
             for code, name, q in to_analyze
         ]
         annotate_candidate_industries(
-            sector_members,
+            industry_members,
             max_workers=8 if scan_workers > 1 else 1,
         )
-        for index, item in enumerate(sector_members):
+        industry_by_code = {
+            str(item["code"]): normalize_industry_name(item.get("industry"))
+            for item in industry_members
+        }
+        sector_tide_flow_rows = fetch_sector_tide_money_flow()
+        if zettaranc_enabled:
+            strategy_context = {"industry_money_flow": sector_tide_flow_rows}
+
+    if sector_tide_enabled:
+        print("  Building shared market/sector tide context...", file=sys.stderr)
+        for index, item in enumerate(industry_members):
             code = str(item["code"])
             name = str(item["name"])
             industry = normalize_industry_name(item.get("industry"))
@@ -1371,9 +1391,8 @@ def main():
                     "rows": rows,
                 })
             if (index + 1) % 50 == 0:
-                print(f"  ... {index + 1}/{len(sector_members)} tide members prepared", file=sys.stderr)
+                print(f"  ... {index + 1}/{len(industry_members)} tide members prepared", file=sys.stderr)
             time.sleep(0.02)
-        sector_tide_flow_rows = fetch_sector_tide_money_flow()
         previous_sector_tide_market = load_previous_sector_tide_market()
         dragon_tiger_snapshot = load_previous_sector_tide_dragon_tiger()
         overnight_us_snapshot = load_sector_tide_overnight_us()
@@ -1385,6 +1404,8 @@ def main():
             dragon_tiger_snapshot=dragon_tiger_snapshot,
             overnight_us_snapshot=overnight_us_snapshot,
         )
+        sector_tide_context["industry_money_flow"] = sector_tide_flow_rows
+        strategy_context = sector_tide_context
         market = sector_tide_context.get("market") or {}
         dragon_tiger = sector_tide_context.get("dragon_tiger") or {}
         overnight_us = sector_tide_context.get("overnight_us") or {}
@@ -1411,7 +1432,7 @@ def main():
                 name=name,
                 industry=industry_by_code.get(code, ""),
                 rows=prepared_by_code.get(code),
-                context=sector_tide_context,
+                context=strategy_context,
                 scorers=scorers,
             )
         except Exception as exc:
@@ -1471,6 +1492,15 @@ def main():
             "sector_breadth20": best.get("sector_breadth20"),
             "stock_sector_rank": best.get("stock_sector_rank"),
             "stock_market_rank": best.get("stock_market_rank"),
+            "score_before_industry_flow": best.get("score_before_industry_flow"),
+            "industry_flow_available": best.get("industry_flow_available"),
+            "industry_flow_matched": best.get("industry_flow_matched"),
+            "industry_flow_rank": best.get("industry_flow_rank"),
+            "industry_flow_rank_total": best.get("industry_flow_rank_total"),
+            "industry_flow_net_yi": best.get("industry_flow_net_yi"),
+            "industry_flow_adjustment": best.get("industry_flow_adjustment"),
+            "industry_flow_source": best.get("industry_flow_source"),
+            "industry_flow_generated_at": best.get("industry_flow_generated_at"),
             "score_before_external_context": best.get("score_before_external_context"),
             "raw_external_context_adjustment": best.get("raw_external_context_adjustment"),
             "external_context_adjustment": best.get("external_context_adjustment"),
@@ -1573,6 +1603,8 @@ def main():
             overnight_us_snapshot=overnight_us_snapshot,
             news_snapshot=news_snapshot,
         )
+        sector_tide_context["industry_money_flow"] = sector_tide_flow_rows
+        strategy_context = sector_tide_context
         record_codes = {
             normalize_stock_code(record.get("code"))
             for record in news_snapshot.get("records") or []

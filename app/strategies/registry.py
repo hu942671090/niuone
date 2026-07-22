@@ -311,7 +311,7 @@ STRATEGY_SUITES: dict[str, dict[str, Any]] = {
     "zettaranc": {
         "id": "zettaranc",
         "label": "Z哥",
-        "desc": "少妇B1、B2确认、B3中继、超级B1、卖出风控",
+        "desc": "少妇B1、B2确认、B3中继、超级B1、行业主力资金优先、卖出风控",
         "color": "#f97316",
         "strategy_ids": strategy_ids_for_persona("zettaranc"),
     },
