@@ -144,7 +144,7 @@
     .sparkline-area { fill:currentColor; opacity:.12; }
     .sparkline-line { stroke:currentColor; stroke-width:2; fill:none; vector-effect:non-scaling-stroke; }
     .sparkline-zero { stroke:rgba(226,232,240,.46); stroke-width:1; stroke-dasharray:4 4; vector-effect:non-scaling-stroke; }
-    .market-breadth-card { margin-top:12px; padding:15px 16px 12px; overflow:hidden; border:1px solid rgba(148,163,184,.16); border-radius:16px; background:linear-gradient(180deg, rgba(15,23,42,.88), rgba(2,6,23,.78)); box-shadow:inset 0 1px 0 rgba(255,255,255,.035), 0 10px 28px rgba(0,0,0,.14); }
+    .market-breadth-card { --market-breadth-limit-down:#4ade80; --market-breadth-limit-up:#fb7185; --market-breadth-broken-limit:#fbbf24; --market-breadth-red:#e879f9; --market-breadth-green:#38bdf8; margin-top:12px; padding:15px 16px 12px; overflow:hidden; border:1px solid rgba(148,163,184,.16); border-radius:16px; background:linear-gradient(180deg, rgba(15,23,42,.88), rgba(2,6,23,.78)); box-shadow:inset 0 1px 0 rgba(255,255,255,.035), 0 10px 28px rgba(0,0,0,.14); }
     .market-breadth-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
     .market-breadth-head h3 { margin:0; color:#f1f5f9; font-size:15px; line-height:1.35; font-weight:900; }
     .market-breadth-head p { margin:3px 0 0; color:#718096; font-size:11px; line-height:1.5; }
@@ -167,10 +167,17 @@
     .market-breadth-axis-label { fill:#64748b; font-size:9px; font-variant-numeric:tabular-nums; }
     .market-breadth-axis-title { fill:#94a3b8; font-size:9px; font-weight:750; }
     .market-breadth-axis-line { stroke:rgba(148,163,184,.30); stroke-width:1; vector-effect:non-scaling-stroke; }
+    .market-breadth-missing-period { pointer-events:none; }
+    .market-breadth-missing-period-bg { fill:rgba(15,23,42,.34); stroke:rgba(148,163,184,.18); stroke-width:.7; vector-effect:non-scaling-stroke; }
+    .market-breadth-missing-period-text { fill:#64748b; font-size:8.5px; font-weight:750; letter-spacing:.15px; }
     .market-breadth-line { fill:none; stroke-width:1.85; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; }
     .market-breadth-line-muted { stroke-width:1.3; opacity:.70; }
     .market-breadth-endpoint { stroke:rgba(15,23,42,.92); stroke-width:.8; vector-effect:non-scaling-stroke; }
     .market-breadth-endpoint-muted { opacity:.78; }
+    .market-breadth-end-label-group { pointer-events:none; }
+    .market-breadth-end-label-connector { fill:none; opacity:.42; stroke-width:.75; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; }
+    .market-breadth-end-label-bg { fill:rgba(15,23,42,.92); stroke:rgba(148,163,184,.20); stroke-width:.7; vector-effect:non-scaling-stroke; }
+    .market-breadth-end-label { font-size:9px; font-weight:850; letter-spacing:.1px; }
     .market-breadth-hit-area { fill:transparent; pointer-events:all; cursor:crosshair; }
     .market-breadth-hover { pointer-events:none; }
     .market-breadth-crosshair { stroke:rgba(148,163,184,.68); stroke-width:1; stroke-dasharray:3 4; vector-effect:non-scaling-stroke; }
@@ -1475,6 +1482,11 @@
     html:not([data-theme="dark"]) .practice-market-evaluation-label,
     html:not([data-theme="dark"]) .indices-cache-notice span:last-child { color:#2457c5; }
     html:not([data-theme="dark"]) .market-breadth-card {
+      --market-breadth-limit-down:#15803d;
+      --market-breadth-limit-up:#be123c;
+      --market-breadth-broken-limit:#b45309;
+      --market-breadth-red:#a21caf;
+      --market-breadth-green:#0369a1;
       border-color:#d7dfec;
       background:#fff;
       box-shadow:none;
@@ -1490,7 +1502,10 @@
     html:not([data-theme="dark"]) .market-breadth-axis-label { fill:#7a8699; }
     html:not([data-theme="dark"]) .market-breadth-grid { stroke:rgba(71,84,103,.12); }
     html:not([data-theme="dark"]) .market-breadth-axis-line { stroke:rgba(71,84,103,.28); }
+    html:not([data-theme="dark"]) .market-breadth-missing-period-bg { fill:rgba(248,250,252,.94); stroke:#d8e0eb; }
+    html:not([data-theme="dark"]) .market-breadth-missing-period-text { fill:#7a8699; }
     html:not([data-theme="dark"]) .market-breadth-endpoint { stroke:#fff; }
+    html:not([data-theme="dark"]) .market-breadth-end-label-bg { fill:rgba(255,255,255,.97); stroke:#d8e0eb; }
     html:not([data-theme="dark"]) .market-breadth-crosshair { stroke:rgba(71,84,103,.50); }
     html:not([data-theme="dark"]) .market-breadth-hover-point { stroke:#fff; }
     html:not([data-theme="dark"]) .market-breadth-tooltip-panel { fill:rgba(255,255,255,.98); stroke:#cfd8e6; filter:drop-shadow(0 5px 8px rgba(15,23,42,.16)); }

@@ -6,11 +6,11 @@ const props = defineProps({
 })
 
 const SERIES = [
-  { key: 'limit_down', label: '跌停板', color: '#16a34a', axis: 'right', group: 'limit' },
-  { key: 'limit_up', label: '涨停板', color: '#e11d48', axis: 'right', group: 'limit' },
-  { key: 'broken_limit', label: '炸板', color: '#f59e0b', axis: 'right', group: 'limit' },
-  { key: 'red', label: '红盘', color: '#fb7185', axis: 'left', group: 'breadth', muted: true },
-  { key: 'green', label: '绿盘', color: '#2dd4bf', axis: 'left', group: 'breadth', muted: true },
+  { key: 'limit_down', label: '跌停板', color: 'var(--market-breadth-limit-down, #4ade80)', axis: 'right', group: 'limit' },
+  { key: 'limit_up', label: '涨停板', color: 'var(--market-breadth-limit-up, #fb7185)', axis: 'right', group: 'limit' },
+  { key: 'broken_limit', label: '炸板', color: 'var(--market-breadth-broken-limit, #fbbf24)', axis: 'right', group: 'limit' },
+  { key: 'red', label: '红盘', color: 'var(--market-breadth-red, #e879f9)', axis: 'left', group: 'breadth', muted: true },
+  { key: 'green', label: '绿盘', color: 'var(--market-breadth-green, #38bdf8)', axis: 'left', group: 'breadth', muted: true },
 ]
 
 const showBreadth = ref(true)
@@ -37,6 +37,31 @@ function tradeProgress(value) {
 
 function roundedCeiling(value, step, minimum) {
   return Math.max(minimum, Math.ceil(value / step) * step)
+}
+
+function spreadEndLabels(paths, top, bottom) {
+  const gap = 17
+  const labels = paths
+    .map(path => ({
+      ...path,
+      anchorY: Number(path.lastY),
+      labelY: Number(path.lastY),
+    }))
+    .sort((left, right) => left.labelY - right.labelY)
+  if (!labels.length) return labels
+
+  labels[0].labelY = Math.max(top, labels[0].labelY)
+  for (let index = 1; index < labels.length; index += 1) {
+    labels[index].labelY = Math.max(labels[index].labelY, labels[index - 1].labelY + gap)
+  }
+  const overflow = labels.at(-1).labelY - bottom
+  if (overflow > 0) labels.forEach(label => { label.labelY -= overflow })
+  for (let index = labels.length - 2; index >= 0; index -= 1) {
+    labels[index].labelY = Math.min(labels[index].labelY, labels[index + 1].labelY - gap)
+  }
+  const underflow = top - labels[0].labelY
+  if (underflow > 0) labels.forEach(label => { label.labelY += underflow })
+  return labels
 }
 
 const latest = computed(() => props.payload.latest || {})
@@ -66,7 +91,7 @@ const chart = computed(() => {
   if (!timeline.value.length || !hasSelection.value) return null
   const width = 720
   const height = 286
-  const margin = { top: 16, right: 50, bottom: 34, left: 50 }
+  const margin = { top: 16, right: 92, bottom: 34, left: 50 }
   const plotWidth = width - margin.left - margin.right
   const plotHeight = height - margin.top - margin.bottom
   const leftPeak = Math.max(
@@ -95,6 +120,13 @@ const chart = computed(() => {
     lastX: x(timeline.value.at(-1)).toFixed(1),
     lastY: y(timeline.value.at(-1)[series.key], series.axis).toFixed(1),
   }))
+  const latestX = Number(paths[0]?.lastX ?? (width - margin.right))
+  const labelRailX = Math.min(latestX + 14, width - margin.right + 11)
+  const endLabels = spreadEndLabels(
+    paths,
+    margin.top + 6,
+    height - margin.bottom - 6,
+  )
   const grid = Array.from({ length: 5 }, (_, index) => {
     const ratio = index / 4
     return {
@@ -113,8 +145,28 @@ const chart = computed(() => {
     ...item,
     x: (margin.left + item.minute / 240 * plotWidth).toFixed(1),
   }))
+  const sampleTimes = timeline.value.map(point => String(point.generated_at || '').slice(11, 19))
+  const missingMorning = sampleTimes.some(value => value >= '13:00:00')
+    && !sampleTimes.some(value => value <= '11:30:59')
+  const morningNotice = missingMorning
+    ? { x: margin.left + plotWidth / 4, y: margin.top + plotHeight / 2 }
+    : null
   const samples = timeline.value.map(point => ({ point, x: x(point) }))
-  return { width, height, margin, plotWidth, plotHeight, paths, grid, xTicks, samples, y }
+  return {
+    width,
+    height,
+    margin,
+    plotWidth,
+    plotHeight,
+    paths,
+    endLabels,
+    labelRailX,
+    morningNotice,
+    grid,
+    xTicks,
+    samples,
+    y,
+  }
 })
 
 const hoveredSample = computed(() => {
@@ -243,7 +295,7 @@ const latestTime = computed(() => String(props.payload.generated_at || latest.va
             :y2="line.y"
           />
           <text v-if="showBreadth" class="market-breadth-axis-label" :x="chart.margin.left - 8" :y="Number(line.y) + 4" text-anchor="end">{{ line.left }}</text>
-          <text v-if="showLimitState" class="market-breadth-axis-label" :x="chart.width - chart.margin.right + 8" :y="Number(line.y) + 4">{{ line.right }}</text>
+          <text v-if="showLimitState" class="market-breadth-axis-label" :x="chart.width - 7" :y="Number(line.y) + 4" text-anchor="end">{{ line.right }}</text>
         </g>
         <g v-for="tick in chart.xTicks" :key="tick.label">
           <line
@@ -273,6 +325,22 @@ const latestTime = computed(() => String(props.payload.generated_at || latest.va
         />
         <text v-if="showBreadth" class="market-breadth-axis-title" :x="chart.margin.left" y="11">红盘 / 绿盘（只）</text>
         <text v-if="showLimitState" class="market-breadth-axis-title" :x="chart.width - chart.margin.right" y="11" text-anchor="end">涨跌停 / 炸板（只）</text>
+        <g v-if="chart.morningNotice" class="market-breadth-missing-period" aria-hidden="true">
+          <rect
+            class="market-breadth-missing-period-bg"
+            :x="chart.morningNotice.x - 43"
+            :y="chart.morningNotice.y - 9"
+            width="86"
+            height="18"
+            rx="6"
+          />
+          <text
+            class="market-breadth-missing-period-text"
+            :x="chart.morningNotice.x"
+            :y="chart.morningNotice.y + 3"
+            text-anchor="middle"
+          >上午无有效采样</text>
+        </g>
         <g v-for="series in chart.paths" :key="series.key">
           <path
             class="market-breadth-line"
@@ -290,6 +358,32 @@ const latestTime = computed(() => String(props.payload.generated_at || latest.va
           >
             <title>{{ series.label }} {{ numeric(latest[series.key]).toLocaleString('zh-CN') }} 只</title>
           </circle>
+        </g>
+        <g
+          v-for="label in chart.endLabels"
+          :key="`${label.key}-end-label`"
+          class="market-breadth-end-label-group"
+          aria-hidden="true"
+        >
+          <path
+            class="market-breadth-end-label-connector"
+            :d="`M ${Number(label.lastX) + 3} ${label.anchorY} L ${chart.labelRailX - 7} ${label.anchorY} L ${chart.labelRailX - 2} ${label.labelY}`"
+            :stroke="label.color"
+          />
+          <rect
+            class="market-breadth-end-label-bg"
+            :x="chart.labelRailX"
+            :y="label.labelY - 7"
+            width="39"
+            height="14"
+            rx="4"
+          />
+          <text
+            class="market-breadth-end-label"
+            :x="chart.labelRailX + 4"
+            :y="label.labelY + 3"
+            :fill="label.color"
+          >{{ label.label }}</text>
         </g>
         <rect
           class="market-breadth-hit-area"
