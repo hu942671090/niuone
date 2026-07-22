@@ -200,10 +200,15 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.flow-bars-col-list { position: relative; }
 .industry-flow-rank-move,
 .industry-flow-rank-enter-active,
 .industry-flow-rank-leave-active {
   transition: transform 420ms cubic-bezier(.22,.8,.24,1), opacity 302ms cubic-bezier(.22,.8,.24,1);
+}
+.industry-flow-rank-leave-active {
+  position: absolute;
+  width: 100%;
 }
 .industry-flow-rank-enter-from,
 .industry-flow-rank-leave-to {

@@ -2007,6 +2007,9 @@ console.log(JSON.stringify({
         self.assertIn('name="industry-flow-rank"', component)
         self.assertIn('.industry-flow-rank-move,', component)
         self.assertIn('transition: transform 420ms cubic-bezier(.22,.8,.24,1)', component)
+        self.assertIn('.flow-bars-col-list { position: relative; }', component)
+        self.assertIn('position: absolute;', component)
+        self.assertIn('width: 100%;', component)
         self.assertIn("@media (prefers-reduced-motion: reduce)", component)
 
     def test_industry_flow_playback_duration_keeps_sample_transitions_readable(self):
