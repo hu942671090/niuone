@@ -1960,6 +1960,45 @@ console.log(JSON.stringify(frameAt(payload, 0.5).nodes.map(node => node.id)));
         )
         self.assertEqual(set(json.loads(output)), {'in-a', 'out-a'})
 
+    def test_industry_flow_initial_load_shows_latest_frame_without_autoplay(self):
+        scenario = r"""
+globalThis.window = {matchMedia:() => ({matches:false})};
+const {configureIndustryFlowAnimation, useIndustryFlowAnimation} = await import(SOURCE);
+const payload = {
+  nodes:[{id:'sector-a', name:'行业A', net_flow_yi:18}],
+  timeline:[
+    {generated_at:'2026-07-20 10:00:00', nodes:[
+      {id:'sector-a', name:'行业A', net_flow_yi:10},
+    ]},
+    {generated_at:'2026-07-20 10:01:00', nodes:[
+      {id:'sector-a', name:'行业A', net_flow_yi:18},
+    ]},
+  ],
+};
+configureIndustryFlowAnimation(payload, false);
+const flow = useIndustryFlowAnimation({value:payload});
+console.log(JSON.stringify({
+  progress:flow.animation.progress,
+  playing:flow.animation.playing,
+  currentTime:flow.currentTime.value,
+  netFlow:flow.sides.value.inflow[0].net_flow_yi,
+}));
+"""
+        output = subprocess.check_output(
+            ['node', '--input-type=module', '-e', scenario.replace(
+                'SOURCE', json.dumps(INDUSTRY_FLOW_ANIMATION_PATH.as_uri()),
+            )],
+            cwd=ROOT,
+            text=True,
+        )
+        state = json.loads(output)
+        self.assertEqual(state, {
+            'progress': 1,
+            'playing': False,
+            'currentTime': '10:01:00',
+            'netFlow': 18,
+        })
+
     def test_industry_flow_rank_changes_use_vue_transition_group(self):
         component = (
             ROOT / 'web' / 'src' / 'components' / 'IndustryFlowPanel.vue'

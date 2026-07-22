@@ -128,7 +128,7 @@ export function configureIndustryFlowAnimation(payload, hadData) {
   const configuredSpeed = Number(payload?.settings?.playback_speed)
   if (!animation.speedUserOverride && SPEED_OPTIONS.includes(configuredSpeed)) animation.speed = configuredSpeed
   const frames = timelineFrames(payload)
-  if (motionReduced) {
+  if (motionReduced || !hadData) {
     animation.progress = 1
     animation.playing = false
   } else if (frames.length > 1) {

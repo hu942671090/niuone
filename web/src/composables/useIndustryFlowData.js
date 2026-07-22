@@ -42,7 +42,7 @@ async function loadIndustryFlow({ background = false } = {}) {
     if (payload?.money_flow && (Array.isArray(payload.money_flow.inflow) || Array.isArray(payload.money_flow.outflow))) {
       useIndicesData().adoptMoneyFlow(payload.money_flow)
     }
-    const hadData = state.payload.loaded === true
+    const hadData = state.payload.loaded === true && state.payload.nodes?.length > 0
     state.payload = { ...(payload || {}), loading: false, loaded: true }
     configureIndustryFlowAnimation(state.payload, hadData)
     publishLastUpdated(state.payload)
