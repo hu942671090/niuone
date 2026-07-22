@@ -202,7 +202,7 @@ def fetch_auction_snapshot() -> tuple[list[dict[str, Any]], str | None]:
     fields = "f12,f14,f2,f3,f4,f5,f6,f10,f15,f16,f17,f18,f100"
     page_size = 100
     max_pages = safe_int(os.getenv("A_SHARE_AUCTION_SNAPSHOT_MAX_PAGES", "70"), 70)
-    deadline = time.monotonic() + safe_int(os.getenv("A_SHARE_AUCTION_SNAPSHOT_DEADLINE", "20"), 20)
+    deadline = time.monotonic() + safe_int(os.getenv("A_SHARE_AUCTION_SNAPSHOT_DEADLINE", "60"), 60)
     workers = max(1, min(12, safe_int(os.getenv("A_SHARE_AUCTION_SNAPSHOT_WORKERS", "8"), 8)))
     attempts = max(1, min(4, safe_int(os.getenv("A_SHARE_AUCTION_SNAPSHOT_RETRIES", "3"), 3)))
     endpoints = [
