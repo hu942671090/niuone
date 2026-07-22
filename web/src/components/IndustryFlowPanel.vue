@@ -58,6 +58,19 @@ function handleSeek(event) {
   seek(event.target.value)
 }
 
+function pinLeavingRow(element) {
+  const list = element.parentElement
+  if (!list) return
+  const rowRect = element.getBoundingClientRect()
+  const listRect = list.getBoundingClientRect()
+  element.style.position = 'absolute'
+  element.style.top = `${rowRect.top - listRect.top}px`
+  element.style.left = `${rowRect.left - listRect.left}px`
+  element.style.width = `${rowRect.width}px`
+  element.style.transform = 'none'
+  element.style.pointerEvents = 'none'
+}
+
 watch(
   () => state.payload,
   async nextPayload => {
@@ -121,7 +134,7 @@ onBeforeUnmount(() => {
         >
           <div class="flow-bars-split">
             <div class="flow-bars-col outflow">
-              <TransitionGroup v-if="sides.outflow.length" tag="div" name="industry-flow-rank" class="flow-bars-col-list" data-flow-out-list>
+              <TransitionGroup v-if="sides.outflow.length" tag="div" name="industry-flow-rank" class="flow-bars-col-list" data-flow-out-list @before-leave="pinLeavingRow">
                 <div
                   v-for="(node, index) in sides.outflow"
                   :key="node.id"
@@ -142,7 +155,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="flow-bars-axis" aria-hidden="true"><span /></div>
             <div class="flow-bars-col inflow">
-              <TransitionGroup v-if="sides.inflow.length" tag="div" name="industry-flow-rank" class="flow-bars-col-list" data-flow-in-list>
+              <TransitionGroup v-if="sides.inflow.length" tag="div" name="industry-flow-rank" class="flow-bars-col-list" data-flow-in-list @before-leave="pinLeavingRow">
                 <div
                   v-for="(node, index) in sides.inflow"
                   :key="node.id"
@@ -202,19 +215,17 @@ onBeforeUnmount(() => {
 <style scoped>
 .flow-bars-col-list { position: relative; }
 .industry-flow-rank-move,
-.industry-flow-rank-enter-active,
-.industry-flow-rank-leave-active {
+.industry-flow-rank-enter-active {
   transition: transform 420ms cubic-bezier(.22,.8,.24,1), opacity 302ms cubic-bezier(.22,.8,.24,1);
 }
 .industry-flow-rank-leave-active {
-  position: absolute;
-  width: 100%;
+  transition: opacity 180ms ease-out;
 }
-.industry-flow-rank-enter-from,
-.industry-flow-rank-leave-to {
+.industry-flow-rank-enter-from {
   opacity: 0;
   transform: translateY(8px);
 }
+.industry-flow-rank-leave-to { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
   .industry-flow-rank-move,
   .industry-flow-rank-enter-active,

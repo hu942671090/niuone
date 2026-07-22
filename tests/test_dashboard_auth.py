@@ -2005,11 +2005,14 @@ console.log(JSON.stringify({
         ).read_text(encoding='utf-8')
         self.assertEqual(component.count('<TransitionGroup'), 2)
         self.assertIn('name="industry-flow-rank"', component)
+        self.assertEqual(component.count('@before-leave="pinLeavingRow"'), 2)
         self.assertIn('.industry-flow-rank-move,', component)
         self.assertIn('transition: transform 420ms cubic-bezier(.22,.8,.24,1)', component)
         self.assertIn('.flow-bars-col-list { position: relative; }', component)
-        self.assertIn('position: absolute;', component)
-        self.assertIn('width: 100%;', component)
+        self.assertIn('const rowRect = element.getBoundingClientRect()', component)
+        self.assertIn("element.style.position = 'absolute'", component)
+        self.assertIn("element.style.transform = 'none'", component)
+        self.assertIn('transition: opacity 180ms ease-out;', component)
         self.assertIn("@media (prefers-reduced-motion: reduce)", component)
 
     def test_industry_flow_playback_duration_keeps_sample_transitions_readable(self):
