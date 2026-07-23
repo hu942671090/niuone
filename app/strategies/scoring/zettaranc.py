@@ -67,9 +67,14 @@ def zettaranc_industry_flow_signal(
         "industry": industry,
         "industry_flow_available": False,
         "industry_flow_matched": False,
+        "industry_flow_direction": "neutral",
         "industry_flow_rank": None,
         "industry_flow_rank_total": 0,
         "industry_flow_net_yi": None,
+        "industry_outflow_matched": False,
+        "industry_outflow_rank": None,
+        "industry_outflow_rank_total": 0,
+        "industry_outflow_net_yi": None,
         "industry_flow_adjustment": 0.0,
         "industry_flow_source": str(flow_payload.get("source") or ""),
         "industry_flow_generated_at": str(flow_payload.get("generated_at") or ""),
@@ -82,50 +87,72 @@ def zettaranc_industry_flow_signal(
     ):
         return metadata
 
-    ranked: list[tuple[str, float]] = []
-    for row in flow_payload.get("inflow") or []:
-        if not isinstance(row, dict):
-            continue
-        name = _industry_name(row.get("name") or row.get("industry"))
-        value = _flow_number(
-            row.get("net_flow_yi")
-            if row.get("net_flow_yi") is not None
-            else row.get("main_net_flow_yi")
-        )
-        if name and value is not None and value > 0:
-            ranked.append((name, value))
-    ranked.sort(key=lambda item: (-item[1], item[0]))
-    if not ranked:
+    def ranked_rows(key: str, *, positive: bool) -> list[tuple[str, float]]:
+        ranked: list[tuple[str, float]] = []
+        for row in flow_payload.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            name = _industry_name(row.get("name") or row.get("industry"))
+            value = _flow_number(
+                row.get("net_flow_yi")
+                if row.get("net_flow_yi") is not None
+                else row.get("main_net_flow_yi")
+            )
+            if name and value is not None and ((positive and value > 0) or (not positive and value < 0)):
+                ranked.append((name, value))
+        ranked.sort(key=(lambda item: (-item[1], item[0])) if positive else (lambda item: (item[1], item[0])))
+        return ranked
+
+    def unique_match(ranked: list[tuple[str, float]]) -> int | None:
+        exact = [index for index, (name, _value) in enumerate(ranked) if name == industry]
+        partial = [
+            index
+            for index, (name, _value) in enumerate(ranked)
+            if industry in name or name in industry
+        ]
+        matches = exact or partial
+        # Ambiguous partial names (for example, 汽车 vs 汽车整车/汽车零部件)
+        # must stay neutral rather than receiving a possibly incorrect signal.
+        return matches[0] if len(matches) == 1 else None
+
+    ranked = ranked_rows("inflow", positive=True)
+    ranked_outflow = ranked_rows("outflow", positive=False)
+    if not ranked and not ranked_outflow:
         return metadata
 
     metadata["industry_flow_available"] = True
     metadata["industry_flow_rank_total"] = len(ranked)
-    exact = [index for index, (name, _value) in enumerate(ranked) if name == industry]
-    partial = [
-        index
-        for index, (name, _value) in enumerate(ranked)
-        if industry in name or name in industry
-    ]
-    matches = exact or partial
-    # Ambiguous partial names (for example, 汽车 vs 汽车整车/汽车零部件)
-    # must stay neutral rather than receiving a possibly incorrect bonus.
-    if len(matches) != 1:
+    metadata["industry_outflow_rank_total"] = len(ranked_outflow)
+
+    matched_index = unique_match(ranked)
+    if matched_index is not None:
+        matched_name, net_flow_yi = ranked[matched_index]
+        rank = matched_index + 1
+        adjustment = max(
+            0.0,
+            ZETTARANC_INDUSTRY_FLOW_MAX_BONUS
+            - (rank - 1) * ZETTARANC_INDUSTRY_FLOW_RANK_STEP,
+        )
+        metadata.update({
+            "industry_flow_matched": True,
+            "industry_flow_direction": "inflow",
+            "industry_flow_industry": matched_name,
+            "industry_flow_rank": rank,
+            "industry_flow_net_yi": round(net_flow_yi, 4),
+            "industry_flow_adjustment": round(adjustment, 2),
+        })
         return metadata
 
-    matched_index = matches[0]
-    matched_name, net_flow_yi = ranked[matched_index]
-    rank = matched_index + 1
-    adjustment = max(
-        0.0,
-        ZETTARANC_INDUSTRY_FLOW_MAX_BONUS
-        - (rank - 1) * ZETTARANC_INDUSTRY_FLOW_RANK_STEP,
-    )
+    outflow_index = unique_match(ranked_outflow)
+    if outflow_index is None:
+        return metadata
+    matched_name, net_flow_yi = ranked_outflow[outflow_index]
     metadata.update({
-        "industry_flow_matched": True,
+        "industry_flow_direction": "outflow",
+        "industry_outflow_matched": True,
         "industry_flow_industry": matched_name,
-        "industry_flow_rank": rank,
-        "industry_flow_net_yi": round(net_flow_yi, 4),
-        "industry_flow_adjustment": round(adjustment, 2),
+        "industry_outflow_rank": outflow_index + 1,
+        "industry_outflow_net_yi": round(net_flow_yi, 4),
     })
     return metadata
 

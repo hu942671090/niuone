@@ -491,6 +491,29 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertFalse(stale["industry_flow_matched"])
         self.assertEqual(stale["industry_flow_adjustment"], 0.0)
 
+    def test_zettaranc_exposes_matching_industry_outflow_without_score_penalty(self):
+        rows = [{"industry": "半导体行业"}]
+        signal = screen.zettaranc_industry_flow_signal(rows, {
+            "industry_money_flow": {
+                "metric": "industry_main_net_flow",
+                "source": "东方财富行业板块主力净额",
+                "generated_at": "2026-07-22 10:00:00",
+                "inflow": [{"name": "银行", "net_flow_yi": 10.0}],
+                "outflow": [
+                    {"name": "软件开发", "net_flow_yi": -30.0},
+                    {"name": "半导体", "net_flow_yi": -20.0},
+                ],
+            },
+        })
+
+        self.assertTrue(signal["industry_flow_available"])
+        self.assertFalse(signal["industry_flow_matched"])
+        self.assertTrue(signal["industry_outflow_matched"])
+        self.assertEqual(signal["industry_flow_direction"], "outflow")
+        self.assertEqual(signal["industry_outflow_rank"], 2)
+        self.assertEqual(signal["industry_outflow_net_yi"], -20.0)
+        self.assertEqual(signal["industry_flow_adjustment"], 0.0)
+
     def test_n_structure_filter_uses_local_swing_lows(self):
         rising = [{"low": low} for low in [10.4, 10.0, 9.5, 9.8, 10.5, 10.2, 10.0, 10.3, 10.8]]
         falling = [{"low": low} for low in [10.4, 10.0, 9.5, 9.8, 10.5, 9.4, 9.2, 9.5, 10.0]]

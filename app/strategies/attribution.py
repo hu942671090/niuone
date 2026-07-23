@@ -64,6 +64,8 @@ def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
             return "technical_break"
         if signal in {"sell_score_exit", "sell_score_reduce"}:
             return "sell_score"
+        if signal == "shaofu_soft_reduce":
+            return "position_adjust"
         if signal in {
             "no_progress", "max_hold_days", "stale_loser", "stale_below_bbi",
             "tide_leader_no_progress", "tide_rotation_no_follow_through", "tide_recovery_unconfirmed",

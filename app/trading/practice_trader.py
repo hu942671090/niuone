@@ -70,7 +70,12 @@ from strategies.attribution import (
     classify_exit_rule,
     compact_position_strategy_mark,
 )
-from strategies.exits import evaluate_strategy_time_exit
+from strategies.exits import (
+    SHAOFU_MIN_HOLD_TRADING_DAYS,
+    SHAOFU_SOFT_EXIT_CONFIRMATIONS,
+    evaluate_shaofu_soft_exit,
+    evaluate_strategy_time_exit,
+)
 from strategies.performance import (
     _add_perf_open_position,
     _add_perf_trade,
@@ -89,6 +94,7 @@ from strategies.prompts import (
     format_preset_strategy_section,
 )
 from strategies.scoring.common import find_n_structure_prior_low as _find_n_structure_prior_low
+from strategies.scoring.zettaranc import zettaranc_industry_flow_signal
 from strategies.sector_tide_risk import (
     SECTOR_TIDE_EXECUTION_BUFFER_PCT,
     effective_loss_distance_pct,
@@ -233,6 +239,8 @@ def load_dashboard_env() -> None:
 load_dashboard_env()
 STATE_FILE = Path(os.environ.get("DASHBOARD_PORTFOLIO_STATE", DASHBOARD_HOME / "cron" / "output" / "niuniu_practice_portfolio.json")).expanduser()
 MULTI_STRATEGY_CACHE_FILE = DASHBOARD_HOME / "cron" / "output" / "multi_strategy_latest.json"
+MARKET_BREADTH_HISTORY_FILE = DASHBOARD_HOME / "cron" / "output" / "market_breadth_history.json"
+STOCK_INDUSTRY_CACHE_FILE = DASHBOARD_HOME / "cron" / "output" / "stock_industry_cache.json"
 CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG", DASHBOARD_HOME / "config.yaml")).expanduser()
 STOCK_TOOLS_SCRIPT = Path(
     os.environ.get("DASHBOARD_CN_STOCK_TOOLS", SCRIPT_DIR / "entrypoints" / "cn_stock_tools.py")
@@ -1038,7 +1046,8 @@ def normalize_quote_price(price: float | None, *fallbacks: float | None) -> floa
 
 def build_quote(code: str, name: str, price: float, prev_close: float | None, open_price: float | None,
                 high: float | None, low: float | None, turnover_yuan: float | None, source: str,
-                quote_time: str | None = None) -> dict[str, Any]:
+                quote_time: str | None = None, volume_lots: float | None = None,
+                volume_ratio: float | None = None) -> dict[str, Any]:
     change = round(price - prev_close, 2) if prev_close else None
     change_pct = round((change / prev_close) * 100, 2) if change is not None and prev_close else None
     return {
@@ -1052,6 +1061,8 @@ def build_quote(code: str, name: str, price: float, prev_close: float | None, op
         "change": change,
         "change_pct": change_pct,
         "turnover_yuan": turnover_yuan,
+        "volume_lots": volume_lots,
+        "volume_ratio": volume_ratio,
         "quote_time": quote_time or now_ts(),
         "source": source,
     }
@@ -1084,6 +1095,7 @@ def parse_tencent_quote_line(line: str) -> dict[str, Any] | None:
         low=low,
         turnover_yuan=turnover_wan * 10000 if turnover_wan is not None else None,
         source="Tencent qt realtime quote",
+        volume_lots=safe_quote_float(parts[6]),
     )
 
 
@@ -1136,6 +1148,8 @@ def quote_one_as_realtime(code: str) -> dict[str, Any] | None:
         low=q.get("low") if isinstance(q.get("low"), (int, float)) else None,
         turnover_yuan=q.get("turnover_yuan") if isinstance(q.get("turnover_yuan"), (int, float)) else None,
         source=q.get("source") or "cn_stock_tools quote fallback",
+        volume_lots=q.get("volume_lots") if isinstance(q.get("volume_lots"), (int, float)) else None,
+        volume_ratio=q.get("volume_ratio") if isinstance(q.get("volume_ratio"), (int, float)) else None,
     )
 
 
@@ -1168,6 +1182,8 @@ def parse_eastmoney_stock(data: dict[str, Any]) -> dict[str, Any] | None:
         low=low if isinstance(low, (int, float)) else None,
         turnover_yuan=data.get("f48") if isinstance(data.get("f48"), (int, float)) else None,
         source="Eastmoney push2 stock/get realtime quote",
+        volume_lots=data.get("f47") if isinstance(data.get("f47"), (int, float)) else None,
+        volume_ratio=data.get("f50") if isinstance(data.get("f50"), (int, float)) else None,
     )
 
 
@@ -1325,6 +1341,12 @@ def refresh_realtime_prices(state: dict[str, Any]) -> dict[str, Any]:
         pos["quote_source"] = quote["source"]
         pos["change_pct"] = quote.get("change_pct")
         pos["prev_close"] = quote.get("prev_close")
+        if quote.get("turnover_yuan") is not None:
+            pos["turnover_yuan"] = quote.get("turnover_yuan")
+        if quote.get("volume_lots") is not None:
+            pos["volume_lots"] = quote.get("volume_lots")
+        if quote.get("volume_ratio") is not None:
+            pos["volume_ratio"] = quote.get("volume_ratio")
         if quote.get("high") is not None:
             pos["day_high"] = quote.get("high")
         if quote.get("low") is not None:
@@ -1357,6 +1379,9 @@ def apply_realtime_price_snapshot(
         "prev_close",
         "day_high",
         "day_low",
+        "turnover_yuan",
+        "volume_lots",
+        "volume_ratio",
     )
     for code, position in (state.get("positions") or {}).items():
         if not isinstance(position, dict):
@@ -1462,6 +1487,7 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
             "today_buy_qty": today_buy_qty,
             "bought_today": today_buy_qty > 0,
             "buy_strategy": pos.get("buy_strategy") or "",
+            "industry": pos.get("industry") or pos.get("sector") or "",
             "entry_reason": pos.get("entry_reason") or "",
             "strategy_mark": strategy_mark,
             "strategy_mark_id": strategy_mark.get("strategy_id") or "",
@@ -1492,6 +1518,19 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
                 "s123_reason": pos.get("s123_reason"),
                 "chuhuo_wushi": pos.get("chuhuo_wushi"),
                 "luzhu_half_signal": pos.get("luzhu_half_signal"),
+                "industry_flow_direction": pos.get("industry_flow_direction"),
+                "industry_flow_rank": pos.get("industry_flow_rank"),
+                "industry_flow_net_yi": pos.get("industry_flow_net_yi"),
+                "industry_outflow_rank": pos.get("industry_outflow_rank"),
+                "industry_outflow_net_yi": pos.get("industry_outflow_net_yi"),
+                "industry_flow_generated_at": pos.get("industry_flow_generated_at"),
+                "market_turnover_ratio": pos.get("market_turnover_ratio"),
+                "projected_volume_ratio_20d": pos.get("projected_volume_ratio_20d"),
+                "shaofu_volume_price_signal": pos.get("shaofu_volume_price_signal"),
+                "shaofu_soft_exit_status": pos.get("shaofu_soft_exit_status"),
+                "shaofu_soft_exit_signal": pos.get("shaofu_soft_exit_signal"),
+                "shaofu_soft_exit_count": pos.get("shaofu_soft_exit_count"),
+                "shaofu_soft_exit_required": pos.get("shaofu_soft_exit_required"),
             },
         }
         pos["last_price"] = price
@@ -2047,6 +2086,7 @@ N_STRUCTURE_STOP_LOOKBACK_DAYS = 30  # N型结构前低最多回看交易日
 N_STRUCTURE_LOW_TOLERANCE_PCT = 0.02  # 后低允许比前低低不超过2%
 NO_PROGRESS_HOLD_DAYS = 3         # 买入后没涨，最少观察天数
 NO_PROGRESS_MAX_PNL_PCT = 1.0
+SHAOFU_SOFT_EXIT_START_TIME = dtime(10, 0)  # 开盘前30分钟仅允许结构性硬退出
 LUZHU_MEDIUM_YANG_PCT = 2.0       # 卤煮：连续中/大阳线的保守量化阈值
 SELL_SCORE_REDUCE_THRESHOLD = 3
 SELL_SCORE_EXIT_THRESHOLD = 2
@@ -3431,6 +3471,34 @@ def holding_days(pos: dict[str, Any], today: str | None = None) -> int:
         return 0
 
 
+def trading_holding_days(pos: dict[str, Any], today: str | None = None) -> int:
+    """A-share trading days elapsed after the earliest still-open lot."""
+    today = today or today_key()
+    lots = pos.get("buy_date_lots") or {}
+    open_dates = sorted(date for date, qty in lots.items() if int(qty or 0) > 0)
+    if not open_dates:
+        return 0
+    try:
+        entry = datetime.strptime(open_dates[0], "%Y-%m-%d").date()
+        end = datetime.strptime(today, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return 0
+    if end <= entry:
+        return 0
+    elapsed = 0
+    current = entry + timedelta(days=1)
+    while current <= end:
+        if trading_day_status(current, allow_refresh=False).get("is_trading_day"):
+            elapsed += 1
+        current += timedelta(days=1)
+    return elapsed
+
+
+def is_shaofu_soft_exit_check_time(dt: datetime | None = None) -> bool:
+    current = dt or datetime.now()
+    return current.time() >= SHAOFU_SOFT_EXIT_START_TIME
+
+
 def _sell_signal_config() -> _sell_signals.SellSignalConfig:
     return _sell_signals.SellSignalConfig(
         luzhu_medium_yang_pct=LUZHU_MEDIUM_YANG_PCT,
@@ -3682,6 +3750,170 @@ def position_entry_strategy(pos: dict[str, Any]) -> str:
     )
 
 
+def _load_stock_industry_cache() -> dict[str, str]:
+    try:
+        payload = json.loads(STOCK_INDUSTRY_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        normalize_code(code): str(industry or "").strip()
+        for code, industry in payload.items()
+        if normalize_code(code) and str(industry or "").strip()
+    }
+
+
+def sync_zettaranc_position_context(state: dict[str, Any], b1_payload: dict[str, Any] | None) -> int:
+    """Attach the shared industry-flow snapshot to existing Zettaranc positions."""
+    payload = b1_payload if isinstance(b1_payload, dict) else {}
+    zettaranc_context = (
+        payload.get("zettaranc_context")
+        if isinstance(payload.get("zettaranc_context"), dict)
+        else {}
+    )
+    tide_context = (
+        payload.get("sector_tide_context")
+        if isinstance(payload.get("sector_tide_context"), dict)
+        else {}
+    )
+    flow_payload = zettaranc_context.get("industry_money_flow")
+    if not isinstance(flow_payload, dict):
+        flow_payload = tide_context.get("industry_money_flow")
+    if not isinstance(flow_payload, dict):
+        return 0
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for key in ("trade_items", "items", "candidates"):
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            code = normalize_code(item.get("code") or "")
+            if code:
+                candidates[code] = item
+    industry_cache = _load_stock_industry_cache()
+    updated = 0
+    for code, pos in (state.get("positions") or {}).items():
+        if not isinstance(pos, dict) or not is_zettaranc_strategy(position_entry_strategy(pos)):
+            continue
+        normalized_code = normalize_code(code)
+        candidate = candidates.get(normalized_code, {})
+        industry = str(
+            candidate.get("industry")
+            or candidate.get("sector")
+            or pos.get("industry")
+            or pos.get("sector")
+            or industry_cache.get(normalized_code)
+            or ""
+        ).strip()
+        if industry:
+            pos["industry"] = industry
+            pos["sector"] = industry
+        signal = zettaranc_industry_flow_signal(
+            [{"industry": industry}],
+            {"industry_money_flow": flow_payload},
+        )
+        previous_generated_at = str(pos.get("industry_flow_generated_at") or "")
+        generated_at = str(signal.get("industry_flow_generated_at") or "")
+        if generated_at and generated_at != previous_generated_at:
+            pos["industry_flow_previous_direction"] = str(
+                pos.get("industry_flow_direction") or "neutral"
+            )
+            pos["industry_flow_previous_rank"] = (
+                pos.get("industry_flow_rank")
+                if pos.get("industry_flow_direction") == "inflow"
+                else pos.get("industry_outflow_rank")
+            )
+        for key in (
+            "industry_flow_available",
+            "industry_flow_matched",
+            "industry_flow_direction",
+            "industry_flow_rank",
+            "industry_flow_rank_total",
+            "industry_flow_net_yi",
+            "industry_outflow_matched",
+            "industry_outflow_rank",
+            "industry_outflow_rank_total",
+            "industry_outflow_net_yi",
+            "industry_flow_source",
+            "industry_flow_generated_at",
+        ):
+            pos[key] = signal.get(key)
+        updated += 1
+    return updated
+
+
+def load_latest_market_volume_context(now: datetime | None = None) -> dict[str, Any]:
+    """Read the latest validated market-turnover prediction without new I/O calls."""
+    current = now or datetime.now()
+    try:
+        payload = json.loads(MARKET_BREADTH_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    samples = [item for item in (payload.get("samples") or []) if isinstance(item, dict)]
+    for sample in reversed(samples):
+        generated_at = str(sample.get("generated_at") or "")
+        if generated_at[:10] != current.strftime("%Y-%m-%d"):
+            continue
+        try:
+            generated = datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if current.time() <= dtime(15, 0) and not (-120 <= (current - generated).total_seconds() <= 15 * 60):
+            continue
+        actual = _safe_float(sample.get("actual_turnover_yi"), 0.0)
+        estimated = _safe_float(sample.get("estimated_turnover_yi"), 0.0)
+        previous = _safe_float(sample.get("previous_turnover_yi"), 0.0)
+        if actual <= 0 or estimated <= 0:
+            continue
+        return {
+            "generated_at": generated_at,
+            "actual_turnover_yi": actual,
+            "estimated_turnover_yi": estimated,
+            "previous_turnover_yi": previous if previous > 0 else None,
+            "turnover_estimate_model": str(sample.get("turnover_estimate_model") or ""),
+            "source": str(sample.get("turnover_estimate_source") or sample.get("source") or ""),
+        }
+    return {}
+
+
+def update_zettaranc_volume_context(state: dict[str, Any], now: datetime | None = None) -> int:
+    """Project position volume with the existing market same-time turnover model."""
+    market = load_latest_market_volume_context(now)
+    actual = _safe_float(market.get("actual_turnover_yi"), 0.0)
+    estimated = _safe_float(market.get("estimated_turnover_yi"), 0.0)
+    previous = _safe_float(market.get("previous_turnover_yi"), 0.0)
+    progress_fraction = actual / estimated if actual > 0 and estimated > 0 else 0.0
+    market_ratio = estimated / previous if estimated > 0 and previous > 0 else 0.0
+    updated = 0
+    for pos in (state.get("positions") or {}).values():
+        if not isinstance(pos, dict) or not is_zettaranc_strategy(position_entry_strategy(pos)):
+            continue
+        current_volume = _safe_float(pos.get("volume_lots"), 0.0)
+        median_volume = _safe_float(pos.get("median_volume_20"), 0.0)
+        projected_ratio = 0.0
+        if current_volume > 0 and median_volume > 0 and 0 < progress_fraction <= 1.05:
+            projected_ratio = current_volume / progress_fraction / median_volume
+        change_pct = _safe_float(pos.get("change_pct"), 0.0)
+        volume_price_signal = "neutral"
+        if projected_ratio > 0:
+            if change_pct <= -0.5 and projected_ratio >= 1.2:
+                volume_price_signal = "bearish"
+            elif change_pct <= 0 and projected_ratio <= 0.9:
+                volume_price_signal = "supportive"
+            elif change_pct >= 0 and projected_ratio >= 1.1:
+                volume_price_signal = "supportive"
+        pos["market_turnover_estimated_yi"] = estimated or None
+        pos["market_turnover_previous_yi"] = previous or None
+        pos["market_turnover_ratio"] = round(market_ratio, 3) if market_ratio > 0 else None
+        pos["market_volume_generated_at"] = str(market.get("generated_at") or "")
+        pos["market_volume_source"] = str(market.get("source") or "")
+        pos["projected_volume_ratio_20d"] = round(projected_ratio, 3) if projected_ratio > 0 else None
+        pos["shaofu_volume_price_signal"] = volume_price_signal
+        updated += 1
+    return updated
+
+
 def zettaranc_entry_stop(rows: list[dict[str, Any]], entry_idx: int, strategy_id: str) -> dict[str, Any] | None:
     """Resolve the canonical stop anchor for one Zettaranc entry strategy."""
     if entry_idx < 0 or entry_idx >= len(rows):
@@ -3734,6 +3966,78 @@ def _sell_signal(reason: str, signal: str, sell_ratio: float = 1.0) -> dict[str,
     return _sell_signals._sell_signal(reason, signal, sell_ratio)
 
 
+def _clear_shaofu_soft_exit_pending(pos: dict[str, Any], status: str = "clear") -> None:
+    pos["shaofu_soft_exit_status"] = status
+    for key in (
+        "shaofu_soft_exit_signal",
+        "shaofu_soft_exit_reason",
+        "shaofu_soft_exit_count",
+        "shaofu_soft_exit_required",
+        "shaofu_soft_exit_last_check",
+    ):
+        pos.pop(key, None)
+
+
+def _resolve_shaofu_soft_exit(
+    pos: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    hold_trading_days: int,
+    soft_exit_allowed: bool,
+    confirmation_key: str,
+) -> dict[str, Any] | None:
+    direction = str(pos.get("industry_flow_direction") or "neutral")
+    volume_signal = str(pos.get("shaofu_volume_price_signal") or "neutral")
+    decision = evaluate_shaofu_soft_exit(
+        hold_trading_days=hold_trading_days,
+        soft_exit_allowed=soft_exit_allowed,
+        confirmation_key=confirmation_key,
+        previous_key=str(pos.get("shaofu_soft_exit_last_check") or ""),
+        previous_count=int(pos.get("shaofu_soft_exit_count") or 0),
+        sector_flow_direction=direction,
+        volume_price_signal=volume_signal,
+        already_reduced=bool(pos.get("shaofu_soft_exit_reduced") or pos.get("partial_tp_done")),
+        min_hold_trading_days=SHAOFU_MIN_HOLD_TRADING_DAYS,
+        confirmations_required=SHAOFU_SOFT_EXIT_CONFIRMATIONS,
+    )
+    status = str(decision.get("status") or "pending")
+    pos["shaofu_soft_exit_status"] = status
+    pos["shaofu_soft_exit_signal"] = str(candidate.get("signal") or "")
+    pos["shaofu_soft_exit_reason"] = str(candidate.get("reason") or "")
+    pos["shaofu_soft_exit_count"] = int(decision.get("count") or 0)
+    pos["shaofu_soft_exit_required"] = int(
+        decision.get("required") or SHAOFU_SOFT_EXIT_CONFIRMATIONS
+    )
+    if confirmation_key:
+        pos["shaofu_soft_exit_last_check"] = confirmation_key
+    if status in {"min_hold", "morning_hold", "context_hold", "runner_hold"}:
+        pos["shaofu_soft_exit_count"] = 0
+    if not decision.get("allow_reduce"):
+        return None
+
+    context_parts: list[str] = []
+    if direction == "outflow":
+        rank = pos.get("industry_outflow_rank")
+        context_parts.append(f"行业主力净流出{f'第{rank}名' if rank else ''}")
+    elif direction == "inflow":
+        rank = pos.get("industry_flow_rank")
+        context_parts.append(f"行业主力净流入{f'第{rank}名' if rank else ''}")
+    projected_ratio = pos.get("projected_volume_ratio_20d")
+    if isinstance(projected_ratio, (int, float)):
+        context_parts.append(f"预测量比{float(projected_ratio):.2f}")
+    context_parts.append(
+        f"软信号确认{pos['shaofu_soft_exit_count']}/{pos['shaofu_soft_exit_required']}"
+    )
+    reason = (
+        f"少妇B1软退出确认，先减半保留趋势仓 ({candidate.get('reason') or '-'}；"
+        + "；".join(context_parts)
+        + ")"
+    )
+    signal = _sell_signal(reason, "shaofu_soft_reduce", TAKE_PROFIT_PARTIAL_RATIO)
+    signal["source_signal"] = str(candidate.get("signal") or "")
+    return signal
+
+
 def evaluate_sell_signal(
     code: str,
     pos: dict[str, Any],
@@ -3742,6 +4046,8 @@ def evaluate_sell_signal(
     time_exit_allowed: bool = True,
     b3_exit_allowed: bool | None = None,
     time_stop_allowed: bool | None = None,
+    soft_exit_allowed: bool = True,
+    soft_exit_confirmation_key: str = "",
 ) -> dict[str, Any] | None:
     """Evaluate the local sell rule stack for one open position.
 
@@ -3752,6 +4058,7 @@ def evaluate_sell_signal(
     today = today or today_key()
     entry_strategy = position_entry_strategy(pos)
     zettaranc_position = is_zettaranc_strategy(entry_strategy)
+    shaofu_position = entry_strategy == "shaofu_b1"
     sector_tide_position = is_sector_tide_strategy(entry_strategy)
     realtime_price = float(pos.get("last_price") or pos.get("close") or pos.get("avg_cost") or 0)
     price = float(
@@ -3801,6 +4108,8 @@ def evaluate_sell_signal(
         pos["trailing_stop_activated"] = True
 
     hold_days = holding_days(pos, today)
+    hold_trading_days = trading_holding_days(pos, today) if shaofu_position else hold_days
+    soft_exit_confirmation_key = soft_exit_confirmation_key or today
     j_now = pos.get("kdj_j")
     j_prev = pos.get("kdj_j_prev")
     j_turning_down = (
@@ -3899,23 +4208,51 @@ def evaluate_sell_signal(
 
     if bbi_dist is not None:
         if pos.get("s1_reclaim_seen") and bbi_dist <= S1_FAIL_BBI_PCT and max_pnl_pct >= 0:
-            return _sell_signal(
+            signal = _sell_signal(
                 f"S1反抽失败 (重新站上BBI后又跌至{bbi_dist:.1f}%，退出等待新买点)",
                 "s1_reclaim_failed",
             )
+            return _resolve_shaofu_soft_exit(
+                pos,
+                signal,
+                hold_trading_days=hold_trading_days,
+                soft_exit_allowed=soft_exit_allowed,
+                confirmation_key=soft_exit_confirmation_key,
+            ) if shaofu_position else signal
         if int(pos.get("bbi_break_days") or 0) >= S1_FAIL_CONFIRM_DAYS and (pnl_pct < TAKE_PROFIT_PARTIAL_PCT or j_turning_down):
-            return _sell_signal(
+            signal = _sell_signal(
                 f"S1趋势确认失效 (连续{pos.get('bbi_break_days')}日低于BBI，距BBI {bbi_dist:.1f}%)",
                 "s1_bbi_failed",
             )
+            return _resolve_shaofu_soft_exit(
+                pos,
+                signal,
+                hold_trading_days=hold_trading_days,
+                soft_exit_allowed=soft_exit_allowed,
+                confirmation_key=soft_exit_confirmation_key,
+            ) if shaofu_position else signal
         if bbi_dist <= BBI_BREAKDOWN_PCT:
-            return _sell_signal(
+            signal = _sell_signal(
                 f"BBI跌破触发 (距BBI {bbi_dist:.1f}% ≤ {BBI_BREAKDOWN_PCT}%)",
                 "bbi_breakdown",
             )
+            return _resolve_shaofu_soft_exit(
+                pos,
+                signal,
+                hold_trading_days=hold_trading_days,
+                soft_exit_allowed=soft_exit_allowed,
+                confirmation_key=soft_exit_confirmation_key,
+            ) if shaofu_position else signal
 
     if max_pnl_pct > 0.8 and pnl_pct <= 0:
-        return _sell_signal(f"盈转亏退出 (最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)", "profit_to_loss")
+        signal = _sell_signal(f"盈转亏退出 (最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)", "profit_to_loss")
+        return _resolve_shaofu_soft_exit(
+            pos,
+            signal,
+            hold_trading_days=hold_trading_days,
+            soft_exit_allowed=soft_exit_allowed,
+            confirmation_key=soft_exit_confirmation_key,
+        ) if shaofu_position else signal
     strategy_time_exit = evaluate_strategy_time_exit(
         entry_strategy=entry_strategy,
         hold_days=hold_days,
@@ -3932,28 +4269,56 @@ def evaluate_sell_signal(
         return strategy_time_exit
     if time_exit_allowed:
         if hold_days >= NO_PROGRESS_HOLD_DAYS and max_pnl_pct < NO_PROGRESS_MAX_PNL_PCT and pnl_pct <= 0:
-            return _sell_signal(f"买入后{hold_days}日未兑现离场 ({TIME_EXIT_HHMM}尾盘检查，最高盈利{max_pnl_pct:.1f}%，先收队)", "no_progress")
+            signal = _sell_signal(f"买入后{hold_days}日未兑现离场 ({TIME_EXIT_HHMM}尾盘检查，最高盈利{max_pnl_pct:.1f}%，先收队)", "no_progress")
+            return _resolve_shaofu_soft_exit(
+                pos,
+                signal,
+                hold_trading_days=hold_trading_days,
+                soft_exit_allowed=soft_exit_allowed,
+                confirmation_key=soft_exit_confirmation_key,
+            ) if shaofu_position else signal
 
     sell_score = pos.get("sell_score")
     if isinstance(sell_score, (int, float)):
         if sell_score <= SELL_SCORE_EXIT_THRESHOLD:
-            return _sell_signal(
+            signal = _sell_signal(
                 f"防卖飞评分过低 ({sell_score}/5，{pos.get('sell_score_reason','')})",
                 "sell_score_exit",
             )
+            return _resolve_shaofu_soft_exit(
+                pos,
+                signal,
+                hold_trading_days=hold_trading_days,
+                soft_exit_allowed=soft_exit_allowed,
+                confirmation_key=soft_exit_confirmation_key,
+            ) if shaofu_position else signal
         if sell_score <= SELL_SCORE_REDUCE_THRESHOLD and not pos.get("sell_score_half_done") and not pos.get("partial_tp_done"):
-            return _sell_signal(
+            signal = _sell_signal(
                 f"防卖飞评分中性 ({sell_score}/5，先减半观察BBI两日破位)",
                 "sell_score_reduce",
                 TAKE_PROFIT_PARTIAL_RATIO,
             )
+            return _resolve_shaofu_soft_exit(
+                pos,
+                signal,
+                hold_trading_days=hold_trading_days,
+                soft_exit_allowed=soft_exit_allowed,
+                confirmation_key=soft_exit_confirmation_key,
+            ) if shaofu_position else signal
 
     low10 = float(pos.get("low10") or 0)
     if low10 > 0 and hold_days >= 3 and price <= low10 * 0.995:
-        return _sell_signal(
+        signal = _sell_signal(
             f"{DONCHIAN_EXIT_LOOKBACK_DAYS}日低点跌破 (现价{price:.2f} < 低点{low10:.2f})",
             "donchian_low_break",
         )
+        return _resolve_shaofu_soft_exit(
+            pos,
+            signal,
+            hold_trading_days=hold_trading_days,
+            soft_exit_allowed=soft_exit_allowed,
+            confirmation_key=soft_exit_confirmation_key,
+        ) if shaofu_position else signal
 
     if max_pnl_pct >= TRAILING_STOP_ACTIVATE_PCT:
         giveback = max_pnl_pct - pnl_pct
@@ -3963,21 +4328,42 @@ def evaluate_sell_signal(
         )
         pos["trailing_gap_pct"] = round(trailing_gap, 2)
         if giveback >= trailing_gap:
-            return _sell_signal(
+            signal = _sell_signal(
                 f"峰值回撤止盈 (最高盈利{max_pnl_pct:.1f}%，回撤{giveback:.1f}% ≥ {trailing_gap:.1f}%)",
                 "profit_giveback",
             )
+            return _resolve_shaofu_soft_exit(
+                pos,
+                signal,
+                hold_trading_days=hold_trading_days,
+                soft_exit_allowed=soft_exit_allowed,
+                confirmation_key=soft_exit_confirmation_key,
+            ) if shaofu_position else signal
         atr20 = float(pos.get("atr20") or 0)
         if atr20 > 0:
             chandelier_stop = highest_price - ATR_CHANDELIER_MULT * atr20
             pos["chandelier_stop"] = round(chandelier_stop, 3)
             if chandelier_stop > avg_cost * 0.99 and price <= chandelier_stop:
-                return _sell_signal(
+                signal = _sell_signal(
                     f"ATR吊灯止盈 (现价{price:.2f} ≤ {ATR_CHANDELIER_MULT:.0f}ATR止损{chandelier_stop:.2f})",
                     "atr_chandelier",
                 )
+                return _resolve_shaofu_soft_exit(
+                    pos,
+                    signal,
+                    hold_trading_days=hold_trading_days,
+                    soft_exit_allowed=soft_exit_allowed,
+                    confirmation_key=soft_exit_confirmation_key,
+                ) if shaofu_position else signal
         if pos.get("trailing_stop_activated") and pnl_pct < 1.0:
-            return _sell_signal(f"移动止损保本 (曾盈利>5%，回落至{pnl_pct:.1f}%)", "breakeven_trail")
+            signal = _sell_signal(f"移动止损保本 (曾盈利>5%，回落至{pnl_pct:.1f}%)", "breakeven_trail")
+            return _resolve_shaofu_soft_exit(
+                pos,
+                signal,
+                hold_trading_days=hold_trading_days,
+                soft_exit_allowed=soft_exit_allowed,
+                confirmation_key=soft_exit_confirmation_key,
+            ) if shaofu_position else signal
 
     if pos.get("luzhu_half_signal") and not pos.get("partial_tp_done"):
         return _sell_signal(
@@ -4003,6 +4389,8 @@ def evaluate_sell_signal(
     if hold_days >= 10 and pnl_pct < 1.0 and bbi_dist is not None and bbi_dist < 0:
         return _sell_signal(f"低效持仓退出 ({hold_days}d 盈亏{pnl_pct:.1f}%，且未站回BBI)", "stale_below_bbi")
 
+    if shaofu_position:
+        _clear_shaofu_soft_exit_pending(pos)
     return None
 
 
@@ -4050,6 +4438,16 @@ def _refresh_position_bbi(state: dict[str, Any], dt: datetime | None = None) -> 
                     pos["close"] = float(rows[-1].get("close") or pos.get("close") or 0)
                     if zettaranc_position:
                         pos["confirmed_close"] = pos["close"]
+                        completed_volumes = [
+                            _row_float(row, "volume")
+                            for row in rows[-20:]
+                            if _row_float(row, "volume") > 0
+                        ]
+                        if completed_volumes:
+                            pos["median_volume_20"] = round(
+                                statistics.median(completed_volumes),
+                                3,
+                            )
                     pos["last_kline_date"] = rows[-1].get("date") or ""
                     desired_stop_sources = {
                         "shaofu_b1": {"n_structure_low"},
@@ -4162,7 +4560,8 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
     硬止损、S1/BBI失效、10日低点、峰值回撤/ATR吊灯、
     分批止盈、目标止盈、持仓时间离场。
     """
-    trade_allowed, _ = is_a_share_execution_time(dt)
+    check_dt = dt or datetime.now()
+    trade_allowed, _ = is_a_share_execution_time(check_dt)
     if not trade_allowed:
         return []
 
@@ -4170,9 +4569,11 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
     if not positions:
         return []
     
-    today = (dt or datetime.now()).strftime("%Y-%m-%d")
-    time_exit_allowed = is_time_exit_check_time(dt)
-    b3_exit_allowed = is_b3_exit_check_time(dt)
+    today = check_dt.strftime("%Y-%m-%d")
+    time_exit_allowed = is_time_exit_check_time(check_dt)
+    b3_exit_allowed = is_b3_exit_check_time(check_dt)
+    soft_exit_allowed = is_shaofu_soft_exit_check_time(check_dt)
+    soft_exit_confirmation_key = check_dt.strftime("%Y-%m-%d %H:%M")
     executed = []
     cash = float(state.get("cash") or 0)
     
@@ -4190,7 +4591,15 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
         if avg_cost <= 0:
             continue
         
-        exit_signal = evaluate_sell_signal(code, pos, today, time_exit_allowed=time_exit_allowed, b3_exit_allowed=b3_exit_allowed)
+        exit_signal = evaluate_sell_signal(
+            code,
+            pos,
+            today,
+            time_exit_allowed=time_exit_allowed,
+            b3_exit_allowed=b3_exit_allowed,
+            soft_exit_allowed=soft_exit_allowed,
+            soft_exit_confirmation_key=soft_exit_confirmation_key,
+        )
         if not exit_signal:
             continue
         exit_reason = str(exit_signal.get("reason") or "")
@@ -4210,6 +4619,8 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
                 pos["sell_score_half_done"] = True
             if exit_signal.get("signal") == "luzhu_half":
                 pos["luzhu_half_done"] = True
+            if exit_signal.get("signal") == "shaofu_soft_reduce":
+                pos["shaofu_soft_exit_reduced"] = True
             pos["partial_tp_done"] = True
         qty = qty // 100 * 100
         if qty <= 0:
@@ -4317,10 +4728,13 @@ def run_auto_exits_once(dt: datetime | None = None) -> dict[str, Any]:
     """Run the side-effectful automatic exit script once for scheduled checks."""
     dt = dt or datetime.now()
     state = load_state()
-    sync_sector_tide_position_context(state, load_latest_sector_tide_payload())
+    strategy_payload = load_latest_sector_tide_payload()
+    sync_sector_tide_position_context(state, strategy_payload)
+    sync_zettaranc_position_context(state, strategy_payload)
     refresh_realtime_prices(state)
     refresh_position_intraday(state)
     _refresh_position_bbi(state, dt)
+    update_zettaranc_volume_context(state, dt)
     executed = check_auto_exits(state, dt)
     record_equity(state)
     save_state(state)
@@ -4349,6 +4763,7 @@ def run_position_exit_checks_before_decision(
     refresh_realtime_prices(state)
     refresh_position_intraday(state)
     _refresh_position_bbi(state, current)
+    update_zettaranc_volume_context(state, current)
     return check_auto_exits(state, current)
 
 
@@ -4666,6 +5081,13 @@ def compact_portfolio_for_decision(portfolio: dict[str, Any]) -> dict[str, Any]:
                     "sell_score_reason", "z_white", "z_yellow",
                     "z_white_break_days", "z_dead_cross", "s123_signal",
                     "s123_reason", "chuhuo_wushi", "luzhu_half_signal",
+                    "industry_flow_direction", "industry_flow_rank",
+                    "industry_flow_net_yi", "industry_outflow_rank",
+                    "industry_outflow_net_yi", "industry_flow_generated_at",
+                    "market_turnover_ratio", "projected_volume_ratio_20d",
+                    "shaofu_volume_price_signal", "shaofu_soft_exit_status",
+                    "shaofu_soft_exit_signal", "shaofu_soft_exit_count",
+                    "shaofu_soft_exit_required",
                 ]
                 if exit_state.get(key) not in (None, "", [])
             },
@@ -4987,6 +5409,12 @@ def call_model_decision(
                 f"行业主力净流入排名:{c.get('industry_flow_rank','-')}/"
                 f"{c.get('industry_flow_rank_total','-')} "
                 f"资金加分:+{c.get('industry_flow_adjustment',0)} "
+            )
+        elif is_zettaranc_strategy(strat) and c.get("industry_outflow_matched"):
+            zettaranc_flow_detail = (
+                f"行业主力净流出排名:{c.get('industry_outflow_rank','-')}/"
+                f"{c.get('industry_outflow_rank_total','-')} "
+                f"净额:{c.get('industry_outflow_net_yi','-')}亿 "
             )
         tide_detail = ""
         if is_sector_tide_strategy(strat):
@@ -5622,6 +6050,27 @@ def execute_actions(
             pos["avg_cost"] = round((old_cost + total_cost) / new_qty, 4)
             pos["name"] = name
             pos["last_price"] = price
+            if is_zettaranc_strategy(buy_strategy):
+                industry = str(candidate.get("industry") or candidate.get("sector") or "").strip()
+                if industry:
+                    pos["industry"] = industry
+                    pos["sector"] = industry
+                for key in (
+                    "industry_flow_available",
+                    "industry_flow_matched",
+                    "industry_flow_direction",
+                    "industry_flow_rank",
+                    "industry_flow_rank_total",
+                    "industry_flow_net_yi",
+                    "industry_outflow_matched",
+                    "industry_outflow_rank",
+                    "industry_outflow_rank_total",
+                    "industry_outflow_net_yi",
+                    "industry_flow_source",
+                    "industry_flow_generated_at",
+                ):
+                    if key in candidate:
+                        pos[key] = candidate.get(key)
             if is_sector_tide_strategy(buy_strategy):
                 pos["industry"] = str(candidate.get("industry") or candidate.get("sector") or "").strip()
                 pos["sector"] = pos["industry"]
@@ -5706,6 +6155,23 @@ def execute_actions(
             pos = positions.get(code)
             if not pos:
                 continue
+            entry_strategy = str(
+                position_entry_strategy(pos)
+                or latest_buy_strategy_for_code(state, code)
+                or classify_buy_strategy(str(pos.get("entry_reason") or ""))
+            )
+            if entry_strategy == "shaofu_b1":
+                add_execution_block(
+                    decision,
+                    code,
+                    "少妇B1卖出由本地持仓状态机执行；模型SELL仅作建议，未直接成交",
+                )
+                action["action"] = "HOLD"
+                action["reason"] = (
+                    "模型SELL已降级为HOLD：等待结构止损、白黄线死叉、白线两日破位"
+                    "或经资金流/预测量能连续确认的软退出"
+                )
+                continue
             avg_cost = float(pos.get("avg_cost") or 0)
             available_qty = available_to_sell(pos)
             if shares > available_qty:
@@ -5731,11 +6197,6 @@ def execute_actions(
             cost_basis = qty * avg_cost
             realized_pnl = net_proceeds - cost_basis
             realized_pnl_pct = (realized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
-            entry_strategy = str(
-                position_entry_strategy(pos)
-                or latest_buy_strategy_for_code(state, code)
-                or classify_buy_strategy(str(pos.get("entry_reason") or ""))
-            )
             exit_rule = classify_exit_rule(reason)
             entry_mark = compact_position_strategy_mark(pos, entry_strategy)
             exit_mark = apply_exit_strategy_mark(pos, entry_strategy, exit_rule, reason, source="SELL")
@@ -6023,6 +6484,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     schedule_triggered_at = b1_payload.get("schedule_triggered_at") or ""
     already_decided = bool(not force and state.get("last_b1_generated_at") == generated_at)
     sync_sector_tide_position_context(state, b1_payload)
+    sync_zettaranc_position_context(state, b1_payload)
     position_exit_executed = run_position_exit_checks_before_decision(state, datetime.now())
     if already_decided:
         record_equity(state)
@@ -6253,7 +6715,8 @@ def build_trade_rule_note() -> str:
         f"板块潮汐另行按市场状态硬执行单笔/组合/行业动态风险预算、总仓45%/30%/15%、行业敞口12%/10%/6%；"
         f"单票8%/6%/4%仅为绝对天花板。"
         f"系统底线风控：峰值回撤/ATR吊灯保护、持仓超25日退出；"
-        f"Z哥卖出风控：防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
+        f"Z哥卖出风控：少妇B1至少观察{SHAOFU_MIN_HOLD_TRADING_DAYS}个交易日，开盘前30分钟仅执行硬退出，普通转弱经行业资金/预测量能连续确认后先减半；"
+        f"模型SELL不直接成交。另保留防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
         f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
         f"板块潮汐按行业连续两日退潮、市场硬停止、时间窗、2R减半和2ATR跟踪退出。"
         f"买入按万一免五计费。"

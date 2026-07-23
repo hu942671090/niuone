@@ -3252,6 +3252,261 @@ class SellStrategyRuleTests(unittest.TestCase):
 
         self.assertIsNone(signal)
 
+    def test_shaofu_soft_exit_waits_for_three_trading_days(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-23": 1000},
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+
+        self.assertIsNone(signal)
+        self.assertEqual(pos["shaofu_soft_exit_status"], "min_hold")
+        self.assertEqual(pos["shaofu_soft_exit_count"], 0)
+
+    def test_shaofu_soft_exit_requires_distinct_confirmations_and_reduces_half(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-19": 1000},
+        }
+
+        first = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+        duplicate = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+        confirmed = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:30",
+        )
+
+        self.assertIsNone(first)
+        self.assertIsNone(duplicate)
+        self.assertEqual(confirmed["signal"], "shaofu_soft_reduce")
+        self.assertEqual(confirmed["source_signal"], "sell_score_exit")
+        self.assertEqual(confirmed["sell_ratio"], 0.5)
+
+    def test_shaofu_positive_flow_or_shrinking_pullback_vetoes_soft_exit(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-19": 1000},
+            "industry_flow_direction": "inflow",
+            "shaofu_volume_price_signal": "supportive",
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+
+        self.assertIsNone(signal)
+        self.assertEqual(pos["shaofu_soft_exit_status"], "context_hold")
+
+    def test_shaofu_outflow_and_bearish_projected_volume_confirm_half_exit(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-19": 1000},
+            "industry_flow_direction": "outflow",
+            "industry_outflow_rank": 2,
+            "shaofu_volume_price_signal": "bearish",
+            "projected_volume_ratio_20d": 1.35,
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+
+        self.assertEqual(signal["signal"], "shaofu_soft_reduce")
+        self.assertIn("行业主力净流出第2名", signal["reason"])
+        self.assertIn("预测量比1.35", signal["reason"])
+
+    def test_shaofu_morning_soft_exit_waits_but_structure_stop_does_not(self):
+        soft_pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-19": 1000},
+        }
+        hard_pos = {
+            **soft_pos,
+            "last_price": 9.6,
+            "confirmed_close": 9.6,
+            "shaofu_stop_price": 9.7,
+            "shaofu_stop_source": "n_structure_low",
+        }
+
+        soft = trader.evaluate_sell_signal(
+            "600000",
+            soft_pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 09:37",
+        )
+        hard = trader.evaluate_sell_signal(
+            "600000",
+            hard_pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 09:37",
+        )
+
+        self.assertIsNone(soft)
+        self.assertEqual(soft_pos["shaofu_soft_exit_status"], "morning_hold")
+        self.assertEqual(hard["signal"], "shaofu_entry_stop")
+
+    def test_zettaranc_position_context_tracks_outflow_and_projected_volume(self):
+        state = {
+            "positions": {
+                "600000": {
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 9.8,
+                    "change_pct": -2.0,
+                    "volume_lots": 2400,
+                    "median_volume_20": 10000,
+                    "buy_strategy": "shaofu_b1",
+                    "industry": "半导体行业",
+                }
+            }
+        }
+        payload = {
+            "zettaranc_context": {
+                "industry_money_flow": {
+                    "metric": "industry_main_net_flow",
+                    "source": "test",
+                    "generated_at": "2026-06-24 10:00:00",
+                    "inflow": [],
+                    "outflow": [{"name": "半导体", "net_flow_yi": -20.0}],
+                }
+            }
+        }
+        original_loader = trader.load_latest_market_volume_context
+        try:
+            trader.load_latest_market_volume_context = lambda now=None: {
+                "generated_at": "2026-06-24 10:00:00",
+                "actual_turnover_yi": 2000.0,
+                "estimated_turnover_yi": 10000.0,
+                "previous_turnover_yi": 8000.0,
+                "source": "test",
+            }
+            trader.sync_zettaranc_position_context(state, payload)
+            trader.update_zettaranc_volume_context(state, datetime(2026, 6, 24, 10, 0))
+        finally:
+            trader.load_latest_market_volume_context = original_loader
+
+        pos = state["positions"]["600000"]
+        self.assertEqual(pos["industry_flow_direction"], "outflow")
+        self.assertEqual(pos["industry_outflow_rank"], 1)
+        self.assertEqual(pos["market_turnover_ratio"], 1.25)
+        self.assertEqual(pos["projected_volume_ratio_20d"], 1.2)
+        self.assertEqual(pos["shaofu_volume_price_signal"], "bearish")
+
+    def test_execute_actions_downgrades_shaofu_model_sell_to_hold(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "测试股", "source": "test"}
+            state = {
+                "cash": 0.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "avg_cost": 9.5,
+                        "last_price": 10.0,
+                        "buy_strategy": "shaofu_b1",
+                        "buy_date_lots": {"2026-06-19": 1000},
+                    }
+                },
+                "trade_log": [],
+            }
+            decision = {
+                "actions": [{
+                    "action": "SELL",
+                    "code": "600000",
+                    "name": "测试股",
+                    "shares": 1000,
+                    "reason": "模型认为开盘偏弱",
+                }]
+            }
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [],
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+        self.assertEqual(decision["actions"][0]["action"], "HOLD")
+        self.assertIn("本地持仓状态机", decision["execution_blocked_reason"])
+
     def test_sell_score_three_reduces_half_once(self):
         pos = {
             "qty": 1000,

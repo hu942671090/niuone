@@ -60,7 +60,11 @@ This rule group references public methods organized in [`zettaranc-skill`](https
 - **B3 continuation**: Looks for a small bullish candle or doji after B2, as well as a shift from divergence to consensus.
 - **Super B1**: Looks for low-volume stabilization after a high-volume breakdown while the J value remains low.
 
-Exit and risk rules include constraints based on the previous low or entry candle, fixed risk thresholds, a premature-exit prevention score, staged exits, S1 / S2 / S3 top-escape signals, distribution patterns, white-line / BBI breakdowns, peak drawdown, ATR chandelier protection, and timing constraints for B2, B3, and Super B1.
+Exit and risk rules include constraints based on the previous low or entry candle, a premature-exit prevention score, staged exits, S1 / S2 / S3 top-escape signals, distribution patterns, white-line / BBI breakdowns, peak drawdown, ATR chandelier protection, and timing constraints for B2, B3, and Super B1.
+
+Shaofu B1 uses a hold-state machine that separates hard exits from confirmed soft exits. A new position receives at least three A-share trading days of observation, and only close-confirmed structural stops, a white-line/yellow-line dead cross, two consecutive white-line breaks, or high-confidence distribution may exit during the first 30 minutes after the open. Profit-to-loss, one-off BBI/score weakness, peak giveback, ATR chandelier, and time efficiency are soft signals: industry main-fund inflow or a shrinking-volume pullback keeps the position on hold; an ordinary soft signal must appear in two distinct check windows before reducing half; industry outflow together with projected high-volume selling can confirm the half reduction immediately. Missing, failed, or stale flow and volume data stays neutral, and the remaining trend position still waits for a structural exit.
+
+Industry direction reuses the Eastmoney industry main-net-flow snapshot already fetched by each scan. The projected stock-volume ratio combines current cumulative volume, the median volume of the latest 20 completed sessions, and the Dashboard's existing same-time market-turnover/full-day estimate, without adding a separate market request. A model-generated `SELL` for Shaofu B1 is advisory only and is downgraded to `HOLD`; the local position state machine owns actual exits.
 
 ### 3.3 Li Daxiao Rule Group
 

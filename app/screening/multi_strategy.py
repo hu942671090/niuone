@@ -1495,9 +1495,14 @@ def main():
             "score_before_industry_flow": best.get("score_before_industry_flow"),
             "industry_flow_available": best.get("industry_flow_available"),
             "industry_flow_matched": best.get("industry_flow_matched"),
+            "industry_flow_direction": best.get("industry_flow_direction"),
             "industry_flow_rank": best.get("industry_flow_rank"),
             "industry_flow_rank_total": best.get("industry_flow_rank_total"),
             "industry_flow_net_yi": best.get("industry_flow_net_yi"),
+            "industry_outflow_matched": best.get("industry_outflow_matched"),
+            "industry_outflow_rank": best.get("industry_outflow_rank"),
+            "industry_outflow_rank_total": best.get("industry_outflow_rank_total"),
+            "industry_outflow_net_yi": best.get("industry_outflow_net_yi"),
             "industry_flow_adjustment": best.get("industry_flow_adjustment"),
             "industry_flow_source": best.get("industry_flow_source"),
             "industry_flow_generated_at": best.get("industry_flow_generated_at"),
@@ -1673,6 +1678,10 @@ def main():
     }
     if sector_tide_context is not None:
         output["sector_tide_context"] = sector_tide_context
+    if zettaranc_enabled:
+        output["zettaranc_context"] = {
+            "industry_money_flow": sector_tide_flow_rows,
+        }
     json_str = json.dumps(output, ensure_ascii=False, indent=2)
     print(json_str)
     write_outputs(json_str, generated_at)
