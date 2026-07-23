@@ -301,6 +301,17 @@ PRACTICE_MANUAL_CYCLE_STATE: dict[str, Any] = {
     "finished_at": "",
     "error": "",
 }
+PRACTICE_MANUAL_CYCLE_PUBLIC_FIELDS = (
+    "running",
+    "stage",
+    "stage_label",
+    "started_at",
+    "finished_at",
+    "generated_at",
+    "candidate_count",
+    "manual_scan_reused",
+    "error",
+)
 BENCHMARK_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 BENCHMARK_TTL_SECONDS = 20
 CN_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -1002,21 +1013,60 @@ def apply_hot_stocks_sort(data: dict[str, Any], sort_by: str) -> dict[str, Any]:
 
 
 def get_practice_payload() -> dict[str, Any]:
+    """Return the retained local portfolio history without request-side I/O.
+
+    Quote refresh, equity heartbeats, trading checks, and state persistence are
+    owned by the dedicated background workers.  Keeping this read path local is
+    important because a stale-cache refresh runs in the Dashboard process and a
+    network-backed payload rebuild can otherwise starve every HTTP request.
+    """
     try:
+        now = current_cn_datetime()
         trader = get_trader_module()
-        # The independent heartbeat normally owns minute snapshots. Keep this
-        # request-side call as a safe fallback for legacy entrypoints that do not
-        # start dashboard background workers.
-        record_practice_equity_heartbeat(trader)
-        payload = trader.get_dashboard_payload()
-        payload["trade_markers"] = compact_trade_markers(payload.get("trade_log") or [])
+        state = trader.load_state()
+        payload = trader.enrich_portfolio(state)
+        equity_history = state.get("equity_history", []) or []
+        daily_equity_history = state.get("daily_equity_history", []) or []
+        payload["equity_history"] = filter_future_equity_points(
+            equity_history,
+            now=now,
+        )
+        payload["daily_equity_history"] = compact_daily_equity_history(
+            [*equity_history, *daily_equity_history],
+            now=now,
+        )
+        payload["source_updated_at"] = str(
+            state.get("updated_at") or payload.get("source_updated_at") or ""
+        )
+        payload["source_last_equity_time"] = latest_valid_equity_time(
+            payload["equity_history"]
+        )
+        payload["calendar_history"] = build_compact_calendar_history(
+            equity_history,
+            source_updated_at=payload["source_updated_at"],
+            now=now,
+        )
+        payload["trade_markers"] = compact_trade_markers(state.get("trade_log") or [])
+        payload["trading_calendar"] = dashboard_trading_day_status(now)
+        payload["trading_paused"] = state.get("trading_paused", False)
+        payload["pause_reason"] = state.get("pause_reason", "")
+        payload["pause_since"] = state.get("pause_since", "")
+        strategy_performance = (
+            trader.track_strategy_performance(state)
+            if hasattr(trader, "track_strategy_performance")
+            else {}
+        )
+        payload["strategy_performance"] = compact_strategy_performance(
+            strategy_performance
+        )
+        if hasattr(trader, "build_trade_rule_note"):
+            payload["trade_rule_note"] = trader.build_trade_rule_note()
+        payload["decision_model"] = str(getattr(trader, "MODEL", "") or "")
+        payload["decision_provider"] = str(
+            getattr(trader, "PROVIDER_DISPLAY_NAME", "") or ""
+        )
         annotate_practice_snapshot(payload, mode="full", history_scope="retained_history")
-        annotate_practice_payload_clock(payload)
-        try:
-            refresh_b1_candidate_cache_from_current_pool()
-        except Exception as refresh_exc:
-            print(f"[WARN] 实战候选池复核失败: {type(refresh_exc).__name__}: {refresh_exc}", flush=True)
-        return payload
+        return annotate_practice_payload_clock(payload, now=now)
     except Exception as exc:
         print(f"[WARN] practice payload error: {type(exc).__name__}: {exc}", flush=True)
         payload = {"positions": [], "cash": 0, "total_equity": 0, "initial_cash": 0,
@@ -1681,7 +1731,11 @@ def trigger_b1_scan(
 
 def practice_manual_cycle_status() -> dict[str, Any]:
     with PRACTICE_MANUAL_CYCLE_STATE_LOCK:
-        return dict(PRACTICE_MANUAL_CYCLE_STATE)
+        return {
+            field: PRACTICE_MANUAL_CYCLE_STATE[field]
+            for field in PRACTICE_MANUAL_CYCLE_PUBLIC_FIELDS
+            if field in PRACTICE_MANUAL_CYCLE_STATE
+        }
 
 
 def _set_practice_manual_cycle_state(**updates: Any) -> dict[str, Any]:

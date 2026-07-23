@@ -1011,6 +1011,30 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
             dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
 
+    def test_manual_practice_cycle_status_omits_large_internal_decision_result(self):
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        try:
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {
+                'running': False,
+                'stage': 'completed',
+                'stage_label': '本轮选股及买卖已完成',
+                'candidate_count': 10,
+                'decision_result': {
+                    'raw_context': 'x' * 500_000,
+                    'actions': [{'reason': 'private'}],
+                },
+                'error': '',
+            }
+
+            status = dashboard.practice_manual_cycle_status()
+        finally:
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+        self.assertEqual(status['stage'], 'completed')
+        self.assertEqual(status['candidate_count'], 10)
+        self.assertNotIn('decision_result', status)
+        self.assertLess(len(json.dumps(status, ensure_ascii=False)), 2_000)
+
     def test_manual_practice_cycle_scan_failure_never_enters_trade_decision(self):
         decision_calls = []
         original_scan = dashboard.trigger_b1_scan
@@ -1204,6 +1228,71 @@ class DashboardAuthTests(unittest.TestCase):
             [p['time'] for p in payload['daily_equity_history']],
             ['2026-06-22 15:00:00', '2026-06-23 15:00:00', '2026-06-24 15:00:00'],
         )
+
+    def test_full_practice_payload_is_a_side_effect_free_local_snapshot(self):
+        calls = []
+
+        class TraderStub:
+            MODEL = 'local-model'
+            PROVIDER_DISPLAY_NAME = 'local-provider'
+
+            def load_state(self):
+                calls.append('load_state')
+                return {
+                    'updated_at': '2026-07-23 10:00:00',
+                    'initial_cash': 1_000_000,
+                    'cash': 1_000_100,
+                    'positions': {},
+                    'equity_history': [
+                        {'time': '2026-07-22 15:00:00', 'equity': 1_000_000},
+                        {'time': '2026-07-23 10:00:00', 'equity': 1_000_100},
+                    ],
+                    'daily_equity_history': [],
+                    'trade_log': [],
+                    'decision_log': [],
+                }
+
+            def enrich_portfolio(self, state):
+                calls.append('enrich_portfolio')
+                return {
+                    'initial_cash': state['initial_cash'],
+                    'cash': state['cash'],
+                    'positions': [],
+                    'trade_log': [],
+                    'decision_log': [],
+                }
+
+            def get_dashboard_payload(self):
+                raise AssertionError('full reads must not refresh quotes or persist state')
+
+            def track_strategy_performance(self, state):
+                calls.append('track_strategy_performance')
+                return {}
+
+        original_get_trader = dashboard.get_trader_module
+        original_current_cn_datetime = dashboard.current_cn_datetime
+        original_heartbeat = dashboard.record_practice_equity_heartbeat
+        try:
+            dashboard.get_trader_module = lambda: TraderStub()
+            dashboard.current_cn_datetime = lambda: datetime(2026, 7, 23, 10, 1, 0)
+            dashboard.record_practice_equity_heartbeat = (
+                lambda *_args, **_kwargs: calls.append('heartbeat') or True
+            )
+
+            payload = dashboard.get_practice_payload()
+        finally:
+            dashboard.get_trader_module = original_get_trader
+            dashboard.current_cn_datetime = original_current_cn_datetime
+            dashboard.record_practice_equity_heartbeat = original_heartbeat
+
+        self.assertEqual(
+            calls,
+            ['load_state', 'enrich_portfolio', 'track_strategy_performance'],
+        )
+        self.assertEqual(payload['snapshot_mode'], 'full')
+        self.assertEqual(payload['equity_history_scope'], 'retained_history')
+        self.assertEqual(len(payload['equity_history']), 2)
+        self.assertEqual(payload['decision_model'], 'local-model')
 
     def test_fast_practice_payload_exposes_current_beijing_date(self):
         class TraderStub:
