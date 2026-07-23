@@ -1121,7 +1121,7 @@
     .practice-curve { height:120px; width:100%; margin-top:8px; }
     @media (max-width: 720px) {
       body { background:var(--bg); }
-      .compliance-dialog-backdrop { align-items:end; padding:12px; }
+      .compliance-dialog-backdrop { place-items:center; padding:12px; }
       .compliance-dialog { width:100%; max-height:calc(100vh - 24px); border-radius:10px; }
       .compliance-dialog-head { padding:16px 16px 12px; }
       .compliance-dialog-head h2 { font-size:17px; }

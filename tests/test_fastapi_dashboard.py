@@ -1159,6 +1159,18 @@ class FastApiDashboardTests(unittest.TestCase):
             stylesheet,
         )
 
+    def test_mobile_compliance_dialog_is_centered(self):
+        stylesheet = (ROOT / "frontend" / "dashboard.css").read_text(encoding="utf-8")
+
+        self.assertIn(
+            ".compliance-dialog-backdrop { place-items:center; padding:12px; }",
+            stylesheet,
+        )
+        self.assertNotIn(
+            ".compliance-dialog-backdrop { align-items:end; padding:12px; }",
+            stylesheet,
+        )
+
     def test_http_boundaries_remain_split_into_fastapi_routers(self):
         composition = (
             ROOT / "app" / "dashboard" / "fastapi_app.py"
