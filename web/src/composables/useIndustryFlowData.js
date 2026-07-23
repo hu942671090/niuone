@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 import { configureIndustryFlowAnimation } from './useIndustryFlowAnimation.js'
 import { useIndicesData } from './useIndicesData.js'
+import { startVisiblePolling } from '../utils/visiblePolling.js'
 
 const REFRESH_INTERVAL_MS = 60 * 1000
 const REQUEST_TIMEOUT_MS = 15 * 1000
@@ -9,7 +10,7 @@ const state = reactive({
 })
 
 let users = 0
-let refreshTimer = 0
+let stopRefreshPolling = null
 let requestController = null
 let loadSequence = 0
 
@@ -65,14 +66,17 @@ function activateIndustryFlow() {
   users += 1
   if (users > 1) return
   loadIndustryFlow({ background: state.payload.nodes?.length > 0 })
-  refreshTimer = window.setInterval(() => loadIndustryFlow({ background: true }), REFRESH_INTERVAL_MS)
+  stopRefreshPolling = startVisiblePolling(
+    () => loadIndustryFlow({ background: true }),
+    REFRESH_INTERVAL_MS,
+  )
 }
 
 function deactivateIndustryFlow() {
   users = Math.max(0, users - 1)
   if (users) return
-  window.clearInterval(refreshTimer)
-  refreshTimer = 0
+  stopRefreshPolling?.()
+  stopRefreshPolling = null
   loadSequence += 1
   requestController?.abort()
   requestController = null

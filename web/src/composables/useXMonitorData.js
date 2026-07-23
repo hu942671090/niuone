@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 import { useDashboardTabs } from './useDashboardTabs.js'
 import { xPageRevisionKey } from '../utils/xMonitorDisplay.js'
+import { startVisiblePolling } from '../utils/visiblePolling.js'
 
 export const X_MONITOR_PAGE_SIZE = 10
 const CATEGORY = 'x_monitor'
@@ -23,7 +24,7 @@ const state = reactive({
 })
 
 let users = 0
-let refreshTimer = 0
+let stopRefreshPolling = null
 let pageController = null
 let revisionController = null
 let loadSequence = 0
@@ -255,14 +256,14 @@ function activateXMonitor(offset = 0) {
   } else {
     loadPage(targetOffset)
   }
-  refreshTimer = window.setInterval(pollRevision, REFRESH_INTERVAL_MS)
+  stopRefreshPolling = startVisiblePolling(pollRevision, REFRESH_INTERVAL_MS)
 }
 
 function deactivateXMonitor() {
   users = Math.max(0, users - 1)
   if (users) return
-  window.clearInterval(refreshTimer)
-  refreshTimer = 0
+  stopRefreshPolling?.()
+  stopRefreshPolling = null
   loadSequence += 1
   pageController?.abort()
   revisionController?.abort()

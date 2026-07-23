@@ -1,4 +1,5 @@
 import { reactive } from 'vue'
+import { startVisiblePolling } from '../utils/visiblePolling.js'
 
 const REFRESH_INTERVAL_MS = 15 * 1000
 const MONEY_FLOW_REFRESH_INTERVAL_MS = 60 * 1000
@@ -22,7 +23,7 @@ const view = reactive({
 })
 
 let users = 0
-let refreshTimer = 0
+let stopRefreshPolling = null
 let requestController = null
 let loadSequence = 0
 let lastLoadedAt = 0
@@ -121,14 +122,17 @@ function activateIndices() {
   } else {
     publishLastUpdated(state.indices)
   }
-  refreshTimer = window.setInterval(() => loadIndices({ background: true }), REFRESH_INTERVAL_MS)
+  stopRefreshPolling = startVisiblePolling(
+    () => loadIndices({ background: true }),
+    REFRESH_INTERVAL_MS,
+  )
 }
 
 function deactivateIndices() {
   users = Math.max(0, users - 1)
   if (users) return
-  window.clearInterval(refreshTimer)
-  refreshTimer = 0
+  stopRefreshPolling?.()
+  stopRefreshPolling = null
   requestController?.abort()
   requestController = null
 }

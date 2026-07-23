@@ -1,17 +1,19 @@
 <script setup>
+import { defineAsyncComponent } from 'vue'
 import ComplianceDialog from './ComplianceDialog.vue'
 import CategoryTabs from './CategoryTabs.vue'
-import DragonTigerPanel from './DragonTigerPanel.vue'
-import IndustryFlowPanel from './IndustryFlowPanel.vue'
-import IndicesPanel from './IndicesPanel.vue'
 import LastUpdated from './LastUpdated.vue'
-import MarketMonitorPanel from './MarketMonitorPanel.vue'
-import PracticePanel from './PracticePanel.vue'
 import ThemeToggle from './ThemeToggle.vue'
-import UsRatingsPanel from './UsRatingsPanel.vue'
 import VersionStatus from './VersionStatus.vue'
-import XMonitorPanel from './XMonitorPanel.vue'
 import { useDashboardTabs } from '../composables/useDashboardTabs.js'
+
+const DragonTigerPanel = defineAsyncComponent(() => import('./DragonTigerPanel.vue'))
+const IndustryFlowPanel = defineAsyncComponent(() => import('./IndustryFlowPanel.vue'))
+const IndicesPanel = defineAsyncComponent(() => import('./IndicesPanel.vue'))
+const MarketMonitorPanel = defineAsyncComponent(() => import('./MarketMonitorPanel.vue'))
+const PracticePanel = defineAsyncComponent(() => import('./PracticePanel.vue'))
+const UsRatingsPanel = defineAsyncComponent(() => import('./UsRatingsPanel.vue'))
+const XMonitorPanel = defineAsyncComponent(() => import('./XMonitorPanel.vue'))
 
 document.title = '牛牛1号'
 const { activeCategory } = useDashboardTabs()

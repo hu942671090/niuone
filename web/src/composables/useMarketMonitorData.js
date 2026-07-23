@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 import { useDashboardTabs } from './useDashboardTabs.js'
 import { messagePageRevision, revisionKey } from '../utils/messageRevision.js'
+import { startVisiblePolling } from '../utils/visiblePolling.js'
 
 const CATEGORY = 'market_monitor'
 const HISTORY_LIMIT = 200
@@ -23,7 +24,7 @@ const state = reactive({
 })
 
 let users = 0
-let refreshTimer = 0
+let stopRefreshPolling = null
 let historyController = null
 let revisionController = null
 let summaryController = null
@@ -215,14 +216,14 @@ function activateMarketMonitor() {
   } else {
     loadHistory().finally(() => loadSummary())
   }
-  refreshTimer = window.setInterval(refreshMarketMonitor, REFRESH_INTERVAL_MS)
+  stopRefreshPolling = startVisiblePolling(refreshMarketMonitor, REFRESH_INTERVAL_MS)
 }
 
 function deactivateMarketMonitor() {
   users = Math.max(0, users - 1)
   if (users) return
-  window.clearInterval(refreshTimer)
-  refreshTimer = 0
+  stopRefreshPolling?.()
+  stopRefreshPolling = null
   loadSequence += 1
   historyController?.abort()
   revisionController?.abort()

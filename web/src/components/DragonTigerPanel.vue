@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useDashboardTabs } from '../composables/useDashboardTabs.js'
+import { startVisiblePolling } from '../utils/visiblePolling.js'
 
 const REFRESH_INTERVAL_MS = 60 * 1000
 const SORT_FIELDS = new Set(['name', 'sector', 'change_pct', 'net_amount_yuan'])
@@ -13,7 +14,7 @@ const sort = reactive({ key: 'net_amount_yuan', direction: 'desc' })
 const { setCategoryCount } = useDashboardTabs()
 let requestController = null
 let loadSequence = 0
-let refreshTimer = 0
+let stopRefreshPolling = null
 
 function numberValue(value) {
   const number = Number(value)
@@ -274,14 +275,15 @@ function loadLatest() {
 
 onMounted(() => {
   load()
-  refreshTimer = window.setInterval(() => {
+  stopRefreshPolling = startVisiblePolling(() => {
     if (!selectedDate.value) load({ background: true })
   }, REFRESH_INTERVAL_MS)
 })
 onBeforeUnmount(() => {
   loadSequence += 1
   requestController?.abort()
-  window.clearInterval(refreshTimer)
+  stopRefreshPolling?.()
+  stopRefreshPolling = null
 })
 </script>
 
