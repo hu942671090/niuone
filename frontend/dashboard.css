@@ -160,8 +160,8 @@
     .market-breadth-legend-item { display:grid; grid-template-columns:7px auto auto; align-items:center; gap:5px; min-width:88px; color:#94a3b8; font-size:11px; }
     .market-breadth-legend-item strong { color:#e2e8f0; font-size:12px; font-weight:900; font-variant-numeric:tabular-nums; }
     .market-breadth-swatch { width:7px; height:7px; border-radius:999px; box-shadow:0 0 0 1px rgba(255,255,255,.12); }
-    .market-breadth-chart-wrap { width:100%; margin-top:6px; overflow-x:auto; }
-    .market-breadth-chart { display:block; width:100%; min-width:560px; height:auto; overflow:visible; }
+    .market-breadth-chart-wrap { width:100%; margin-top:6px; overflow-x:hidden; }
+    .market-breadth-chart { display:block; width:min(100%,720px); max-width:720px; min-width:0; height:auto; margin-inline:auto; overflow:visible; }
     .market-breadth-grid { stroke:rgba(148,163,184,.11); stroke-width:1; vector-effect:non-scaling-stroke; }
     .market-breadth-grid-vertical { stroke-dasharray:3 6; opacity:.58; }
     .market-breadth-volume-grid { stroke:rgba(148,163,184,.14); }
@@ -1347,12 +1347,15 @@
       .sparkline { height:34px; }
       .market-breadth-card { margin-top:9px; padding:12px 10px 10px; border-radius:13px; }
       .market-breadth-head h3 { font-size:14px; }
-      .market-breadth-controls { gap:6px; }
-      .market-breadth-toggle { min-height:29px; padding:5px 8px; }
+      .market-breadth-controls { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; }
+      .market-breadth-toggle { justify-content:center; min-width:0; min-height:29px; padding:5px 4px; gap:4px; font-size:10px; }
+      .market-breadth-toggle input { width:13px; height:13px; }
+      .market-breadth-toggle span { min-width:0; white-space:nowrap; }
+      .market-breadth-toggle small { display:none; }
       .market-breadth-legend { gap:6px 10px; }
       .market-breadth-legend-item { min-width:78px; font-size:10.5px; }
       .market-breadth-chart-wrap { margin-right:-2px; padding-bottom:3px; }
-      .market-breadth-chart { width:600px; min-width:600px; }
+      .market-breadth-chart { width:100%; max-width:none; min-width:0; }
       .market-breadth-foot { display:grid; gap:2px; }
       .index-time { display:none; }
       .sector-grid { grid-template-columns:repeat(3, minmax(0, 1fr)); gap:6px; }

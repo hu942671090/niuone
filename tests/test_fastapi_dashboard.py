@@ -1125,6 +1125,40 @@ class FastApiDashboardTests(unittest.TestCase):
         self.assertIn('"vue": "3.5.40"', package)
         self.assertIn('"vite": "7.3.6"', package)
 
+    def test_market_breadth_chart_uses_compact_responsive_dimensions(self):
+        component = (
+            ROOT / "web" / "src" / "components" / "indices" / "MarketBreadthChart.vue"
+        ).read_text(encoding="utf-8")
+        stylesheet = (ROOT / "frontend" / "dashboard.css").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "const width = chartWidth.value",
+            component,
+        )
+        self.assertIn("const compact = width < 560", component)
+        self.assertIn(
+            "const height = showSentiment && showVolume.value ? (compact ? 280 : 330)",
+            component,
+        )
+        self.assertIn(
+            "const volumeTop = showSentiment ? sentimentBottom + (compact ? 20 : 24)",
+            component,
+        )
+        self.assertIn("new ResizeObserver(syncChartWidth)", component)
+        self.assertIn("watch(chartWrapElement, element =>", component)
+        self.assertIn('ref="chartWrapElement"', component)
+        self.assertIn("width:min(100%,720px); max-width:720px;", stylesheet)
+        self.assertIn("overflow-x:hidden", stylesheet)
+        self.assertIn(
+            ".market-breadth-controls { display:grid; grid-template-columns:repeat(3,minmax(0,1fr));",
+            stylesheet,
+        )
+        self.assertIn(".market-breadth-toggle small { display:none; }", stylesheet)
+        self.assertIn(
+            ".market-breadth-chart { width:100%; max-width:none; min-width:0; }",
+            stylesheet,
+        )
+
     def test_http_boundaries_remain_split_into_fastapi_routers(self):
         composition = (
             ROOT / "app" / "dashboard" / "fastapi_app.py"

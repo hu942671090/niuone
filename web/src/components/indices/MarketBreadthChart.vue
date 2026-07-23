@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   payload: { type: Object, required: true },
@@ -21,6 +21,9 @@ const showLimitState = ref(true)
 const showVolume = ref(true)
 const hoveredAt = ref('')
 const chartElement = ref(null)
+const chartWrapElement = ref(null)
+const chartWidth = ref(720)
+let chartResizeObserver = null
 
 function nullableNumeric(value, allowNegative = false) {
   const parsed = Number(value)
@@ -124,14 +127,19 @@ const axisHint = computed(() => {
 
 const chart = computed(() => {
   if (!timeline.value.length || !hasSelection.value) return null
-  const width = 720
+  const width = chartWidth.value
+  const compact = width < 560
   const showSentiment = showBreadth.value || showLimitState.value
-  const height = showSentiment && showVolume.value ? 420 : 286
-  const margin = { top: 16, right: 92, bottom: 34, left: 50 }
+  const height = showSentiment && showVolume.value ? (compact ? 280 : 330) : (compact ? 218 : 236)
+  const margin = compact
+    ? { top: 16, right: 88, bottom: 30, left: 42 }
+    : { top: 16, right: 92, bottom: 34, left: 50 }
   const plotWidth = width - margin.left - margin.right
-  const sentimentHeight = showSentiment ? 236 : 0
+  const sentimentHeight = showSentiment
+    ? (showVolume.value ? (compact ? 136 : 166) : (compact ? 172 : 186))
+    : 0
   const sentimentBottom = margin.top + sentimentHeight
-  const volumeTop = showSentiment ? sentimentBottom + 34 : margin.top
+  const volumeTop = showSentiment ? sentimentBottom + (compact ? 20 : 24) : margin.top
   const volumeHeight = showVolume.value ? height - margin.bottom - volumeTop : 0
   const plotBottom = showVolume.value ? volumeTop + volumeHeight : sentimentBottom
   const leftPeak = Math.max(
@@ -225,13 +233,20 @@ const chart = computed(() => {
       zero: value === 0,
     }
   }) : []
-  const xTicks = [
-    { minute: 0, label: '09:30' },
-    { minute: 60, label: '10:30' },
-    { minute: 120, label: '11:30 / 13:00' },
-    { minute: 180, label: '14:00' },
-    { minute: 240, label: '15:00' },
-  ].map(item => ({
+  const xTickSource = compact
+    ? [
+        { minute: 0, label: '09:30' },
+        { minute: 120, label: '11:30 / 13:00' },
+        { minute: 240, label: '15:00' },
+      ]
+    : [
+        { minute: 0, label: '09:30' },
+        { minute: 60, label: '10:30' },
+        { minute: 120, label: '11:30 / 13:00' },
+        { minute: 180, label: '14:00' },
+        { minute: 240, label: '15:00' },
+      ]
+  const xTicks = xTickSource.map(item => ({
     ...item,
     x: (margin.left + item.minute / 240 * plotWidth).toFixed(1),
   }))
@@ -342,8 +357,29 @@ function clearHoverOutside(event) {
   }
 }
 
-onMounted(() => window.addEventListener('pointermove', clearHoverOutside, { passive: true }))
-onBeforeUnmount(() => window.removeEventListener('pointermove', clearHoverOutside))
+function syncChartWidth() {
+  const availableWidth = Math.round(chartWrapElement.value?.getBoundingClientRect().width || 0)
+  if (availableWidth > 0) chartWidth.value = Math.min(720, Math.max(300, availableWidth))
+}
+
+watch(chartWrapElement, element => {
+  chartResizeObserver?.disconnect()
+  chartResizeObserver = null
+  if (!element) return
+  syncChartWidth()
+  if (typeof ResizeObserver !== 'undefined') {
+    chartResizeObserver = new ResizeObserver(syncChartWidth)
+    chartResizeObserver.observe(element)
+  }
+}, { flush: 'post' })
+
+onMounted(() => {
+  window.addEventListener('pointermove', clearHoverOutside, { passive: true })
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('pointermove', clearHoverOutside)
+  chartResizeObserver?.disconnect()
+})
 
 const latestTime = computed(() => String(props.payload.generated_at || latest.value.generated_at || '').slice(11, 19))
 const turnoverComparisonText = computed(() => {
@@ -418,7 +454,7 @@ const turnoverEstimateText = computed(() => {
       </div>
     </div>
 
-    <div v-if="chart" class="market-breadth-chart-wrap">
+    <div v-if="chart" ref="chartWrapElement" class="market-breadth-chart-wrap">
       <svg
         ref="chartElement"
         class="market-breadth-chart"
