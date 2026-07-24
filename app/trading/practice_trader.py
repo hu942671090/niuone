@@ -168,6 +168,8 @@ def env_hhmm(name: str, default: str) -> dtime:
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
+LONG_HOLD_CODES_ENV = "DASHBOARD_LONG_HOLD_CODES"
+LONG_HOLD_TAKE_PROFIT_PCT_ENV = "DASHBOARD_LONG_HOLD_TAKE_PROFIT_PCT"
 
 
 def load_dashboard_env() -> None:
@@ -213,6 +215,8 @@ def load_dashboard_env() -> None:
         "DASHBOARD_MIN_CASH_RESERVE_PCT",
         "DASHBOARD_MARKET_GUIDANCE_ENABLED",
         "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
+        LONG_HOLD_CODES_ENV,
+        LONG_HOLD_TAKE_PROFIT_PCT_ENV,
         STOCK_UNIVERSE_ENV,
         STRATEGY_SOURCE_ENV,
         PERSONA_STRATEGY_ENV,
@@ -912,6 +916,28 @@ def save_state(state: dict[str, Any]) -> None:
 def normalize_code(code: str) -> str:
     code = re.sub(r"\D", "", str(code or ""))[-6:]
     return code
+
+
+def configured_long_hold_codes() -> frozenset[str]:
+    raw = str(os.environ.get(LONG_HOLD_CODES_ENV) or "")
+    return frozenset(
+        normalized
+        for item in raw.split(",")
+        if (normalized := normalize_code(item))
+    )
+
+
+def long_hold_sell_block_reason(code: str, position: dict[str, Any], price: float) -> str:
+    if normalize_code(code) not in configured_long_hold_codes():
+        return ""
+    avg_cost = float(position.get("avg_cost") or 0)
+    if avg_cost <= 0:
+        return "长期持有标的缺少有效成本价，暂停自动卖出"
+    pnl_pct = (float(price) / avg_cost - 1.0) * 100
+    target_pct = env_float(LONG_HOLD_TAKE_PROFIT_PCT_ENV, 20.0)
+    if pnl_pct < target_pct:
+        return f"长期持有标的当前收益{pnl_pct:.2f}%，未达到{target_pct:g}%兑现阈值，暂停自动卖出"
+    return ""
 
 
 def quote_one(code: str) -> dict[str, Any]:
@@ -4602,7 +4628,9 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
         avg_cost = float(pos.get("avg_cost") or 0)
         if avg_cost <= 0:
             continue
-        
+        if long_hold_sell_block_reason(code, pos, float(price)):
+            continue
+
         exit_signal = evaluate_sell_signal(
             code,
             pos,
@@ -5799,6 +5827,11 @@ def execute_actions(
         price_source = q.get("execution_price_source") or q.get("source") or "quote"
         candidate = cand_by_code.get(code) or {}
         name = action.get("name") or q.get("name") or candidate.get("name") or ""
+        if act == "SELL" and existing_pos:
+            block_reason = long_hold_sell_block_reason(code, existing_pos, float(price))
+            if block_reason:
+                add_execution_block(decision, code, block_reason)
+                continue
         reason = _fallback_action_reason(action, candidate, act, name)
         action["reason"] = reason
         shares = parse_model_action_shares(action)
