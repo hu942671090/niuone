@@ -935,7 +935,7 @@ def long_hold_sell_block_reason(code: str, position: dict[str, Any], price: floa
         return "长期持有标的缺少有效成本价，暂停自动卖出"
     pnl_pct = (float(price) / avg_cost - 1.0) * 100
     target_pct = env_float(LONG_HOLD_TAKE_PROFIT_PCT_ENV, 20.0)
-    if pnl_pct < target_pct:
+    if pnl_pct < target_pct - 1e-9:
         return f"长期持有标的当前收益{pnl_pct:.2f}%，未达到{target_pct:g}%兑现阈值，暂停自动卖出"
     return ""
 
