@@ -33,19 +33,29 @@
   "total_analyzed": 387
 }
 """
+import concurrent.futures
+import http.client
 import json
 import os
 import re
 import shlex
 import statistics
 import sys
+import threading
 import time
+import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
+from core.model_api import build_model_request, request_model
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
+from market_data.news_precheck import (
+    NewsPrecheckConfig,
+    fetch_candidate_news_records,
+)
 from screening.stock_universe import (
     DEFAULT_STOCK_UNIVERSE,
     STOCK_UNIVERSE_ENV,
@@ -77,8 +87,11 @@ from strategies.scoring import (
     LI_DAXIAO_MAX_DAILY_CHASE_PCT,
     LI_DAXIAO_MAX_TURNOVER,
     LI_DAXIAO_MIN_AMOUNT,
+    SECTOR_TIDE_STRATEGY_IDS,
     STRATEGY_SCORERS,
+    ZETTARANC_STRATEGY_IDS,
     analyze_enriched_rows,
+    build_sector_tide_context,
     candle_amplitude_pct,
     candle_body_pct,
     combine_z_yellow,
@@ -107,6 +120,7 @@ from strategies.scoring import (
     strategy_hard_blockers,
     volatility_pct,
     with_strategy_profile,
+    zettaranc_industry_flow_signal,
 )
 from strategies.selection import (
     candidate_is_trade_ready,
@@ -117,6 +131,9 @@ from strategies.selection import (
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 TENCENT_QUOTE = "https://qt.gtimg.cn/q="
 TENCENT_KLINE = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
+TENCENT_QUOTE_TIMEOUT_SECONDS = 10
+TENCENT_QUOTE_MAX_ATTEMPTS = 3
+TENCENT_QUOTE_BACKOFF_SECONDS = 0.5
 DASHBOARD_HOME = get_dashboard_home(Path(__file__).resolve().parents[1])
 DASHBOARD_ENV_FILE = get_dashboard_env_file(Path(__file__).resolve().parents[1])
 B1_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
@@ -128,11 +145,63 @@ MULTI_STRATEGY_HISTORY = B1_OUTPUT_DIR / "multi_strategy_history"
 DISPLAY_CANDIDATE_LIMIT = 16
 DISPLAY_HEAD_LIMIT = 8
 TRADE_CANDIDATE_LIMIT = 8
+SECTOR_TIDE_NEWS_PRECHECK_LIMIT = 5
 _LOCAL_SITE_PACKAGES_READY = False
 _STOCK_INDUSTRY_MEMORY_CACHE: dict[str, str] | None = None
+_MARGIN_DETAIL_CACHE: dict[tuple[str, str], Any] = {}
+_MARGIN_DETAIL_CACHE_LOCK = threading.Lock()
+_BLOCK_TRADE_CACHE: dict[tuple[str, str], Any] = {}
+_BLOCK_TRADE_CACHE_LOCK = threading.Lock()
+_NATIVE_JAVASCRIPT_CONTEXT: Any | None = None
+_NATIVE_JAVASCRIPT_CONTEXT_LOCK = threading.Lock()
 
 
 # ========== helpers ==========
+
+def _load_cached_market_frame(
+    cache: dict[tuple[str, str], Any],
+    cache_lock: Any,
+    cache_key: tuple[str, str],
+    loader: Callable[[], Any],
+) -> Any:
+    """Load one market-wide frame per cache key, including under concurrent scans."""
+    with cache_lock:
+        if cache_key not in cache:
+            try:
+                cache[cache_key] = loader()
+            except Exception:
+                cache[cache_key] = None
+        return cache[cache_key]
+
+
+def prepare_threaded_native_javascript_runtime() -> bool:
+    """Initialize MiniRacer once before akshare work enters thread pools.
+
+    V8's process-wide partition allocator can abort the interpreter when several
+    MiniRacer contexts race through their first initialization. Keeping one
+    warmed context alive makes later per-request contexts safe to create from
+    worker threads. If initialization is unavailable, callers must fall back to
+    serial execution rather than risk terminating the scanner process.
+    """
+    global _NATIVE_JAVASCRIPT_CONTEXT
+    if _NATIVE_JAVASCRIPT_CONTEXT is not None:
+        return True
+    with _NATIVE_JAVASCRIPT_CONTEXT_LOCK:
+        if _NATIVE_JAVASCRIPT_CONTEXT is not None:
+            return True
+        try:
+            from py_mini_racer import MiniRacer
+
+            context = MiniRacer()
+            context.eval("1")
+        except Exception as exc:
+            print(
+                f"[WARN] native JavaScript runtime prewarm failed: {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            return False
+        _NATIVE_JAVASCRIPT_CONTEXT = context
+        return True
 
 def dashboard_env_value(name: str) -> str | None:
     if name in os.environ:
@@ -199,11 +268,26 @@ def candidate_in_configured_stock_universe(candidate: dict[str, Any]) -> bool:
 
 # ========== Tencent data fetchers ==========
 
-def tencent_batch_quote(codes):
-    url = TENCENT_QUOTE + ",".join(codes)
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        text = r.read().decode("gbk", "ignore")
+class TencentQuoteBatchError(RuntimeError):
+    """A bounded Tencent quote request exhausted its safe retry budget."""
+
+
+class _EmptyTencentQuoteResponse(ValueError):
+    pass
+
+
+def _tencent_quote_error_label(exc: BaseException) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+        return "timeout"
+    if isinstance(exc, _EmptyTencentQuoteResponse):
+        return "empty_or_unusable_response"
+    return type(exc).__name__
+
+
+def _parse_tencent_batch_quote(text: str) -> dict[str, dict[str, Any]]:
     results = {}
     for line in text.strip().split(";"):
         line = line.strip()
@@ -213,7 +297,7 @@ def tencent_batch_quote(codes):
         key = key.strip().lstrip("v_")
         val = val.strip().strip('"')
         parts = val.split("~")
-        if len(parts) < 38:
+        if len(parts) < 39:
             continue
         price = safe_float(parts[3])
         prev_close = safe_float(parts[4])
@@ -233,6 +317,72 @@ def tencent_batch_quote(codes):
             "quote_time": parts[30] if len(parts) > 30 else "",
         }
     return results
+
+
+def tencent_batch_quote(
+    codes: list[str] | tuple[str, ...],
+    *,
+    timeout_seconds: float = TENCENT_QUOTE_TIMEOUT_SECONDS,
+    max_attempts: int = TENCENT_QUOTE_MAX_ATTEMPTS,
+    backoff_seconds: float = TENCENT_QUOTE_BACKOFF_SECONDS,
+    batch_label: str = "",
+    sleep_fn: Callable[[float], None] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fetch one quote batch with bounded retries and sanitized diagnostics."""
+    code_list = [str(code).strip() for code in codes if str(code).strip()]
+    if not code_list:
+        return {}
+    attempts = max(1, int(max_attempts))
+    timeout = max(0.1, float(timeout_seconds))
+    base_backoff = max(0.0, float(backoff_seconds))
+    active_sleep = sleep_fn or time.sleep
+    scope = f" batch={batch_label}" if batch_label else ""
+    last_error: BaseException | None = None
+    attempts_used = 0
+
+    for attempt in range(1, attempts + 1):
+        attempts_used = attempt
+        try:
+            url = TENCENT_QUOTE + ",".join(code_list)
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                text = response.read().decode("gbk", "ignore")
+            results = _parse_tencent_batch_quote(text)
+            if not results:
+                raise _EmptyTencentQuoteResponse()
+            return results
+        except urllib.error.HTTPError as exc:
+            try:
+                exc.close()
+            except OSError:
+                pass
+            last_error = exc
+            retryable = exc.code in {408, 429} or exc.code >= 500
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            http.client.HTTPException,
+            _EmptyTencentQuoteResponse,
+        ) as exc:
+            last_error = exc
+            retryable = True
+
+        if attempt >= attempts or not retryable:
+            break
+        delay = base_backoff * (2 ** (attempt - 1))
+        print(
+            f"[WARN] Tencent quote{scope} attempt={attempt}/{attempts} failed "
+            f"error={_tencent_quote_error_label(last_error)} retry_in={delay:.1f}s",
+            file=sys.stderr,
+        )
+        if delay > 0:
+            active_sleep(delay)
+
+    raise TencentQuoteBatchError(
+        f"Tencent quote{scope} failed after {attempts_used}/{attempts} attempts: "
+        f"{_tencent_quote_error_label(last_error or RuntimeError())}"
+    ) from last_error
 
 
 def build_market_snapshot(
@@ -365,8 +515,15 @@ def tencent_klines(symbol, count=120):
 
 # ========== Multi-Strategy Analysis ==========
 
-def analyze_all_strategies(symbol, tencent_key, quote: dict[str, Any] | None = None, name: str = ""):
-    """Fetch K-lines once, enrich once, run all registered strategies. Returns dict or None."""
+def prepare_strategy_rows(
+    symbol: str,
+    tencent_key: str,
+    *,
+    quote: dict[str, Any] | None = None,
+    name: str = "",
+    industry: str = "",
+) -> list[dict[str, Any]] | None:
+    """Fetch and enrich a stock once so cross-sectional suites can reuse it."""
     try:
         rows = tencent_klines(tencent_key, 120)
     except Exception:
@@ -379,12 +536,222 @@ def analyze_all_strategies(symbol, tencent_key, quote: dict[str, Any] | None = N
     if rows:
         rows[-1]["symbol_code"] = symbol
         rows[-1]["stock_name"] = name or (quote or {}).get("name", "")
+        rows[-1]["industry"] = normalize_industry_name(industry)
         if quote:
             rows[-1]["quote_amount"] = quote.get("amount")
             rows[-1]["quote_turnover"] = quote.get("turnover")
             rows[-1]["quote_price"] = quote.get("price")
+            rows[-1]["quote_change_pct"] = quote.get("change_pct")
 
-    return analyze_enriched_rows(rows, active_strategy_scorers())
+    return rows
+
+
+def analyze_all_strategies(
+    symbol,
+    tencent_key,
+    quote: dict[str, Any] | None = None,
+    name: str = "",
+    *,
+    industry: str = "",
+    rows: list[dict[str, Any]] | None = None,
+    context: dict[str, Any] | None = None,
+    scorers: dict[str, Callable[..., dict[str, Any] | None]] | None = None,
+):
+    """Run all active strategies, optionally in one shared cross-sectional context."""
+    prepared = rows or prepare_strategy_rows(
+        symbol,
+        tencent_key,
+        quote=quote,
+        name=name,
+        industry=industry,
+    )
+    if not prepared:
+        return None
+
+    return analyze_enriched_rows(prepared, scorers or active_strategy_scorers(), context)
+
+
+def load_previous_sector_tide_market() -> dict[str, Any] | None:
+    """Load only the prior persisted tide state used for two-scan confirmation."""
+    try:
+        payload = json.loads(MULTI_STRATEGY_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    context = payload.get("sector_tide_context") if isinstance(payload, dict) else None
+    market = context.get("market") if isinstance(context, dict) else None
+    return market if isinstance(market, dict) else None
+
+
+def fetch_industry_money_flow() -> dict[str, Any]:
+    """Return the same cached industry main-flow snapshot used by Dashboard."""
+    try:
+        from dashboard.apis.money_flow_service import fetch_money_flow
+
+        payload = fetch_money_flow()
+        return payload if isinstance(payload, dict) else {"inflow": [], "outflow": []}
+    except Exception as exc:
+        print(f"[WARN] industry money flow unavailable: {type(exc).__name__}; using neutral fallback", file=sys.stderr)
+        return {"inflow": [], "outflow": []}
+
+
+def fetch_sector_tide_money_flow() -> dict[str, Any]:
+    """Backward-compatible alias for integrations patching the old helper."""
+    return fetch_industry_money_flow()
+
+
+def sector_tide_dragon_tiger_archive_dir() -> Path:
+    """Resolve the archive beside the configured latest-snapshot file."""
+    snapshot_file = Path(
+        os.environ.get("IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE")
+        or B1_OUTPUT_DIR / "iwencai_dragon_tiger_latest.json"
+    ).expanduser()
+    return snapshot_file.parent / "iwencai_dragon_tiger"
+
+
+def load_previous_sector_tide_dragon_tiger(
+    now: datetime | None = None,
+    *,
+    archive_dir: Path | None = None,
+    status_loader: Callable[..., dict[str, Any]] | None = None,
+    archive_reader: Callable[..., dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    """Load only the exact prior A-share trading-day archive; never use same-day data."""
+    if status_loader is None:
+        from a_share_calendar import trading_day_status
+
+        status_loader = trading_day_status
+    if archive_reader is None:
+        from dashboard.apis.iwencai_service import read_dragon_tiger_archive
+
+        archive_reader = read_dragon_tiger_archive
+
+    current = now or datetime.now()
+    try:
+        calendar = status_loader(current, allow_refresh=False)
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "local_dragon_tiger_archive",
+            "date": "",
+            "requested_date": "",
+            "items": [],
+            "error": f"calendar_{type(exc).__name__}",
+        }
+    previous_date = str(calendar.get("previous_trading_day") or "")
+    unavailable = {
+        "available": False,
+        "source": "local_dragon_tiger_archive",
+        "date": previous_date,
+        "requested_date": previous_date,
+        "items": [],
+        "calendar_source": str(calendar.get("source") or ""),
+    }
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", previous_date):
+        unavailable["error"] = "previous_trading_day_unavailable"
+        return unavailable
+    try:
+        snapshot = archive_reader(
+            archive_dir or sector_tide_dragon_tiger_archive_dir(),
+            trade_date=previous_date,
+        )
+    except Exception as exc:
+        unavailable["error"] = f"archive_read_{type(exc).__name__}"
+        return unavailable
+    if not isinstance(snapshot, dict):
+        unavailable["error"] = "archive_missing"
+        return unavailable
+    payload = dict(snapshot)
+    payload["requested_date"] = previous_date
+    payload["calendar_source"] = str(calendar.get("source") or "")
+    return payload
+
+
+def load_sector_tide_overnight_us(
+    now: datetime | None = None,
+    *,
+    summary_loader: Callable[..., dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    """Load only the cache validated for today's completed US session."""
+    if summary_loader is None:
+        import us_market_summary
+
+        summary_loader = us_market_summary.load_cached_summary_for_today
+    try:
+        summary = summary_loader(now)
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "overnight_us_market_summary",
+            "error": f"cache_read_{type(exc).__name__}",
+        }
+    if not isinstance(summary, dict):
+        return {
+            "available": False,
+            "source": "overnight_us_market_summary",
+            "error": "cache_missing_or_stale",
+        }
+    return dict(summary)
+
+
+def fetch_sector_tide_news_precheck(
+    candidates: list[dict[str, Any]],
+    now: datetime | None = None,
+    *,
+    config: NewsPrecheckConfig | None = None,
+    fetcher: Callable[..., list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Fetch bounded structured news for the first-pass Sector Tide shortlist."""
+    selected = [item for item in candidates[:SECTOR_TIDE_NEWS_PRECHECK_LIMIT] if isinstance(item, dict)]
+    if not selected:
+        return {"configured": False, "available": False, "records": [], "error": "empty_shortlist"}
+    try:
+        active_config = config or NewsPrecheckConfig.from_mapping({
+            name: dashboard_env_value(name) or ""
+            for name in (
+                "DASHBOARD_NEWS_BASE_URL",
+                "DASHBOARD_NEWS_API_KEY",
+                "DASHBOARD_NEWS_MODEL",
+                "DASHBOARD_NEWS_API_MODE",
+                "DASHBOARD_NEWS_TIMEOUT",
+                "DASHBOARD_NEWS_MAX_RETRIES",
+                "DASHBOARD_NEWS_CONCURRENCY",
+                "DASHBOARD_NEWS_MAX_TOKENS",
+            )
+        })
+    except ValueError as exc:
+        return {
+            "configured": True,
+            "available": False,
+            "records": [],
+            "error": str(exc).split(":", 1)[0],
+        }
+    if active_config is None:
+        return {"configured": False, "available": False, "records": [], "error": "not_configured"}
+    active_fetcher = fetcher or fetch_candidate_news_records
+    try:
+        records = active_fetcher(
+            selected,
+            active_config,
+            max_candidates=SECTOR_TIDE_NEWS_PRECHECK_LIMIT,
+            now=now,
+        )
+    except Exception as exc:
+        return {
+            "configured": True,
+            "available": False,
+            "records": [],
+            "error": f"fetch_{type(exc).__name__}",
+        }
+    return {
+        "configured": True,
+        "available": any(record.get("available") for record in records),
+        "fetched_at": next(
+            (str(record.get("fetched_at") or "") for record in records if record.get("fetched_at")),
+            "",
+        ),
+        "records": records,
+        "error": "" if any(record.get("available") for record in records) else "all_records_unavailable",
+    }
 
 
 def load_a_share_code_pool(stock_universe: object | None = None):
@@ -447,21 +814,29 @@ def get_margin_signal(code: str) -> dict | None:
         import akshare as ak
         from datetime import datetime as dt_mod, timedelta
         
-        # 找最近一个可用交易日（融资数据非交易日为空）
+        market = "sse" if code.startswith(('6','9')) else "szse" if code.startswith(('0','2','3')) else ""
+        if not market:
+            return None
+
+        # 找最近一个可用交易日（融资数据非交易日为空）。同一轮扫描复用整张市场表，
+        # 避免为每只候选重复下载相同的上交所/深交所明细。
         today = dt_mod.now()
+        df = None
         for offset in range(5):
             check_date = (today - timedelta(days=offset)).strftime("%Y%m%d")
-            try:
-                if code.startswith(('6','9')):
-                    df = ak.stock_margin_detail_sse(date=check_date)
-                elif code.startswith(('0','2','3')):
-                    df = ak.stock_margin_detail_szse(date=check_date)
-                else:
-                    return None
-                if df is not None and not df.empty:
-                    break
-            except Exception:
-                continue
+            cache_key = (market, check_date)
+            df = _load_cached_market_frame(
+                _MARGIN_DETAIL_CACHE,
+                _MARGIN_DETAIL_CACHE_LOCK,
+                cache_key,
+                lambda: (
+                    ak.stock_margin_detail_sse(date=check_date)
+                    if market == "sse"
+                    else ak.stock_margin_detail_szse(date=check_date)
+                ),
+            )
+            if df is not None and not df.empty:
+                break
         else:
             return None
         
@@ -514,7 +889,17 @@ def get_block_trade_signal(code: str, name: str = "") -> dict | None:
         end = dt_mod.now().strftime("%Y%m%d")
         start = (dt_mod.now() - timedelta(days=5)).strftime("%Y%m%d")
         
-        df = ak.stock_dzjy_mrmx(symbol='A股', start_date=start, end_date=end)
+        cache_key = (start, end)
+        df = _load_cached_market_frame(
+            _BLOCK_TRADE_CACHE,
+            _BLOCK_TRADE_CACHE_LOCK,
+            cache_key,
+            lambda: ak.stock_dzjy_mrmx(
+                symbol='A股',
+                start_date=start,
+                end_date=end,
+            ),
+        )
         if df is None or df.empty:
             return None
         
@@ -735,6 +1120,7 @@ def lookup_stock_industry(code: str, ak_module: Any | None = None) -> str:
 def annotate_candidate_industries(
     *groups: list[dict[str, Any]],
     lookup: Callable[[str], str | None] | None = None,
+    max_workers: int = 1,
 ) -> None:
     """Attach industry/sector labels to candidate rows without making them required."""
     missing_by_code: dict[str, list[dict[str, Any]]] = {}
@@ -771,16 +1157,32 @@ def annotate_candidate_industries(
 
         if missing_by_code:
             cache_changed = False
-            for code in list(missing_by_code):
-                try:
-                    industry = normalize_industry_name(lookup_stock_industry(code))
-                except Exception:
-                    industry = ""
+            missing_codes = list(missing_by_code)
+            resolved: dict[str, str] = {}
+            workers = max(1, min(int(max_workers or 1), 12, len(missing_codes)))
+            if workers > 1 and not prepare_threaded_native_javascript_runtime():
+                workers = 1
+            if workers > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                    future_by_code = {pool.submit(lookup_stock_industry, code): code for code in missing_codes}
+                    for future in concurrent.futures.as_completed(future_by_code):
+                        code = future_by_code[future]
+                        try:
+                            resolved[code] = normalize_industry_name(future.result())
+                        except Exception:
+                            resolved[code] = ""
+            else:
+                for code in missing_codes:
+                    try:
+                        resolved[code] = normalize_industry_name(lookup_stock_industry(code))
+                    except Exception:
+                        resolved[code] = ""
+                    time.sleep(0.08)
+            for code, industry in resolved.items():
                 if industry:
                     cache[code] = industry
                     cache_changed = True
                     fill_code(code, industry)
-                time.sleep(0.08)
             if cache_changed:
                 save_stock_industry_cache(cache)
         return
@@ -820,20 +1222,21 @@ def grok_industry_classify(candidates: list[dict]) -> None:
         base = crossdesk["base_url"].rstrip("/"); api_key = crossdesk["api_key"]
         stock_list = "\n".join(f"{c['code']} {c['name']}" for c in candidates)
         prompt = f"对以下A股每只给一个简短行业标签（如通信设备、半导体、汽车零部件）。只输出：代码 名称：行业\n\n{stock_list}"
-        payload = {"model":"grok-4.20-multi-agent-xhigh","messages":[{"role":"user","content":prompt}],"max_tokens":200}
-        req = urllib.request.Request(
-            f"{base}/chat/completions",
-            data=json.dumps(payload).encode(),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "NiuOne/1.0",
-            },
+        model = "grok-4.20-multi-agent-xhigh"
+        model_request = build_model_request(
+            base,
+            model,
+            [{"role": "user", "content": prompt}],
+            max_tokens=200,
+            api_mode="chat",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8","ignore"))
-        for line in data["choices"][0]["message"]["content"].strip().split("\n"):
+        parsed = request_model(
+            model_request,
+            api_key,
+            timeout=10,
+            opener=urllib.request.urlopen,
+        )
+        for line in parsed.content.strip().split("\n"):
             for c in candidates:
                 if c["code"] in line and c["name"] in line:
                     parts = line.split("：",1) if "：" in line else line.split(":",1) if ":" in line else [line,""]
@@ -887,9 +1290,11 @@ def main():
 
     quotes = {}
     batch_size = 150
+    batch_total = max(1, (len(all_keys) + batch_size - 1) // batch_size)
     for i in range(0, len(all_keys), batch_size):
         batch = all_keys[i:i + batch_size]
-        q = tencent_batch_quote(batch)
+        batch_number = i // batch_size + 1
+        q = tencent_batch_quote(batch, batch_label=f"{batch_number}/{batch_total}")
         quotes.update(q)
         time.sleep(0.05)
     market_snapshot = build_market_snapshot(quotes, pool_count=len(all_keys), stock_universe=stock_universe)
@@ -917,16 +1322,130 @@ def main():
     to_analyze = liquid[:top_n]
     print(f"  High liquidity (成交额>8亿): {len(liquid)}, analyzing top {top_n}", file=sys.stderr)
 
-    print("Step 3: Multi-strategy scoring (registered strategy profiles)...", file=sys.stderr)
-    results = []
-    for i, (code, name, q) in enumerate(to_analyze):
+    try:
+        scan_workers = int(dashboard_env_value("DASHBOARD_B1_SCAN_WORKERS") or "6")
+    except (TypeError, ValueError):
+        scan_workers = 6
+    scan_workers = max(1, min(16, scan_workers, len(to_analyze) or 1))
+    if scan_workers > 1 and not prepare_threaded_native_javascript_runtime():
+        print("  Native JavaScript runtime unavailable; falling back to 1 worker", file=sys.stderr)
+        scan_workers = 1
+    print(
+        f"Step 3: Multi-strategy scoring (registered strategy profiles, {scan_workers} workers)...",
+        file=sys.stderr,
+    )
+    scorers = active_strategy_scorers()
+    sector_tide_enabled = bool(SECTOR_TIDE_STRATEGY_IDS.intersection(scorers))
+    zettaranc_enabled = bool(ZETTARANC_STRATEGY_IDS.intersection(scorers))
+    sector_tide_context: dict[str, Any] | None = None
+    strategy_context: dict[str, Any] | None = None
+    prepared_by_code: dict[str, list[dict[str, Any]]] = {}
+    industry_by_code: dict[str, str] = {}
+    prepared_items: list[dict[str, Any]] = []
+    sector_tide_flow_rows: dict[str, Any] = {"inflow": [], "outflow": []}
+    previous_sector_tide_market: dict[str, Any] | None = None
+    dragon_tiger_snapshot: dict[str, Any] | None = None
+    overnight_us_snapshot: dict[str, Any] | None = None
+
+    industry_members: list[dict[str, Any]] = []
+    if sector_tide_enabled or zettaranc_enabled:
+        print("  Resolving candidate industries for strategy scoring...", file=sys.stderr)
+        industry_members = [
+            {"code": code, "name": name, "quote": q}
+            for code, name, q in to_analyze
+        ]
+        annotate_candidate_industries(
+            industry_members,
+            max_workers=8 if scan_workers > 1 else 1,
+        )
+        industry_by_code = {
+            str(item["code"]): normalize_industry_name(item.get("industry"))
+            for item in industry_members
+        }
+        sector_tide_flow_rows = fetch_sector_tide_money_flow()
+        if zettaranc_enabled:
+            strategy_context = {"industry_money_flow": sector_tide_flow_rows}
+
+    if sector_tide_enabled:
+        print("  Building shared market/sector tide context...", file=sys.stderr)
+        for index, item in enumerate(industry_members):
+            code = str(item["code"])
+            name = str(item["name"])
+            industry = normalize_industry_name(item.get("industry"))
+            quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+            rows = prepare_strategy_rows(
+                code,
+                tencent_keys[code],
+                quote=quote,
+                name=name,
+                industry=industry,
+            )
+            if rows:
+                prepared_by_code[code] = rows
+                industry_by_code[code] = industry
+                prepared_items.append({
+                    "code": code,
+                    "name": name,
+                    "industry": industry,
+                    "quote": quote,
+                    "rows": rows,
+                })
+            if (index + 1) % 50 == 0:
+                print(f"  ... {index + 1}/{len(industry_members)} tide members prepared", file=sys.stderr)
+            time.sleep(0.02)
+        previous_sector_tide_market = load_previous_sector_tide_market()
+        dragon_tiger_snapshot = load_previous_sector_tide_dragon_tiger()
+        overnight_us_snapshot = load_sector_tide_overnight_us()
+        sector_tide_context = build_sector_tide_context(
+            prepared_items,
+            market_snapshot=market_snapshot,
+            flow_rows=sector_tide_flow_rows,
+            previous_market=previous_sector_tide_market,
+            dragon_tiger_snapshot=dragon_tiger_snapshot,
+            overnight_us_snapshot=overnight_us_snapshot,
+        )
+        sector_tide_context["industry_money_flow"] = sector_tide_flow_rows
+        strategy_context = sector_tide_context
+        market = sector_tide_context.get("market") or {}
+        dragon_tiger = sector_tide_context.get("dragon_tiger") or {}
+        overnight_us = sector_tide_context.get("overnight_us") or {}
+        print(
+            "  Tide context: "
+            f"market={market.get('state')} score={market.get('score')} "
+            f"sectors={sector_tide_context.get('sector_count')} "
+            f"coverage={sector_tide_context.get('data_coverage')} "
+            f"dragon_tiger={dragon_tiger.get('as_of_date') or 'unavailable'} "
+            f"matched={dragon_tiger.get('matched_stock_count', 0)} "
+            f"overnight_us={overnight_us.get('target_us_date') or 'unavailable'} "
+            f"tone={overnight_us.get('tone', 'neutral')}",
+            file=sys.stderr,
+        )
+
+    def analyze_candidate(candidate):
+        code, name, q = candidate
         tencent_key = tencent_keys[code]
-        multi = analyze_all_strategies(code, tencent_key, quote=q, name=name)
+        try:
+            multi = analyze_all_strategies(
+                code,
+                tencent_key,
+                quote=q,
+                name=name,
+                industry=industry_by_code.get(code, ""),
+                rows=prepared_by_code.get(code),
+                context=strategy_context,
+                scorers=scorers,
+            )
+        except Exception as exc:
+            print(
+                f"[WARN] candidate analysis failed for {code}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return None
         if multi is None:
-            continue
+            return None
         # Backward compat fields
         best = multi["strategies"].get(multi["best_strategy"], {})
-        results.append({
+        return {
             "code": code,
             "name": name,
             **stock_universe_metadata(code, name),
@@ -935,6 +1454,8 @@ def main():
             "amount": q.get("amount"),
             "amount_yi": round(q.get("amount", 0) / 1e8, 1) if q.get("amount") else None,
             "turnover": q.get("turnover"),
+            "industry": best.get("industry") or industry_by_code.get(code, ""),
+            "sector": best.get("industry") or industry_by_code.get(code, ""),
             # backward compat (the practice candidates panel expects these)
             "score": best.get("score", 0),
             "score_total": best.get("score_total", 10),
@@ -961,14 +1482,107 @@ def main():
             "time_stop": best.get("time_stop"),
             "actionable": best.get("actionable"),
             "hard_blockers": best.get("hard_blockers", []),
+            "market_regime": best.get("market_regime"),
+            "market_score": best.get("market_score"),
+            "market_hard_stop": best.get("market_hard_stop"),
+            "market_allows_buys": best.get("market_allows_buys"),
+            "sector_status": best.get("sector_status"),
+            "sector_score": best.get("sector_score"),
+            "sector_rank_acceleration": best.get("sector_rank_acceleration"),
+            "sector_breadth20": best.get("sector_breadth20"),
+            "stock_sector_rank": best.get("stock_sector_rank"),
+            "stock_market_rank": best.get("stock_market_rank"),
+            "score_before_industry_flow": best.get("score_before_industry_flow"),
+            "industry_flow_available": best.get("industry_flow_available"),
+            "industry_flow_matched": best.get("industry_flow_matched"),
+            "industry_flow_direction": best.get("industry_flow_direction"),
+            "industry_flow_rank": best.get("industry_flow_rank"),
+            "industry_flow_rank_total": best.get("industry_flow_rank_total"),
+            "industry_flow_net_yi": best.get("industry_flow_net_yi"),
+            "industry_outflow_matched": best.get("industry_outflow_matched"),
+            "industry_outflow_rank": best.get("industry_outflow_rank"),
+            "industry_outflow_rank_total": best.get("industry_outflow_rank_total"),
+            "industry_outflow_net_yi": best.get("industry_outflow_net_yi"),
+            "industry_flow_adjustment": best.get("industry_flow_adjustment"),
+            "industry_flow_source": best.get("industry_flow_source"),
+            "industry_flow_generated_at": best.get("industry_flow_generated_at"),
+            "score_before_external_context": best.get("score_before_external_context"),
+            "raw_external_context_adjustment": best.get("raw_external_context_adjustment"),
+            "external_context_adjustment": best.get("external_context_adjustment"),
+            "external_context_capped": best.get("external_context_capped"),
+            "score_before_dragon_tiger": best.get("score_before_dragon_tiger"),
+            "dragon_tiger_available": best.get("dragon_tiger_available"),
+            "dragon_tiger_as_of_date": best.get("dragon_tiger_as_of_date"),
+            "dragon_tiger_source": best.get("dragon_tiger_source"),
+            "dragon_tiger_seat_data_complete": best.get("dragon_tiger_seat_data_complete"),
+            "dragon_tiger_listed": best.get("dragon_tiger_listed"),
+            "dragon_tiger_score": best.get("dragon_tiger_score"),
+            "dragon_tiger_signal": best.get("dragon_tiger_signal"),
+            "dragon_tiger_confidence": best.get("dragon_tiger_confidence"),
+            "dragon_tiger_adjustment": best.get("dragon_tiger_adjustment"),
+            "dragon_tiger_positive_suppressed": best.get("dragon_tiger_positive_suppressed"),
+            "dragon_tiger_net_amount_yuan": best.get("dragon_tiger_net_amount_yuan"),
+            "dragon_tiger_net_ratio_pct": best.get("dragon_tiger_net_ratio_pct"),
+            "dragon_tiger_seat_net_amount_yuan": best.get("dragon_tiger_seat_net_amount_yuan"),
+            "dragon_tiger_institution_net_amount_yuan": best.get("dragon_tiger_institution_net_amount_yuan"),
+            "dragon_tiger_seat_record_count": best.get("dragon_tiger_seat_record_count"),
+            "dragon_tiger_institution_record_count": best.get("dragon_tiger_institution_record_count"),
+            "sector_dragon_tiger_score": best.get("sector_dragon_tiger_score"),
+            "sector_dragon_tiger_adjustment": best.get("sector_dragon_tiger_adjustment"),
+            "sector_dragon_tiger_listed_count": best.get("sector_dragon_tiger_listed_count"),
+            "overnight_us_available": best.get("overnight_us_available"),
+            "overnight_us_target_date": best.get("overnight_us_target_date"),
+            "overnight_us_tone": best.get("overnight_us_tone"),
+            "overnight_us_tone_label": best.get("overnight_us_tone_label"),
+            "overnight_us_summary": best.get("overnight_us_summary"),
+            "overnight_us_sector_matched": best.get("overnight_us_sector_matched"),
+            "overnight_us_sector": best.get("overnight_us_sector"),
+            "overnight_us_proxy": best.get("overnight_us_proxy"),
+            "overnight_us_change_pct": best.get("overnight_us_change_pct"),
+            "overnight_us_signal": best.get("overnight_us_signal"),
+            "overnight_us_adjustment": best.get("overnight_us_adjustment"),
+            "overnight_us_positive_suppressed": best.get("overnight_us_positive_suppressed"),
+            "news_precheck_configured": best.get("news_precheck_configured"),
+            "news_precheck": best.get("news_precheck"),
+            "news_checked": best.get("news_checked"),
+            "news_available": best.get("news_available"),
+            "news_tone": best.get("news_tone"),
+            "news_tone_label": best.get("news_tone_label"),
+            "news_summary": best.get("news_summary"),
+            "news_fetched_at": best.get("news_fetched_at"),
+            "news_adjustment": best.get("news_adjustment"),
+            "news_positive_suppressed": best.get("news_positive_suppressed"),
+            "ema20": best.get("ema20"),
+            "ema50": best.get("ema50"),
+            "atr20": best.get("atr20"),
+            "stop_price": best.get("stop_price"),
+            "stop_source": best.get("stop_source"),
+            "stop_distance_pct": best.get("stop_distance_pct"),
+            "stop_atr": best.get("stop_atr"),
+            "gap_buffer_pct": best.get("gap_buffer_pct"),
+            "execution_buffer_pct": best.get("execution_buffer_pct"),
+            "effective_loss_distance_pct": best.get("effective_loss_distance_pct"),
+            "per_trade_risk_budget_pct": best.get("per_trade_risk_budget_pct"),
+            "max_open_risk_pct": best.get("max_open_risk_pct"),
+            "max_sector_risk_pct": best.get("max_sector_risk_pct"),
+            "max_total_position_pct": best.get("max_total_position_pct"),
+            "max_sector_position_pct": best.get("max_sector_position_pct"),
+            "absolute_position_cap_pct": best.get("absolute_position_cap_pct"),
+            "max_position_pct_by_risk": best.get("max_position_pct_by_risk"),
+            "risk_ok": best.get("risk_ok"),
             "trade_ready": candidate_is_trade_ready(best),
             "strategies": multi["strategies"],
             "consensus_count": multi.get("consensus_count", 0),
             "consensus_boost": multi.get("consensus_boost", 0),
-        })
-        if (i + 1) % 50 == 0:
-            print(f"  ... {i + 1}/{len(to_analyze)} analyzed", file=sys.stderr)
-        time.sleep(0.02)
+        }
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=scan_workers) as pool:
+        for completed, item in enumerate(pool.map(analyze_candidate, to_analyze), 1):
+            if item is not None:
+                results.append(item)
+            if completed % 50 == 0:
+                print(f"  ... {completed}/{len(to_analyze)} analyzed", file=sys.stderr)
 
     # Sort: best_score desc, above_bbi bonus, closer to BBI better
     def sort_key(item):
@@ -978,6 +1592,50 @@ def main():
         return (s, above, -dist)
 
     results.sort(key=sort_key, reverse=True)
+    if sector_tide_enabled and sector_tide_context is not None:
+        news_shortlist = [
+            item
+            for item in results
+            if str(item.get("best_strategy") or "") in SECTOR_TIDE_STRATEGY_IDS
+        ][:SECTOR_TIDE_NEWS_PRECHECK_LIMIT]
+        news_snapshot = fetch_sector_tide_news_precheck(news_shortlist)
+        sector_tide_context = build_sector_tide_context(
+            prepared_items,
+            market_snapshot=market_snapshot,
+            flow_rows=sector_tide_flow_rows,
+            previous_market=previous_sector_tide_market,
+            dragon_tiger_snapshot=dragon_tiger_snapshot,
+            overnight_us_snapshot=overnight_us_snapshot,
+            news_snapshot=news_snapshot,
+        )
+        sector_tide_context["industry_money_flow"] = sector_tide_flow_rows
+        strategy_context = sector_tide_context
+        record_codes = {
+            normalize_stock_code(record.get("code"))
+            for record in news_snapshot.get("records") or []
+            if isinstance(record, dict) and normalize_stock_code(record.get("code"))
+        }
+        source_by_code = {str(candidate[0]): candidate for candidate in to_analyze}
+        refreshed_by_code: dict[str, dict[str, Any]] = {}
+        for code in record_codes:
+            source = source_by_code.get(code)
+            refreshed = analyze_candidate(source) if source else None
+            if refreshed is not None:
+                refreshed_by_code[code] = refreshed
+        if refreshed_by_code:
+            results = [
+                refreshed_by_code.get(str(item.get("code") or ""), item)
+                for item in results
+            ]
+            results.sort(key=sort_key, reverse=True)
+        news_meta = sector_tide_context.get("news") or {}
+        print(
+            "  Tide news precheck: "
+            f"configured={news_meta.get('configured')} "
+            f"checked={news_meta.get('matched_stock_count', 0)} "
+            f"available={news_meta.get('available_stock_count', 0)}",
+            file=sys.stderr,
+        )
     display_candidates = select_display_candidates(results)
     trade_candidates = select_trade_candidates(results)
     annotate_candidate_industries(display_candidates, trade_candidates)
@@ -1018,6 +1676,12 @@ def main():
         "strategy_score_profiles": active_strategy_score_profiles(),
         "market_snapshot": market_snapshot,
     }
+    if sector_tide_context is not None:
+        output["sector_tide_context"] = sector_tide_context
+    if zettaranc_enabled:
+        output["zettaranc_context"] = {
+            "industry_money_flow": sector_tide_flow_rows,
+        }
     json_str = json.dumps(output, ensure_ascii=False, indent=2)
     print(json_str)
     write_outputs(json_str, generated_at)

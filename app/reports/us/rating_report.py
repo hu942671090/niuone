@@ -9,7 +9,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import ssl
@@ -18,8 +17,9 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.error import URLError, HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
+from core.model_api import build_model_request, request_model
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
 
 # Crossdesk has intermittent SSL record-layer failures with Python's
@@ -32,6 +32,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 def load_dashboard_env() -> None:
     allowed = {
         "DASHBOARD_GROK_MODEL",
+        "DASHBOARD_GROK_API_MODE",
         "DASHBOARD_GROK_CONTEXT_LENGTH",
         "DASHBOARD_GROK_BASE_URL",
         "DASHBOARD_GROK_API_KEY",
@@ -77,6 +78,7 @@ JOB_ID = "fd0b807138f4"
 JOB_NAME = "每日美股机构买入评级汇报"
 CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG") or str(DASHBOARD_HOME / "config.yaml")).expanduser()
 US_RATING_MODEL = os.environ.get("US_RATING_MODEL") or os.environ.get("DASHBOARD_GROK_MODEL") or "grok-4.20-multi-agent-xhigh"
+GROK_API_MODE = os.environ.get("DASHBOARD_GROK_API_MODE") or "auto"
 
 
 def _int_env(name: str, default: int, *, min_value: int) -> int:
@@ -144,22 +146,15 @@ def _is_transient_error(err):
 
 
 def _call_api(base_url, api_key, messages, max_tokens=US_RATING_MAX_TOKENS):
-    body = json.dumps({
-        "model": US_RATING_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "stream": False,
-    }).encode("utf-8")
-
-    req = Request(
-        f"{base_url}/chat/completions",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "application/json",
-            "User-Agent": "NiuOne/1.0",
-        },
+    model_request = build_model_request(
+        base_url,
+        US_RATING_MODEL,
+        messages,
+        max_tokens=max_tokens,
+        api_mode=GROK_API_MODE,
+        tools=[{"type": "web_search"}],
+        reasoning={"effort": "low"},
+        stream=False,
     )
     last_err = None
     # Keep our own wall clock bounded so slow upstream model/web-search runs end
@@ -171,12 +166,16 @@ def _call_api(base_url, api_key, messages, max_tokens=US_RATING_MAX_TOKENS):
             break
         try:
             timeout_seconds = min(max(10, US_RATING_REQUEST_TIMEOUT_SECONDS), max(10, remaining - 2))
-            with urlopen(req, timeout=timeout_seconds, context=_SSL_CONTEXT) as resp:
-                data = json.loads(resp.read().decode("utf-8", "ignore"))
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if str(content or "").strip():
-                    return content
-                last_err = RuntimeError("API returned empty content")
+            parsed = request_model(
+                model_request,
+                api_key,
+                timeout=timeout_seconds,
+                opener=urlopen,
+                ssl_context=_SSL_CONTEXT,
+            )
+            if str(parsed.content or "").strip():
+                return parsed.content
+            last_err = RuntimeError("API returned empty content")
         except Exception as e:
             last_err = e
             if attempt < 3 and (deadline - time.monotonic()) > 8:

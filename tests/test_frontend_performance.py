@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+import json
+import subprocess
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WEB_SRC = ROOT / "web" / "src"
+VISIBLE_POLLING_PATH = WEB_SRC / "utils" / "visiblePolling.js"
+PUBLIC_PROJECTION_PATH = WEB_SRC / "composables" / "usePublicProjection.js"
+
+
+class FrontendPerformanceTests(unittest.TestCase):
+    def test_dashboard_panels_are_loaded_on_demand(self):
+        source = (WEB_SRC / "components" / "DashboardPage.vue").read_text(
+            encoding="utf-8"
+        )
+        panel_names = (
+            "DragonTigerPanel",
+            "IndustryFlowPanel",
+            "IndicesPanel",
+            "MarketMonitorPanel",
+            "PracticePanel",
+            "UsRatingsPanel",
+            "XMonitorPanel",
+        )
+        for panel_name in panel_names:
+            self.assertIn(
+                f"const {panel_name} = defineAsyncComponent(() => import('./{panel_name}.vue'))",
+                source,
+            )
+            self.assertNotIn(f"import {panel_name} from './{panel_name}.vue'", source)
+
+    def test_periodic_dashboard_requests_pause_while_hidden(self):
+        paths = (
+            WEB_SRC / "composables" / "useIndicesData.js",
+            WEB_SRC / "composables" / "useIndustryFlowData.js",
+            WEB_SRC / "composables" / "useMarketMonitorData.js",
+            WEB_SRC / "composables" / "useUsRatingsData.js",
+            WEB_SRC / "composables" / "useXMonitorData.js",
+            WEB_SRC / "components" / "DragonTigerPanel.vue",
+        )
+        for path in paths:
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("startVisiblePolling", source, path.name)
+            self.assertNotIn("setInterval", source, path.name)
+
+    def test_public_projection_coordinates_visible_tabs(self):
+        source = (
+            WEB_SRC / "composables" / "usePublicProjection.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("window.BroadcastChannel", source)
+        self.assertIn("window.navigator?.locks", source)
+        self.assertIn("visibilitychange", source)
+        self.assertIn("nextRefreshDelay", source)
+        self.assertNotIn("setInterval", source)
+
+    def test_public_projection_releases_the_tab_lock_after_last_subscriber(self):
+        digest = "a" * 64
+        scenario = f"""
+const timers = new Map();
+const listeners = new Map();
+const snapshots = [];
+let nextTimer = 1;
+let fetchCalls = 0;
+let lockRequests = 0;
+let channelClosed = false;
+class FakeChannel {{
+  addEventListener() {{}}
+  removeEventListener() {{}}
+  postMessage() {{}}
+  close() {{ channelClosed = true; }}
+}}
+globalThis.window = {{
+  BroadcastChannel: FakeChannel,
+  navigator: {{
+    locks: {{
+      request(_name, callback) {{
+        lockRequests += 1;
+        return callback();
+      }},
+    }},
+  }},
+  setTimeout(callback, delay) {{
+    const id = nextTimer++;
+    timers.set(id, {{callback, delay}});
+    return id;
+  }},
+  clearTimeout(id) {{ timers.delete(id); }},
+}};
+globalThis.document = {{
+  visibilityState: 'visible',
+  addEventListener(name, callback) {{ listeners.set(name, callback); }},
+  removeEventListener(name, callback) {{
+    if (listeners.get(name) === callback) listeners.delete(name);
+  }},
+}};
+globalThis.fetch = async url => {{
+  fetchCalls += 1;
+  if (url === '/api/v2/public/latest') return {{
+    status: 200,
+    ok: true,
+    headers: {{get() {{ return ''; }}}},
+    async json() {{ return {{revision: 1, manifest: 'manifests/1.json'}}; }},
+  }};
+  return {{
+    status: 200,
+    ok: true,
+    headers: {{get() {{ return ''; }}}},
+    async json() {{ return {{sections: {{practice: {{digest: '{digest}'}}}}}}; }},
+  }};
+}};
+const {{ subscribePublicProjection }} = await import(
+  {json.dumps(PUBLIC_PROJECTION_PATH.as_uri())} + '?lock-test=1'
+);
+const unsubscribe = subscribePublicProjection(value => snapshots.push(value));
+for (let index = 0; index < 5 && snapshots.length === 0; index += 1) {{
+  await new Promise(resolve => setImmediate(resolve));
+}}
+unsubscribe();
+await new Promise(resolve => setImmediate(resolve));
+console.log(JSON.stringify({{
+  fetchCalls,
+  lockRequests,
+  snapshots: snapshots.length,
+  revision: snapshots[0]?.revision,
+  channelClosed,
+  timers: timers.size,
+  listenerRemoved: !listeners.has('visibilitychange'),
+}}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", scenario],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "fetchCalls": 2,
+                "lockRequests": 1,
+                "snapshots": 1,
+                "revision": 1,
+                "channelClosed": True,
+                "timers": 0,
+                "listenerRemoved": True,
+            },
+        )
+
+    def test_visible_polling_stops_and_resumes_with_page_visibility(self):
+        scenario = f"""
+const timers = new Map();
+const listeners = new Map();
+let nextTimer = 1;
+globalThis.window = {{
+  setTimeout(callback, delay) {{
+    const id = nextTimer++;
+    timers.set(id, {{callback, delay}});
+    return id;
+  }},
+  clearTimeout(id) {{ timers.delete(id); }},
+}};
+globalThis.document = {{
+  visibilityState: 'hidden',
+  addEventListener(name, callback) {{ listeners.set(name, callback); }},
+  removeEventListener(name, callback) {{
+    if (listeners.get(name) === callback) listeners.delete(name);
+  }},
+}};
+const {{ startVisiblePolling }} = await import({json.dumps(VISIBLE_POLLING_PATH.as_uri())});
+let calls = 0;
+const stop = startVisiblePolling(() => {{ calls += 1; }}, 1000, {{
+  runImmediately: true,
+  jitterRatio: 0,
+}});
+const hiddenTimers = timers.size;
+document.visibilityState = 'visible';
+listeners.get('visibilitychange')();
+const [firstId, firstTimer] = [...timers.entries()][0];
+timers.delete(firstId);
+firstTimer.callback();
+await new Promise(resolve => setImmediate(resolve));
+const nextTimerState = [...timers.values()][0];
+document.visibilityState = 'hidden';
+listeners.get('visibilitychange')();
+const hiddenAgainTimers = timers.size;
+stop();
+console.log(JSON.stringify({{
+  hiddenTimers,
+  firstDelay: firstTimer.delay,
+  calls,
+  nextDelay: nextTimerState.delay,
+  hiddenAgainTimers,
+  listenerRemoved: !listeners.has('visibilitychange'),
+}}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", scenario],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "hiddenTimers": 0,
+                "firstDelay": 0,
+                "calls": 1,
+                "nextDelay": 1000,
+                "hiddenAgainTimers": 0,
+                "listenerRemoved": True,
+            },
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

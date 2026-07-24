@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import os
 import json
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from datetime import datetime
@@ -432,6 +435,64 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(compact_pos["strategy_mark_id"], "b3_accelerate")
         self.assertEqual(compact_pos["position_pct"], 10.0)
         self.assertEqual(compact_pos["strategy_mark_history"][-1]["action"], "BUY")
+
+    def test_execute_actions_daily_loss_budget_blocks_buy_but_not_sell(self):
+        state = {
+            "cash": 100000.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "name": "旧持仓",
+                    "qty": 100,
+                    "avg_cost": 10.0,
+                    "last_price": 9.5,
+                    "buy_strategy": "b2_confirm",
+                    "strategy_mark": {"strategy_id": "b2_confirm", "label": "B2确认"},
+                    "buy_date_lots": {"2026-06-23": 100},
+                }
+            },
+            "trade_log": [],
+            "decision_log": [],
+        }
+        decision = {
+            "actions": [
+                {"action": "BUY", "code": "600001", "name": "新候选", "shares": 100, "reason": "测试买入"},
+                {"action": "SELL", "code": "600000", "name": "旧持仓", "shares": 100, "reason": "原策略退出"},
+            ]
+        }
+        candidates = [{
+            "code": "600001",
+            "name": "新候选",
+            "best_strategy": "b2_confirm",
+            "actionable": True,
+            "hard_blockers": [],
+            "risk_flags": [],
+        }]
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        original_budget = trader.check_daily_loss_budget
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 9.5 if code == "600000" else 10.0, "name": "测试", "source": "test"}
+            trader.check_daily_loss_budget = lambda _state: (True, -3.2)
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                candidates,
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+            trader.check_daily_loss_budget = original_budget
+
+        self.assertEqual([item["action"] for item in executed], ["SELL"])
+        self.assertNotIn("600001", state["positions"])
+        self.assertNotIn("600000", state["positions"])
+        self.assertIn("仅暂停BUY", decision["execution_blocked_reasons"][0])
 
     def test_execute_actions_marks_sell_rule_on_remaining_position(self):
         original_execution_time = trader.is_a_share_execution_time
@@ -1686,6 +1747,127 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual({row["code"] for row in saved["trade_log"]}, {"002654", "600001"})
         self.assertTrue(any(row["action"] == "SELL" for row in saved["trade_log"]))
 
+    def test_save_state_preserves_newer_decision_error_during_stale_refresh(self):
+        original_state_file = trader.STATE_FILE
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                failure_error = "ValueError: 模型回复JSON解析失败"
+                failure = {
+                    "time": "2026-07-15 11:34:03",
+                    "b1_generated_at": "2026-07-15 11:31:29",
+                    "trade_allowed": False,
+                    "trade_reason": "午间休市",
+                    "decision": {
+                        "summary": "模型决策失败，本轮不交易",
+                        "actions": [],
+                        "model": "deepseek-v4-pro",
+                        "error": failure_error,
+                    },
+                    "executed": [],
+                }
+                trader.STATE_FILE.write_text(json.dumps({
+                    "initial_cash": 100000.0,
+                    "cash": 100000.0,
+                    "positions": {},
+                    "trade_log": [],
+                    "decision_log": [failure],
+                    "equity_history": [],
+                    "last_decision_at": failure["time"],
+                    "last_error": failure_error,
+                }, ensure_ascii=False))
+
+                stale_refresh = {
+                    "initial_cash": 100000.0,
+                    "cash": 100000.0,
+                    "positions": {},
+                    "trade_log": [],
+                    "decision_log": [],
+                    "equity_history": [],
+                    "last_decision_at": "2026-07-15 11:31:54",
+                    "last_error": "",
+                }
+                trader.save_state(stale_refresh)
+                saved = trader.load_state()
+            finally:
+                trader.STATE_FILE = original_state_file
+
+        self.assertEqual(saved["last_decision_at"], "2026-07-15 11:34:03")
+        self.assertEqual(saved["last_error"], failure_error)
+        self.assertTrue(any(row.get("time") == failure["time"] for row in saved["decision_log"]))
+
+    def test_state_file_write_lock_blocks_another_process(self):
+        original_state_file = trader.STATE_FILE
+        with tempfile.TemporaryDirectory() as td:
+            state_file = Path(td) / "portfolio.json"
+            ready_file = Path(td) / "child-ready"
+            acquired_file = Path(td) / "child-acquired"
+            env = os.environ.copy()
+            env["DASHBOARD_HOME"] = td
+            env["DASHBOARD_PORTFOLIO_STATE"] = str(state_file)
+            env["PYTHONPATH"] = os.pathsep.join([str(SRC), str(COMPAT), env.get("PYTHONPATH", "")])
+            child_code = (
+                "from pathlib import Path\n"
+                "import niuniu_practice_trader as trader\n"
+                f"Path({str(ready_file)!r}).write_text('ready')\n"
+                "with trader.state_file_write_lock():\n"
+                f"    Path({str(acquired_file)!r}).write_text('acquired')\n"
+            )
+            proc = None
+            try:
+                trader.STATE_FILE = state_file
+                with trader.state_file_write_lock():
+                    proc = subprocess.Popen(
+                        [sys.executable, "-c", child_code],
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    for _ in range(250):
+                        if ready_file.exists():
+                            break
+                        if proc.poll() is not None:
+                            break
+                        time.sleep(0.02)
+                    self.assertTrue(ready_file.exists())
+                    time.sleep(0.1)
+                    self.assertFalse(acquired_file.exists())
+                stdout, stderr = proc.communicate(timeout=10)
+                self.assertEqual(proc.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
+                self.assertTrue(acquired_file.exists())
+            finally:
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+                trader.STATE_FILE = original_state_file
+
+    def test_request_chat_json_object_retries_truncated_response_with_more_tokens(self):
+        original_request = trader.request_chat_content
+        payloads = []
+        responses = iter([
+            '{"summary":"截断", "actions":[{"action":"HOLD"',
+            '{"summary":"重试成功","actions":[]}',
+        ])
+        try:
+            def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+                payloads.append(dict(payload))
+                return next(responses)
+
+            trader.request_chat_content = fake_request
+            result = trader.request_chat_json_object(
+                "https://decision.example/v1",
+                "key",
+                {"model": "deepseek-v4-pro", "messages": [], "max_tokens": 4096},
+                "deepseek-v4-pro",
+                timeout=180,
+            )
+        finally:
+            trader.request_chat_content = original_request
+
+        self.assertEqual(result["summary"], "重试成功")
+        self.assertEqual([payload["max_tokens"] for payload in payloads], [4096, 8192])
+
     def test_strategy_performance_splits_entry_and_exit_dimensions(self):
         state = {
             "trade_log": [
@@ -1913,6 +2095,74 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("总仓≤", prompt)
         self.assertNotIn("现金≥", prompt)
         self.assertIn('"target_position_pct"', prompt)
+
+    def test_tide_active_prompt_keeps_z_exit_rules_for_existing_z_position(self):
+        saved_env = {
+            trader.ACTIVE_STRATEGY_ENV: os.environ.get(trader.ACTIVE_STRATEGY_ENV),
+            trader.STRATEGY_SOURCE_ENV: os.environ.get(trader.STRATEGY_SOURCE_ENV),
+            trader.PERSONA_STRATEGY_ENV: os.environ.get(trader.PERSONA_STRATEGY_ENV),
+            trader.TRADE_DISCIPLINE_TEXT_ENV: os.environ.get(trader.TRADE_DISCIPLINE_TEXT_ENV),
+        }
+        originals = {
+            "load_crossdesk_config": trader.load_crossdesk_config,
+            "check_market_environment": trader.check_market_environment,
+            "check_market_sentiment": trader.check_market_sentiment,
+            "current_market_strategy_context": trader.current_market_strategy_context,
+            "check_candidate_news_precheck": trader.check_candidate_news_precheck,
+            "request_chat_content": trader.request_chat_content,
+        }
+        captured = {}
+        try:
+            os.environ[trader.ACTIVE_STRATEGY_ENV] = "sector_tide"
+            os.environ[trader.STRATEGY_SOURCE_ENV] = "builtin"
+            os.environ[trader.PERSONA_STRATEGY_ENV] = "sector_tide"
+            os.environ.pop(trader.TRADE_DISCIPLINE_TEXT_ENV, None)
+            trader.load_crossdesk_config = lambda *args, **kwargs: ("https://decision.example/v1", "key")
+            trader.check_market_environment = lambda: {"bullish": False, "detail": "test"}
+            trader.check_market_sentiment = lambda: {"sentiment": "cold", "detail": "test", "hot_sectors": []}
+            trader.current_market_strategy_context = lambda now=None: {"enabled": False}
+            trader.check_candidate_news_precheck = lambda candidates: ""
+
+            def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+                captured["prompt"] = payload["messages"][0]["content"]
+                return '{"summary":"ok","actions":[]}'
+
+            trader.request_chat_content = fake_request
+            trader.call_model_decision(
+                [],
+                {
+                    "positions": [{
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "available_qty": 1000,
+                        "buy_strategy": "b2_confirm",
+                        "strategy_mark": {"strategy_id": "b2_confirm", "label": "B2确认"},
+                        "strategy_mark_id": "b2_confirm",
+                    }],
+                    "cash": 900000,
+                    "total_equity": 1000000,
+                },
+                True,
+                "连续竞价交易时段",
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        prompt = captured["prompt"]
+        self.assertIn("当前激活策略：板块潮汐（独立策略）", prompt)
+        self.assertIn("【当前新开仓策略规则（只控制BUY）】", prompt)
+        self.assertIn("板块潮汐（市场→行业→个股", prompt)
+        self.assertIn("【已有持仓退出规则（按strategy_mark动态装载）】", prompt)
+        self.assertIn("Z哥历史持仓退出纪律", prompt)
+        self.assertIn("strategy_mark=B2确认", prompt)
+        self.assertIn("SELL必须逐只读取已有持仓的strategy_mark", prompt)
 
     def test_held_candidate_add_rule_is_in_decision_prompt(self):
         saved_env = {
@@ -2243,6 +2493,57 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(at_tail[0]["exit_signal"], "b2_no_follow_through")
         self.assertIn("14:45", at_tail[0]["reason"])
 
+    def test_predecision_exit_uses_strategy_mark_when_active_suite_and_legacy_field_differ(self):
+        state = {
+            "cash": 0.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "name": "测试股",
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 9.5,
+                    "confirmed_close": 9.5,
+                    "shaofu_stop_price": 9.7,
+                    "shaofu_stop_source": "b1_low",
+                    "buy_strategy": "sector_tide_mainline",
+                    "strategy_mark_id": "b2_confirm",
+                    "strategy_mark": {"strategy_id": "b2_confirm", "label": "B2确认"},
+                    "buy_date_lots": {"2026-06-23": 1000},
+                }
+            },
+            "trade_log": [],
+            "decision_log": [],
+        }
+        saved_active = os.environ.get(trader.ACTIVE_STRATEGY_ENV)
+        originals = {
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+            "refresh_position_intraday": trader.refresh_position_intraday,
+            "_refresh_position_bbi": trader._refresh_position_bbi,
+        }
+        try:
+            os.environ[trader.ACTIVE_STRATEGY_ENV] = "sector_tide"
+            trader.refresh_realtime_prices = lambda _state: {}
+            trader.refresh_position_intraday = lambda _state: {}
+            trader._refresh_position_bbi = lambda _state, _dt=None: None
+
+            executed = trader.run_position_exit_checks_before_decision(
+                state,
+                datetime(2026, 6, 24, 10, 0),
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            if saved_active is None:
+                os.environ.pop(trader.ACTIVE_STRATEGY_ENV, None)
+            else:
+                os.environ[trader.ACTIVE_STRATEGY_ENV] = saved_active
+
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]["exit_signal"], "shaofu_entry_stop")
+        self.assertEqual(executed[0]["buy_strategy"], "b2_confirm")
+        self.assertEqual(state["positions"], {})
+
     def test_partial_profit_does_not_auto_sell_rest_at_same_band(self):
         state = {
             "cash": 0.0,
@@ -2378,6 +2679,257 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(state["trade_log"], [])
         self.assertEqual(state["positions"]["600000"]["qty"], 1000)
 
+    def test_session_equity_heartbeat_uses_wall_clock_minute_buckets(self):
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 17, 10, 1, 1)
+
+        state = {
+            "initial_cash": 100000.0,
+            "cash": 100000.0,
+            "positions": {},
+            "trade_log": [],
+            "decision_log": [],
+            "equity_history": [{
+                "time": "2026-07-17 10:00:59",
+                "equity": 100000.0,
+                "cash": 100000.0,
+                "market_value": 0.0,
+                "pnl_pct": 0.0,
+            }],
+            "daily_equity_history": [],
+        }
+        calls = {"refresh": 0, "save": 0}
+        fake_db = types.ModuleType("niuniu_db")
+        fake_db.record_daily_equity = lambda _point: None
+        original_db = sys.modules.get("niuniu_db")
+        originals = {
+            "datetime": trader.datetime,
+            "is_a_share_trading_day": trader.is_a_share_trading_day,
+            "load_state": trader.load_state,
+            "save_state": trader.save_state,
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+        }
+        try:
+            sys.modules["niuniu_db"] = fake_db
+            trader.datetime = FixedDateTime
+            trader.is_a_share_trading_day = lambda dt=None: True
+            trader.load_state = lambda: state
+            trader.save_state = lambda _state: calls.__setitem__("save", calls["save"] + 1)
+            trader.refresh_realtime_prices = lambda _state: calls.__setitem__(
+                "refresh", calls["refresh"] + 1
+            )
+
+            self.assertTrue(trader.maybe_record_session_equity_heartbeat())
+            self.assertFalse(trader.maybe_record_session_equity_heartbeat())
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            if original_db is None:
+                sys.modules.pop("niuniu_db", None)
+            else:
+                sys.modules["niuniu_db"] = original_db
+
+        self.assertEqual(calls, {"refresh": 1, "save": 1})
+        self.assertEqual(
+            [point["time"] for point in state["equity_history"]],
+            ["2026-07-17 10:00:59", "2026-07-17 10:01:00"],
+        )
+
+    def test_session_equity_heartbeat_captures_the_full_closing_minute(self):
+        class ClosingDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 17, 15, 0, 59)
+
+        state = {
+            "initial_cash": 100000.0,
+            "cash": 100000.0,
+            "positions": {},
+            "trade_log": [],
+            "decision_log": [],
+            "equity_history": [{
+                "time": "2026-07-17 14:59:00",
+                "equity": 100000.0,
+                "cash": 100000.0,
+                "market_value": 0.0,
+                "pnl_pct": 0.0,
+            }],
+            "daily_equity_history": [],
+        }
+        fake_db = types.ModuleType("niuniu_db")
+        fake_db.record_daily_equity = lambda _point: None
+        original_db = sys.modules.get("niuniu_db")
+        originals = {
+            "datetime": trader.datetime,
+            "is_a_share_trading_day": trader.is_a_share_trading_day,
+            "load_state": trader.load_state,
+            "save_state": trader.save_state,
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+        }
+        try:
+            sys.modules["niuniu_db"] = fake_db
+            trader.datetime = ClosingDateTime
+            trader.is_a_share_trading_day = lambda dt=None: True
+            trader.load_state = lambda: state
+            trader.save_state = lambda _state: None
+            trader.refresh_realtime_prices = lambda _state: {}
+
+            self.assertTrue(
+                trader.is_a_share_equity_heartbeat_clock(
+                    datetime(2026, 7, 17, 15, 0, 1)
+                )
+            )
+            self.assertFalse(
+                trader.is_a_share_session_clock(
+                    datetime(2026, 7, 17, 15, 0, 1)
+                )
+            )
+            self.assertTrue(
+                trader.is_a_share_equity_heartbeat_clock(
+                    datetime(2026, 7, 17, 15, 0, 59)
+                )
+            )
+            self.assertFalse(
+                trader.is_a_share_equity_heartbeat_clock(
+                    datetime(2026, 7, 17, 15, 1, 0)
+                )
+            )
+            self.assertTrue(trader.maybe_record_session_equity_heartbeat())
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+            if original_db is None:
+                sys.modules.pop("niuniu_db", None)
+            else:
+                sys.modules["niuniu_db"] = original_db
+
+        self.assertEqual(
+            [point["time"] for point in state["equity_history"]],
+            ["2026-07-17 14:59:00", "2026-07-17 15:00:00"],
+        )
+
+    def test_session_equity_heartbeat_preserves_concurrent_trade_point(self):
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 17, 10, 1, 20)
+
+        previous_point = {
+            "time": "2026-07-17 10:00:00",
+            "equity": 100000.0,
+            "cash": 100000.0,
+            "market_value": 0.0,
+            "pnl_pct": 0.0,
+        }
+        initial = {
+            "initial_cash": 100000.0,
+            "cash": 100000.0,
+            "positions": {},
+            "trade_log": [],
+            "decision_log": [],
+            "pending_decisions": [],
+            "equity_history": [dict(previous_point)],
+            "daily_equity_history": [dict(previous_point)],
+        }
+        refresh_started = threading.Event()
+        release_refresh = threading.Event()
+        heartbeat_results = []
+        heartbeat_errors = []
+        db_points = []
+        fake_db = types.ModuleType("niuniu_db")
+        fake_db.record_daily_equity = lambda point: db_points.append(dict(point))
+        original_db = sys.modules.get("niuniu_db")
+        original_state_file = trader.STATE_FILE
+        originals = {
+            "datetime": trader.datetime,
+            "is_a_share_trading_day": trader.is_a_share_trading_day,
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+        }
+        worker = None
+
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                sys.modules["niuniu_db"] = fake_db
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                trader.datetime = FixedDateTime
+                trader.is_a_share_trading_day = lambda dt=None: True
+
+                def blocking_refresh(_state):
+                    refresh_started.set()
+                    if not release_refresh.wait(5):
+                        raise TimeoutError("test quote refresh was not released")
+                    return {}
+
+                trader.refresh_realtime_prices = blocking_refresh
+                trader.save_state(initial)
+
+                def run_heartbeat():
+                    try:
+                        heartbeat_results.append(
+                            trader.maybe_record_session_equity_heartbeat()
+                        )
+                    except Exception as exc:
+                        heartbeat_errors.append(exc)
+
+                worker = threading.Thread(target=run_heartbeat)
+                worker.start()
+                self.assertTrue(refresh_started.wait(2))
+
+                traded = trader.load_state()
+                traded["cash"] = 90000.0
+                traded["positions"] = {
+                    "600000": {
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 100,
+                        "avg_cost": 100.0,
+                        "last_price": 110.0,
+                        "buy_date_lots": {"2026-07-17": 100},
+                    }
+                }
+                traded["trade_log"] = [{
+                    "time": "2026-07-17 10:01:10",
+                    "action": "BUY",
+                    "code": "600000",
+                    "name": "测试股",
+                    "shares": 100,
+                    "price": 100.0,
+                    "reason": "并发成交",
+                }]
+                self.assertTrue(trader.record_equity(traded))
+                trader.save_state(traded)
+
+                release_refresh.set()
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+                saved = trader.load_state()
+            finally:
+                release_refresh.set()
+                if worker is not None:
+                    worker.join(5)
+                for name, value in originals.items():
+                    setattr(trader, name, value)
+                trader.STATE_FILE = original_state_file
+                if original_db is None:
+                    sys.modules.pop("niuniu_db", None)
+                else:
+                    sys.modules["niuniu_db"] = original_db
+
+        self.assertEqual(heartbeat_errors, [])
+        self.assertEqual(heartbeat_results, [False])
+        self.assertEqual(saved["cash"], 90000.0)
+        self.assertEqual(saved["positions"]["600000"]["qty"], 100)
+        self.assertEqual(
+            [point["time"] for point in saved["equity_history"]],
+            ["2026-07-17 10:00:00", "2026-07-17 10:01:00"],
+        )
+        self.assertEqual(saved["equity_history"][-1]["equity"], 101000.0)
+        self.assertEqual(saved["daily_equity_history"][-1]["equity"], 101000.0)
+        self.assertNotIn(trader._PENDING_EQUITY_DB_SYNC_TIME, saved)
+        self.assertEqual(db_points[-1]["equity"], 101000.0)
+
     def test_intraday_curve_rebuild_skips_days_with_trades(self):
         state = {
             "cash": 90000.0,
@@ -2401,6 +2953,115 @@ class SellStrategyRuleTests(unittest.TestCase):
 
         self.assertFalse(rebuilt)
         self.assertEqual(len(state["equity_history"]), 1)
+
+    def test_intraday_curve_rebuild_appends_closing_point_after_latest_trade(self):
+        existing_point = {
+            "time": "2026-06-24 14:57:00",
+            "equity": 100100.0,
+            "cash": 90000.0,
+            "market_value": 10100.0,
+            "pnl_pct": 0.1,
+        }
+        state = {
+            "cash": 90000.0,
+            "initial_cash": 100000.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 10.1,
+                    "intraday": {"points": [
+                        {"time": "14:57", "minute": 237, "price": 10.1},
+                        {"time": "15:00", "minute": 240, "price": 10.3},
+                    ]},
+                }
+            },
+            "trade_log": [{"time": "2026-06-24 14:02:18", "action": "BUY", "code": "600000"}],
+            "equity_history": [existing_point],
+            "daily_equity_history": [existing_point],
+        }
+
+        rebuilt = trader.rebuild_intraday_equity_curve(
+            state,
+            today="2026-06-24",
+            now=datetime(2026, 6, 24, 15, 1, 0),
+        )
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(
+            [point["time"] for point in state["equity_history"]],
+            ["2026-06-24 14:57:00", "2026-06-24 15:00:00"],
+        )
+        self.assertIs(state["equity_history"][0], existing_point)
+        self.assertEqual(state["equity_history"][-1]["equity"], 100300.0)
+        self.assertEqual(state["daily_equity_history"][-1]["time"], "2026-06-24 15:00:00")
+
+        self.assertFalse(trader.rebuild_intraday_equity_curve(
+            state,
+            today="2026-06-24",
+            now=datetime(2026, 6, 24, 15, 1, 0),
+        ))
+        self.assertEqual(len(state["equity_history"]), 2)
+
+    def test_intraday_curve_rebuild_fills_post_trade_gaps_without_replacing_recorded_minutes(self):
+        recorded_1457 = {
+            "time": "2026-06-24 14:57:18",
+            "equity": 100110.0,
+            "cash": 90000.0,
+            "market_value": 10110.0,
+            "pnl_pct": 0.11,
+        }
+        recorded_close = {
+            "time": "2026-06-24 15:00:00",
+            "equity": 100300.0,
+            "cash": 90000.0,
+            "market_value": 10300.0,
+            "pnl_pct": 0.3,
+        }
+        state = {
+            "cash": 90000.0,
+            "initial_cash": 100000.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 10.3,
+                    "intraday": {"points": [
+                        {"time": "14:56", "minute": 236, "price": 10.0},
+                        {"time": "14:57", "minute": 237, "price": 10.1},
+                        {"time": "14:58", "minute": 238, "price": 10.2},
+                        {"time": "14:59", "minute": 239, "price": 10.25},
+                        {"time": "15:00", "minute": 240, "price": 10.3},
+                    ]},
+                }
+            },
+            "trade_log": [{"time": "2026-06-24 14:02:18", "action": "BUY", "code": "600000"}],
+            "equity_history": [recorded_1457, recorded_close],
+            "daily_equity_history": [recorded_close],
+        }
+
+        rebuilt = trader.rebuild_intraday_equity_curve(
+            state,
+            today="2026-06-24",
+            now=datetime(2026, 6, 24, 15, 1, 0),
+        )
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(
+            [point["time"] for point in state["equity_history"]],
+            [
+                "2026-06-24 14:56:00",
+                "2026-06-24 14:57:18",
+                "2026-06-24 14:58:00",
+                "2026-06-24 14:59:00",
+                "2026-06-24 15:00:00",
+            ],
+        )
+        self.assertIs(state["equity_history"][1], recorded_1457)
+        self.assertIs(state["equity_history"][-1], recorded_close)
+        self.assertIs(state["daily_equity_history"][-1], recorded_close)
 
     def test_intraday_curve_rebuild_clamps_today_points_to_current_clock(self):
         state = {
@@ -2717,6 +3378,261 @@ class SellStrategyRuleTests(unittest.TestCase):
         )
 
         self.assertIsNone(signal)
+
+    def test_shaofu_soft_exit_waits_for_three_trading_days(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-23": 1000},
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+
+        self.assertIsNone(signal)
+        self.assertEqual(pos["shaofu_soft_exit_status"], "min_hold")
+        self.assertEqual(pos["shaofu_soft_exit_count"], 0)
+
+    def test_shaofu_soft_exit_requires_distinct_confirmations_and_reduces_half(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-19": 1000},
+        }
+
+        first = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+        duplicate = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+        confirmed = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:30",
+        )
+
+        self.assertIsNone(first)
+        self.assertIsNone(duplicate)
+        self.assertEqual(confirmed["signal"], "shaofu_soft_reduce")
+        self.assertEqual(confirmed["source_signal"], "sell_score_exit")
+        self.assertEqual(confirmed["sell_ratio"], 0.5)
+
+    def test_shaofu_positive_flow_or_shrinking_pullback_vetoes_soft_exit(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-19": 1000},
+            "industry_flow_direction": "inflow",
+            "shaofu_volume_price_signal": "supportive",
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+
+        self.assertIsNone(signal)
+        self.assertEqual(pos["shaofu_soft_exit_status"], "context_hold")
+
+    def test_shaofu_outflow_and_bearish_projected_volume_confirm_half_exit(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-19": 1000},
+            "industry_flow_direction": "outflow",
+            "industry_outflow_rank": 2,
+            "shaofu_volume_price_signal": "bearish",
+            "projected_volume_ratio_20d": 1.35,
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 10:00",
+        )
+
+        self.assertEqual(signal["signal"], "shaofu_soft_reduce")
+        self.assertIn("行业主力净流出第2名", signal["reason"])
+        self.assertIn("预测量比1.35", signal["reason"])
+
+    def test_shaofu_morning_soft_exit_waits_but_structure_stop_does_not(self):
+        soft_pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 10.2,
+            "confirmed_close": 10.2,
+            "sell_score": 2,
+            "buy_strategy": "shaofu_b1",
+            "buy_date_lots": {"2026-06-19": 1000},
+        }
+        hard_pos = {
+            **soft_pos,
+            "last_price": 9.6,
+            "confirmed_close": 9.6,
+            "shaofu_stop_price": 9.7,
+            "shaofu_stop_source": "n_structure_low",
+        }
+
+        soft = trader.evaluate_sell_signal(
+            "600000",
+            soft_pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 09:37",
+        )
+        hard = trader.evaluate_sell_signal(
+            "600000",
+            hard_pos,
+            "2026-06-24",
+            time_exit_allowed=False,
+            b3_exit_allowed=False,
+            soft_exit_allowed=False,
+            soft_exit_confirmation_key="2026-06-24 09:37",
+        )
+
+        self.assertIsNone(soft)
+        self.assertEqual(soft_pos["shaofu_soft_exit_status"], "morning_hold")
+        self.assertEqual(hard["signal"], "shaofu_entry_stop")
+
+    def test_zettaranc_position_context_tracks_outflow_and_projected_volume(self):
+        state = {
+            "positions": {
+                "600000": {
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 9.8,
+                    "change_pct": -2.0,
+                    "volume_lots": 2400,
+                    "median_volume_20": 10000,
+                    "buy_strategy": "shaofu_b1",
+                    "industry": "半导体行业",
+                }
+            }
+        }
+        payload = {
+            "zettaranc_context": {
+                "industry_money_flow": {
+                    "metric": "industry_main_net_flow",
+                    "source": "test",
+                    "generated_at": "2026-06-24 10:00:00",
+                    "inflow": [],
+                    "outflow": [{"name": "半导体", "net_flow_yi": -20.0}],
+                }
+            }
+        }
+        original_loader = trader.load_latest_market_volume_context
+        try:
+            trader.load_latest_market_volume_context = lambda now=None: {
+                "generated_at": "2026-06-24 10:00:00",
+                "actual_turnover_yi": 2000.0,
+                "estimated_turnover_yi": 10000.0,
+                "previous_turnover_yi": 8000.0,
+                "source": "test",
+            }
+            trader.sync_zettaranc_position_context(state, payload)
+            trader.update_zettaranc_volume_context(state, datetime(2026, 6, 24, 10, 0))
+        finally:
+            trader.load_latest_market_volume_context = original_loader
+
+        pos = state["positions"]["600000"]
+        self.assertEqual(pos["industry_flow_direction"], "outflow")
+        self.assertEqual(pos["industry_outflow_rank"], 1)
+        self.assertEqual(pos["market_turnover_ratio"], 1.25)
+        self.assertEqual(pos["projected_volume_ratio_20d"], 1.2)
+        self.assertEqual(pos["shaofu_volume_price_signal"], "bearish")
+
+    def test_execute_actions_downgrades_shaofu_model_sell_to_hold(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "测试股", "source": "test"}
+            state = {
+                "cash": 0.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "测试股",
+                        "qty": 1000,
+                        "avg_cost": 9.5,
+                        "last_price": 10.0,
+                        "buy_strategy": "shaofu_b1",
+                        "buy_date_lots": {"2026-06-19": 1000},
+                    }
+                },
+                "trade_log": [],
+            }
+            decision = {
+                "actions": [{
+                    "action": "SELL",
+                    "code": "600000",
+                    "name": "测试股",
+                    "shares": 1000,
+                    "reason": "模型认为开盘偏弱",
+                }]
+            }
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [],
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+        self.assertEqual(decision["actions"][0]["action"], "HOLD")
+        self.assertIn("本地持仓状态机", decision["execution_blocked_reason"])
 
     def test_sell_score_three_reduces_half_once(self):
         pos = {

@@ -30,10 +30,13 @@ fi
 
 export DASHBOARD_ENV_FILE="${DASHBOARD_ENV_FILE:-$LOCAL_DATA_DIR/dashboard.env}"
 export DASHBOARD_HOME
+export PYTHON_BIN
 export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 export DASHBOARD_CONFIG="${DASHBOARD_CONFIG:-$DASHBOARD_HOME/config.yaml}"
 export DASHBOARD_PUSH_HISTORY_DB="${DASHBOARD_PUSH_HISTORY_DB:-$DASHBOARD_HOME/push_history.db}"
 export DASHBOARD_PORTFOLIO_STATE="${DASHBOARD_PORTFOLIO_STATE:-$DASHBOARD_HOME/cron/output/niuniu_practice_portfolio.json}"
 export DASHBOARD_TRADER_SCRIPT="${DASHBOARD_TRADER_SCRIPT:-$BASE/app/entrypoints/niuniu_practice_trader.py}"
+export DASHBOARD_PUBLIC_PROJECTION_ENABLED="${DASHBOARD_PUBLIC_PROJECTION_ENABLED:-1}"
 mkdir -p "$DASHBOARD_HOME/cron/output" "$DASHBOARD_HOME/logs"
+"$BASE/scripts/build-frontend.sh"
 exec "$PYTHON_BIN" "$BASE/app/entrypoints/niuone_dashboard.py" --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT"

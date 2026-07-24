@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
+import concurrent.futures
 import os
 import sys
+import threading
+import time
 import types
 import unittest
+import urllib.error
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +52,257 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual((snapshot["limit_up"], snapshot["limit_down"]), (1, 1))
         self.assertEqual(snapshot["quote_time"], "2026-07-10 10:00:04")
         self.assertEqual(snapshot["total_amount"], 1e9)
+
+    @staticmethod
+    def _tencent_quote_response():
+        parts = [""] * 39
+        parts[1] = "测试股票"
+        parts[3] = "10.50"
+        parts[4] = "10.00"
+        parts[6] = "1000"
+        parts[30] = "20260717100000"
+        parts[33] = "10.60"
+        parts[34] = "9.90"
+        parts[37] = "10000"
+        parts[38] = "2.5"
+        payload = f'v_sh600000="{"~".join(parts)}";'.encode("gbk")
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return payload
+
+        return Response()
+
+    def test_tencent_batch_quote_retries_timeout_then_succeeds(self):
+        calls = []
+        delays = []
+        original_urlopen = screen.urllib.request.urlopen
+
+        def fake_urlopen(_request, timeout=0):
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise urllib.error.URLError(TimeoutError("timed out"))
+            return self._tencent_quote_response()
+
+        try:
+            screen.urllib.request.urlopen = fake_urlopen
+            result = screen.tencent_batch_quote(
+                ["sh600000"],
+                timeout_seconds=2,
+                max_attempts=3,
+                backoff_seconds=0.25,
+                batch_label="2/21",
+                sleep_fn=delays.append,
+            )
+        finally:
+            screen.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(calls, [2, 2])
+        self.assertEqual(delays, [0.25])
+        self.assertEqual(result["sh600000"]["price"], 10.5)
+
+    def test_tencent_batch_quote_reports_batch_after_retry_budget_exhausted(self):
+        calls = []
+        delays = []
+        original_urlopen = screen.urllib.request.urlopen
+
+        def fake_urlopen(_request, timeout=0):
+            calls.append(timeout)
+            raise urllib.error.URLError(TimeoutError("timed out"))
+
+        try:
+            screen.urllib.request.urlopen = fake_urlopen
+            with self.assertRaisesRegex(
+                screen.TencentQuoteBatchError,
+                r"batch=7/21 failed after 3/3 attempts: timeout",
+            ):
+                screen.tencent_batch_quote(
+                    ["sh600000"],
+                    timeout_seconds=2,
+                    max_attempts=3,
+                    backoff_seconds=0.25,
+                    batch_label="7/21",
+                    sleep_fn=delays.append,
+                )
+        finally:
+            screen.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(calls, [2, 2, 2])
+        self.assertEqual(delays, [0.25, 0.5])
+
+    def test_tencent_batch_quote_does_not_retry_nonretryable_http_error(self):
+        calls = []
+        original_urlopen = screen.urllib.request.urlopen
+
+        def fake_urlopen(request, timeout=0):
+            calls.append(timeout)
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+
+        try:
+            screen.urllib.request.urlopen = fake_urlopen
+            with self.assertRaisesRegex(screen.TencentQuoteBatchError, r"1/3 attempts: HTTP 403"):
+                screen.tencent_batch_quote(
+                    ["sh600000"],
+                    timeout_seconds=2,
+                    max_attempts=3,
+                    sleep_fn=lambda _delay: self.fail("HTTP 403 must not be retried"),
+                )
+        finally:
+            screen.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(calls, [2])
+
+    def test_sector_tide_loads_only_exact_previous_trading_day_archive(self):
+        calls = {}
+
+        def status_loader(value, *, allow_refresh=True):
+            calls["status_value"] = value
+            calls["allow_refresh"] = allow_refresh
+            return {
+                "previous_trading_day": "2026-07-16",
+                "source": "test_calendar",
+            }
+
+        def archive_reader(path, *, trade_date):
+            calls["archive_path"] = path
+            calls["trade_date"] = trade_date
+            return {
+                "available": True,
+                "archive": True,
+                "source": "同花顺问财",
+                "date": trade_date,
+                "items": [{"code": "600000.SH"}],
+            }
+
+        archive_dir = Path("/tmp/niuone-sector-tide-dragon-tiger")
+        payload = screen.load_previous_sector_tide_dragon_tiger(
+            datetime(2026, 7, 17, 10, 0, 0),
+            archive_dir=archive_dir,
+            status_loader=status_loader,
+            archive_reader=archive_reader,
+        )
+
+        self.assertFalse(calls["allow_refresh"])
+        self.assertEqual(calls["trade_date"], "2026-07-16")
+        self.assertEqual(calls["archive_path"], archive_dir)
+        self.assertEqual(payload["date"], "2026-07-16")
+        self.assertEqual(payload["requested_date"], "2026-07-16")
+        self.assertEqual(payload["calendar_source"], "test_calendar")
+
+    def test_sector_tide_missing_previous_archive_degrades_without_latest_fallback(self):
+        requested = []
+
+        payload = screen.load_previous_sector_tide_dragon_tiger(
+            datetime(2026, 7, 17, 10, 0, 0),
+            archive_dir=Path("/tmp/niuone-sector-tide-dragon-tiger"),
+            status_loader=lambda _value, **_kwargs: {
+                "previous_trading_day": "2026-07-16",
+                "source": "test_calendar",
+            },
+            archive_reader=lambda _path, *, trade_date: requested.append(trade_date),
+        )
+
+        self.assertEqual(requested, ["2026-07-16"])
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["error"], "archive_missing")
+        self.assertEqual(payload["items"], [])
+
+    def test_sector_tide_loads_validated_overnight_us_cache(self):
+        calls = []
+        current = datetime(2026, 7, 17, 9, 30, 0)
+        payload = screen.load_sector_tide_overnight_us(
+            current,
+            summary_loader=lambda now: calls.append(now) or {
+                "available": True,
+                "source": "overnight_us_market_summary",
+                "target_cn_date": "2026-07-17",
+                "target_us_date": "2026-07-16",
+                "tone": "offensive",
+                "sector_mappings": [],
+            },
+        )
+
+        self.assertEqual(calls, [current])
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["target_us_date"], "2026-07-16")
+        self.assertEqual(payload["tone"], "offensive")
+
+    def test_sector_tide_missing_overnight_us_cache_degrades_to_neutral(self):
+        payload = screen.load_sector_tide_overnight_us(
+            datetime(2026, 7, 17, 9, 30, 0),
+            summary_loader=lambda _now: None,
+        )
+
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["error"], "cache_missing_or_stale")
+
+    def test_sector_tide_fetches_structured_news_for_at_most_five_candidates(self):
+        candidates = [
+            {"code": f"00000{index}", "name": f"测试{index}"}
+            for index in range(1, 7)
+        ]
+        config = screen.NewsPrecheckConfig(
+            base_url="https://news.example/v1",
+            api_key="secret",
+            model="search-model",
+        )
+        captured = {}
+
+        def fetcher(selected, active_config, **kwargs):
+            captured["selected"] = selected
+            captured["config"] = active_config
+            captured["kwargs"] = kwargs
+            return [
+                {
+                    "code": item["code"],
+                    "name": item["name"],
+                    "checked": True,
+                    "available": True,
+                    "tone": "neutral",
+                    "tone_label": "中性",
+                    "summary": "最近3天无明确重大消息（中性）",
+                    "fetched_at": "2026-07-17T09:30:00+08:00",
+                }
+                for item in selected
+            ]
+
+        payload = screen.fetch_sector_tide_news_precheck(
+            candidates,
+            datetime(2026, 7, 17, 9, 30, 0),
+            config=config,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual(len(captured["selected"]), 5)
+        self.assertIs(captured["config"], config)
+        self.assertEqual(captured["kwargs"]["max_candidates"], 5)
+        self.assertTrue(payload["configured"])
+        self.assertTrue(payload["available"])
+        self.assertEqual(len(payload["records"]), 5)
+
+    def test_sector_tide_news_failure_degrades_without_blocking_scan(self):
+        config = screen.NewsPrecheckConfig(
+            base_url="https://news.example/v1",
+            api_key="secret",
+            model="search-model",
+        )
+        payload = screen.fetch_sector_tide_news_precheck(
+            [{"code": "000001", "name": "平安银行"}],
+            config=config,
+            fetcher=lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError()),
+        )
+
+        self.assertTrue(payload["configured"])
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["error"], "fetch_TimeoutError")
 
     def test_stock_universe_classifies_boards_and_st_as_additive_scopes(self):
         self.assertEqual(
@@ -156,6 +412,108 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["days_from_b1"], 3)
 
+    def test_zettaranc_prefers_higher_industry_main_flow_rank(self):
+        rows = [
+            {
+                "open": 10.0,
+                "close": 10.0,
+                "high": 10.1,
+                "low": 9.9,
+                "volume": 100,
+                "j": 20.0,
+                "bbi": 10.0,
+                "change_pct": 0.0,
+            }
+            for _ in range(40)
+        ]
+        rows[36]["j"] = -12.0
+        rows[-1].update({
+            "open": 10.0,
+            "close": 10.5,
+            "high": 11.2,
+            "low": 9.95,
+            "volume": 110,
+            "j": 50.0,
+            "bbi": 10.0,
+            "change_pct": 5.0,
+            "industry": "半导体行业",
+        })
+        inflow = [
+            {"name": name, "net_flow_yi": 100 - index * 5}
+            for index, name in enumerate([
+                "半导体", "通信设备", "银行", "证券", "软件开发",
+                "汽车零部件", "电池", "消费电子", "光伏设备", "家电",
+            ])
+        ]
+        context = {
+            "industry_money_flow": {
+                "metric": "industry_main_net_flow",
+                "source": "东方财富行业板块主力净额",
+                "generated_at": "2026-07-22 10:00:00",
+                "inflow": inflow,
+            },
+        }
+
+        high_rank = screen.analyze_enriched_rows(
+            rows,
+            {"b2_confirm": screen.score_b2_confirm},
+            context,
+        )["strategies"]["b2_confirm"]
+        low_rank_rows = [dict(row) for row in rows]
+        low_rank_rows[-1]["industry"] = "家电"
+        low_rank = screen.analyze_enriched_rows(
+            low_rank_rows,
+            {"b2_confirm": screen.score_b2_confirm},
+            context,
+        )["strategies"]["b2_confirm"]
+
+        self.assertEqual(high_rank["score_before_industry_flow"], 9.0)
+        self.assertEqual(high_rank["industry_flow_rank"], 1)
+        self.assertEqual(high_rank["industry_flow_adjustment"], 1.5)
+        self.assertEqual(high_rank["score"], 10.0)
+        self.assertEqual(low_rank["industry_flow_rank"], 10)
+        self.assertEqual(low_rank["industry_flow_adjustment"], 0.15)
+        self.assertEqual(low_rank["score"], 9.2)
+        self.assertGreater(high_rank["decision_score"], low_rank["decision_score"])
+
+    def test_zettaranc_ignores_stale_industry_flow_fallback(self):
+        rows = [{"industry": "半导体"}]
+        stale = screen.zettaranc_industry_flow_signal(rows, {
+            "industry_money_flow": {
+                "metric": "industry_main_net_flow",
+                "stale_cache": True,
+                "error": "request timeout",
+                "inflow": [{"name": "半导体", "net_flow_yi": 100}],
+            },
+        })
+
+        self.assertFalse(stale["industry_flow_available"])
+        self.assertFalse(stale["industry_flow_matched"])
+        self.assertEqual(stale["industry_flow_adjustment"], 0.0)
+
+    def test_zettaranc_exposes_matching_industry_outflow_without_score_penalty(self):
+        rows = [{"industry": "半导体行业"}]
+        signal = screen.zettaranc_industry_flow_signal(rows, {
+            "industry_money_flow": {
+                "metric": "industry_main_net_flow",
+                "source": "东方财富行业板块主力净额",
+                "generated_at": "2026-07-22 10:00:00",
+                "inflow": [{"name": "银行", "net_flow_yi": 10.0}],
+                "outflow": [
+                    {"name": "软件开发", "net_flow_yi": -30.0},
+                    {"name": "半导体", "net_flow_yi": -20.0},
+                ],
+            },
+        })
+
+        self.assertTrue(signal["industry_flow_available"])
+        self.assertFalse(signal["industry_flow_matched"])
+        self.assertTrue(signal["industry_outflow_matched"])
+        self.assertEqual(signal["industry_flow_direction"], "outflow")
+        self.assertEqual(signal["industry_outflow_rank"], 2)
+        self.assertEqual(signal["industry_outflow_net_yi"], -20.0)
+        self.assertEqual(signal["industry_flow_adjustment"], 0.0)
+
     def test_n_structure_filter_uses_local_swing_lows(self):
         rising = [{"low": low} for low in [10.4, 10.0, 9.5, 9.8, 10.5, 10.2, 10.0, 10.3, 10.8]]
         falling = [{"low": low} for low in [10.4, 10.0, 9.5, 9.8, 10.5, 9.4, 9.2, 9.5, 10.0]]
@@ -234,6 +592,68 @@ class MultiStrategyRuleTests(unittest.TestCase):
             else:
                 os.environ[trade_name] = saved_trade
 
+    def test_market_enrichment_reuses_market_wide_downloads_across_workers(self):
+        import pandas as pd
+
+        margin_calls = []
+        block_calls = []
+        margin_frame = pd.DataFrame([
+            {
+                '标的证券代码': '600001',
+                '融资买入额': 4_000_000,
+                '融资偿还额': 1_000_000,
+                '融资余额': 100_000_000,
+            },
+            {
+                '标的证券代码': '600002',
+                '融资买入额': 2_000_000,
+                '融资偿还额': 1_000_000,
+                '融资余额': 100_000_000,
+            },
+        ])
+        block_frame = pd.DataFrame([
+            {'证券代码': '600001', '成交额': 1_000_000, '折溢率': 2.5},
+            {'证券代码': '600002', '成交额': 2_000_000, '折溢率': -1.0},
+        ])
+
+        def load_margin(date):
+            time.sleep(0.03)
+            margin_calls.append(date)
+            return margin_frame
+
+        def load_block(**kwargs):
+            time.sleep(0.03)
+            block_calls.append(kwargs)
+            return block_frame
+
+        fake_akshare = types.SimpleNamespace(
+            stock_margin_detail_sse=load_margin,
+            stock_margin_detail_szse=lambda date: margin_calls.append(date) or margin_frame,
+            stock_dzjy_mrmx=load_block,
+        )
+        original_akshare = sys.modules.get('akshare')
+        screen._MARGIN_DETAIL_CACHE.clear()
+        screen._BLOCK_TRADE_CACHE.clear()
+        sys.modules['akshare'] = fake_akshare
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                margin_results = list(pool.map(screen.get_margin_signal, ['600001', '600002']))
+                block_results = list(
+                    pool.map(screen.get_block_trade_signal, ['600001', '600002'])
+                )
+        finally:
+            screen._MARGIN_DETAIL_CACHE.clear()
+            screen._BLOCK_TRADE_CACHE.clear()
+            if original_akshare is None:
+                sys.modules.pop('akshare', None)
+            else:
+                sys.modules['akshare'] = original_akshare
+
+        self.assertTrue(all(result is not None for result in margin_results))
+        self.assertTrue(all(result is not None for result in block_results))
+        self.assertEqual(len(margin_calls), 1)
+        self.assertEqual(len(block_calls), 1)
+
     def test_extract_industry_from_individual_info_rows(self):
         rows = [
             {"item": "股票简称", "value": "测试股份"},
@@ -270,6 +690,70 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(display[0]["sector"], "银行")
         self.assertEqual(trade[0]["industry"], "银行")
         self.assertEqual(trade[0]["sector"], "银行")
+
+    def test_threaded_industry_lookup_prewarms_native_javascript_runtime(self):
+        candidates = [
+            {"code": "600001", "name": "测试A"},
+            {"code": "600002", "name": "测试B"},
+        ]
+        events: list[str] = []
+        original_cache = screen._STOCK_INDUSTRY_MEMORY_CACHE
+        original_lookup = screen.lookup_stock_industry
+        original_prepare = screen.prepare_threaded_native_javascript_runtime
+        original_save = screen.save_stock_industry_cache
+        screen._STOCK_INDUSTRY_MEMORY_CACHE = {}
+
+        def fake_prepare() -> bool:
+            events.append("prepare")
+            return True
+
+        def fake_lookup(code: str) -> str:
+            events.append(f"lookup:{code}")
+            return "银行"
+
+        try:
+            screen.prepare_threaded_native_javascript_runtime = fake_prepare
+            screen.lookup_stock_industry = fake_lookup
+            screen.save_stock_industry_cache = lambda _cache: None
+            screen.annotate_candidate_industries(candidates, max_workers=2)
+        finally:
+            screen._STOCK_INDUSTRY_MEMORY_CACHE = original_cache
+            screen.lookup_stock_industry = original_lookup
+            screen.prepare_threaded_native_javascript_runtime = original_prepare
+            screen.save_stock_industry_cache = original_save
+
+        self.assertEqual(events[0], "prepare")
+        self.assertCountEqual(events[1:], ["lookup:600001", "lookup:600002"])
+        self.assertTrue(all(candidate["industry"] == "银行" for candidate in candidates))
+
+    def test_industry_lookup_falls_back_to_serial_when_native_prewarm_fails(self):
+        candidates = [
+            {"code": "600001", "name": "测试A"},
+            {"code": "600002", "name": "测试B"},
+        ]
+        lookup_threads: list[int] = []
+        original_cache = screen._STOCK_INDUSTRY_MEMORY_CACHE
+        original_lookup = screen.lookup_stock_industry
+        original_prepare = screen.prepare_threaded_native_javascript_runtime
+        original_save = screen.save_stock_industry_cache
+        screen._STOCK_INDUSTRY_MEMORY_CACHE = {}
+
+        def fake_lookup(_code: str) -> str:
+            lookup_threads.append(threading.get_ident())
+            return "银行"
+
+        try:
+            screen.prepare_threaded_native_javascript_runtime = lambda: False
+            screen.lookup_stock_industry = fake_lookup
+            screen.save_stock_industry_cache = lambda _cache: None
+            screen.annotate_candidate_industries(candidates, max_workers=2)
+        finally:
+            screen._STOCK_INDUSTRY_MEMORY_CACHE = original_cache
+            screen.lookup_stock_industry = original_lookup
+            screen.prepare_threaded_native_javascript_runtime = original_prepare
+            screen.save_stock_industry_cache = original_save
+
+        self.assertEqual(lookup_threads, [threading.get_ident(), threading.get_ident()])
 
     def test_persona_strategies_are_registered(self):
         old = os.environ.get(screen.PERSONA_STRATEGY_ENV)

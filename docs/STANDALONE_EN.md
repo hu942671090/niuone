@@ -22,6 +22,7 @@ On the first run, the script automatically:
 - Creates `.local-data/`
 - Creates `.local-data/.venv`
 - Installs `requirements.txt`
+- Builds the Vue 3/Vite frontend under `web/` from locked dependencies
 - Generates `.local-data/dashboard.env`
 - Initializes the log, database, and task output directories under `.local-data/runtime/`
 
@@ -45,6 +46,8 @@ Windows:
 run.bat --port 8877
 ```
 
+The public page and complete settings UI use one FastAPI/Uvicorn process and port, at `8787/` and `8787/admin` by default. Vite's port `5173` is only for local hot reload and is not part of production deployment. The settings page may be accessed through the domain, while configuration and action APIs still require an administrator session. See [Dashboard Incremental Delivery and Deployment](DASHBOARD_V2_EN.md) for snapshot and CDN guidance.
+
 ## Isolated Startup
 
 For debugging or acceptance testing, use a separate port and a temporary runtime directory to avoid affecting real data:
@@ -60,7 +63,7 @@ Visit:
 http://127.0.0.1:8877/
 ```
 
-`scripts/run_standalone.sh` does not create a virtual environment automatically. It is intended for development or validation environments where dependencies are already installed.
+`scripts/run_standalone.sh` does not create a Python virtual environment, but it builds the Vue frontend when needed. It is intended for development or validation environments where Python, Node.js, and dependencies are already available.
 
 On Windows, PowerShell can run an isolated instance using a temporary data directory:
 
@@ -80,16 +83,20 @@ Recommended configuration:
 
 | Scenario | Recommended model | Main configuration items |
 |---|---|---|
-| X watchlist monitoring and daily U.S. institutional ratings report | Grok | `DASHBOARD_GROK_BASE_URL`, `DASHBOARD_GROK_API_KEY`, `DASHBOARD_GROK_MODEL`, `X_WATCHLIST_MAX_TOKENS`, `US_RATING_MAX_TOKENS` |
+| X watchlist monitoring and daily U.S. institutional ratings report | Grok | `DASHBOARD_GROK_BASE_URL`, `DASHBOARD_GROK_API_KEY`, `DASHBOARD_GROK_MODEL`, `DASHBOARD_GROK_API_MODE`, `X_WATCHLIST_MAX_TOKENS`, `US_RATING_MAX_TOKENS` |
 | Enhanced A-share market summary | A model compatible with `/chat/completions` | `A_SHARE_MODEL_SUMMARY_BASE_URL`, `A_SHARE_MODEL_SUMMARY_API_KEY`, `A_SHARE_MODEL_SUMMARY_MODEL`, `A_SHARE_MODEL_SUMMARY_MAX_TOKENS`; reuses `DASHBOARD_GROK_*` when left empty |
-| News pre-check for A-share candidates | A model with real-time search capabilities | `DASHBOARD_NEWS_BASE_URL`, `DASHBOARD_NEWS_API_KEY`, `DASHBOARD_NEWS_MODEL`, `DASHBOARD_NEWS_MAX_TOKENS`, `DASHBOARD_NEWS_CONCURRENCY` |
+| News pre-check for A-share candidates | A model with real-time search capabilities | `DASHBOARD_NEWS_BASE_URL`, `DASHBOARD_NEWS_API_KEY`, `DASHBOARD_NEWS_MODEL`, `DASHBOARD_NEWS_API_MODE`, `DASHBOARD_NEWS_MAX_TOKENS`, `DASHBOARD_NEWS_CONCURRENCY` |
+| iWencai dragon-tiger research data | Tonghuashun iWencai OpenAPI | `IWENCAI_ENABLED`, `IWENCAI_BASE_URL`, `IWENCAI_API_KEY`, `IWENCAI_TIMEOUT_SECONDS`, `IWENCAI_MAX_RETRIES`, `IWENCAI_MAX_CONCURRENCY`, `IWENCAI_CACHE_TTL_SECONDS`, `IWENCAI_DRAGON_TIGER_CRON` |
 | Trading decisions after stock selection | DeepSeek recommended; other compatible models may be used | `DASHBOARD_DECISION_BASE_URL`, `DASHBOARD_DECISION_API_KEY`, `DASHBOARD_DECISION_MODEL` |
 | Trading-decision intelligence bundle | Aggregated locally; no additional model required | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED`, `DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS`, `DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS` |
 
-After startup, click the settings button on the page to manage models, task schedules, and monitored X/Twitter authors. Enter X/Twitter handles without `@`.
+After startup, click the settings button on the page to manage models, task schedules, and monitored X/Twitter authors. Every section that requires a model and API key includes **Test Model Connection**; it tests the current form values without saving them and reuses the saved secret when the API key input is empty. Enter X/Twitter handles without `@`.
 Tweet monitoring and U.S. ratings settings are controlled by the “Enable NiuNiu U.S. Stocks” switch. When disabled, those settings are collapsed and hidden, and the background X monitoring and U.S. ratings scheduled tasks are skipped.
-`*_CONTEXT_LENGTH` represents only the model context window and defaults to `128000`; `*_MAX_TOKENS` controls only the maximum output length for the current request, defaults to `4096`, and can be overridden per scenario.
+`DASHBOARD_GROK_API_MODE` defaults to `auto`: Grok 4.5 uses the Responses API with search tools, while other models use Chat Completions; set `responses` or `chat` to force a mode. `X_WATCHLIST_REQUEST_TIMEOUT_SECONDS` defaults to `45` seconds.
+`DASHBOARD_NEWS_API_MODE` defaults to `auto`: Grok 4.5 and GPT-5 search models use the Responses API with the `web_search` tool; set `responses` or `chat` to force a mode.
+`*_CONTEXT_LENGTH` represents only the model context window and defaults to `128000`; `*_MAX_TOKENS` is the desired maximum output length and is mapped to a compatible Chat or Responses parameter. Both JSON and SSE responses are supported.
 The news pre-check examines at most five candidate stocks concurrently by default. If the upstream service imposes rate limits, reduce `DASHBOARD_NEWS_CONCURRENCY` to `2` or `1`.
+The iWencai source is disabled by default. **iWencai Data Source** includes **Test iWencai Connection**, which sends one lightweight read-only query using the current address and key without saving settings or modifying dragon-tiger snapshots. Enable it and save the API key, then open `/dragon-tiger` to browse dated top-five buy/sell institution, brokerage, and explicitly tagged hot-money/quant seats and amounts, or query dated research snapshots through `/api/iwencai/dragon-tiger`. Cron refreshes the latest snapshot at 18:00 China time on A-share trading days and archives it under `iwencai_dragon_tiger/YYYY-MM-DD.json`; empty or failed responses preserve the last valid data, and a same-day seat-detail failure does not overwrite archived seat rows. The key remains only in the private local `dashboard.env` and is never echoed by the page.
 
 The trading-decision intelligence bundle is enabled by default. It adds market monitoring, overnight U.S. market data, indexes/futures, sector performance, industry fund flows, trending stocks, candidate news, and an account-position summary to every simulated-trading decision prompt and log. If an individual market-data source fails, only its status is recorded; the failure does not block the current decision cycle.
 
@@ -130,8 +137,8 @@ By default, runtime data is stored in:
 | `X_WATCHLIST_ACCOUNTS` | Empty | Comma-separated list of monitored tweet authors |
 | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED` | `1` | Whether to enable the global intelligence bundle for trading decisions |
 | `DASHBOARD_TRADE_DISCIPLINE_TEXT` | Empty | Trading-discipline text for the trading-decision prompt; the built-in default discipline is used when empty |
-| `DASHBOARD_MAX_TOTAL_POSITION_PCT` | `80` | Model position-sizing reference; not a hard execution-layer restriction |
-| `DASHBOARD_MIN_CASH_RESERVE_PCT` | `20` | Model cash-buffer reference; not a hard execution-layer restriction |
+| `DASHBOARD_MAX_TOTAL_POSITION_PCT` | `80` | Global total-exposure cap; `zettaranc` and `sector_tide` enforce the stricter of the global limit and the strategy-suite hard cap, while other suites mainly use it as model guidance |
+| `DASHBOARD_MIN_CASH_RESERVE_PCT` | `20` | Global cash buffer; `zettaranc` and `sector_tide` also enforce it at execution time, while other suites mainly use it as model guidance |
 
 After settings are saved, configurations that support hot application are used immediately for subsequent requests. Restart the local service for configurations that require a restart.
 
@@ -142,8 +149,10 @@ A complete background deployment generally consists of three independent process
 | Process | macOS / Linux entry point | Windows entry point | Required? |
 |---|---|---|---|
 | Dashboard | `run-dashboard.sh` | `run.bat --no-browser --skip-install` | Yes |
-| Scheduled-task scheduler | `run-niuone-cron-scheduler.sh` | `.local-data\.venv\Scripts\python.exe app\niuone_cron_scheduler.py` | Required when automatic summaries and database writes are enabled |
+| Scheduled-task scheduler | `run-niuone-cron-scheduler.sh` | `.local-data\.venv\Scripts\python.exe app\niuone_cron_scheduler.py` | Required for automatic summaries, database writes, or simulated-position automatic-exit checks |
 | Watch-source daemon | `run-x-watchlist-daemon.sh` | `.local-data\.venv\Scripts\python.exe app\x_watchlist_daemon.py` | Required when the X watchlist is enabled |
+
+The live B1 stock-selection schedule runs inside the Dashboard process. The scheduled-task scheduler does not select stocks, but it does run the independent automatic-exit checks for simulated positions. Both processes must stay running for the full scheduled selection-decision-exit lifecycle.
 
 ### One-Click Enablement
 

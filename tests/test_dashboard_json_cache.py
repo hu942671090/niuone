@@ -14,6 +14,8 @@ ENTRYPOINTS = SRC / "entrypoints"
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(COMPAT))
 
+from dashboard.apis.cache import load_cached_payload
+
 
 def load_module(name):
     spec = importlib.util.spec_from_file_location(f"{name}_under_test", COMPAT / f"{name}.py")
@@ -23,6 +25,22 @@ def load_module(name):
 
 
 class DashboardJsonCacheTests(unittest.TestCase):
+    def test_force_refresh_bypasses_fresh_cache(self):
+        calls = []
+
+        result = load_cached_payload(
+            Path("unused.json"),
+            75,
+            compute=lambda: calls.append(True) or {"value": "live"},
+            empty={},
+            read_cache=lambda _path, ttl: {"value": "cached"} if ttl is not None else None,
+            write_cache=lambda _path, _data: None,
+            force_refresh=True,
+        )
+
+        self.assertEqual(result, {"value": "live"})
+        self.assertEqual(calls, [True])
+
     def test_read_json_cache_ignores_bad_json_and_non_object_values(self):
         cache = load_module("dashboard_json_cache")
         with tempfile.TemporaryDirectory() as td:
@@ -59,12 +77,12 @@ class DashboardJsonCacheTests(unittest.TestCase):
             "volume_top": [{"name": "成交量"}],
         }
         modules = [
-            ("sectors_dashboard_api", "fetch_sector_data", None, lambda data: data["items"][0]["name"]),
-            ("money_flow_dashboard_api", "fetch_money_flow", None, lambda data: data["inflow"][0]["name"]),
-            ("hot_stocks_dashboard_api", "fetch_hot_stocks", "turnover", lambda data: data["items"][0]["name"]),
+            ("sectors_dashboard_api", "fetch_sector_data", None, False, lambda data: data["items"][0]["name"]),
+            ("money_flow_dashboard_api", "fetch_money_flow", None, True, lambda data: data["inflow"]),
+            ("hot_stocks_dashboard_api", "fetch_hot_stocks", "turnover", False, lambda data: data["items"][0]["name"]),
         ]
 
-        for module_name, fetch_name, arg, pick in modules:
+        for module_name, fetch_name, arg, rejects_cross_day, pick in modules:
             with self.subTest(module=module_name), tempfile.TemporaryDirectory() as td:
                 mod = load_module(module_name)
                 mod.CACHE_PATH = Path(td) / "cache.json"
@@ -81,9 +99,13 @@ class DashboardJsonCacheTests(unittest.TestCase):
                 else:
                     data = getattr(mod, fetch_name)(arg)
 
-                self.assertTrue(data["stale_cache"])
                 self.assertEqual(data["error"], "upstream down")
-                self.assertEqual(pick(data), "换手率" if arg == "turnover" else "旧缓存")
+                if rejects_cross_day:
+                    self.assertNotIn("stale_cache", data)
+                    self.assertEqual(pick(data), [])
+                else:
+                    self.assertTrue(data["stale_cache"])
+                    self.assertEqual(pick(data), "换手率" if arg == "turnover" else "旧缓存")
 
     def test_dashboard_hot_stocks_sort_selects_requested_rank(self):
         dashboard = load_module("niuone_dashboard")

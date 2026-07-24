@@ -1,2 +1,5 @@
 akshare
 PyYAML
+fastapi
+uvicorn
+httpx2>=2.0.0

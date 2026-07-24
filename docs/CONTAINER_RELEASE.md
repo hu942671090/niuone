@@ -79,7 +79,7 @@ git push origin v1.2.3
 4. 配置 QEMU 与 Docker Buildx，并登录 Docker Hub。
 5. 根据 Git tag 生成镜像名称、版本标签和 OCI 元数据。
 6. 构建仅供测试的 `linux/amd64` 镜像 `niuone:smoke`，加载到 runner 本地。
-7. 启动测试容器，检查 `/` 和 `/api/messages?limit=1`；测试失败时输出容器日志并终止发布。
+7. 启动测试容器，检查 `/healthz` 和 `/api/v2/public/latest`；测试失败时输出容器日志并终止发布。
 8. 构建 `linux/amd64`、`linux/arm64` 多平台镜像并推送 Docker Hub。
 9. 根据版本顺序决定是否更新 `latest`。
 10. 将镜像标签、digest 和 `latest` 更新结果写入 GitHub Actions Summary。
@@ -105,11 +105,14 @@ kunkundi/niuone:latest
 
 ## 7. 构建内容
 
-GitHub Actions 使用仓库根目录作为构建上下文，并使用根目录的 `Dockerfile`。当前没有传入额外 build args，因此使用 `Dockerfile` 中的默认值：
+GitHub Actions 使用仓库根目录作为构建上下文，并使用根目录的 `Dockerfile`。Python 基础镜像使用默认版本，同时把发布 Tag 注入镜像作为页面显示的当前版本：
 
 ```text
 PYTHON_VERSION=3.11
+NIUONE_VERSION=v1.2.3
 ```
+
+看板每次打开都会请求本机的 `/api/version`；服务端定期查询 Docker Hub 的严格 SemVer 标签，并在页面顶部显示当前版本和可用更新。Docker Hub 暂时不可用不会影响其他看板功能。
 
 `.dockerignore` 默认排除整个仓库，只允许构建所需的以下内容进入上下文：
 
@@ -117,9 +120,11 @@ PYTHON_VERSION=3.11
 - `.dockerignore`
 - `requirements.txt`
 - `app/`
+- `frontend/`
+- `web/` 中的 Vue/Vite 源码、配置和依赖锁
 - `scripts/docker-entrypoint.sh`
 
-测试文件、Git 历史、本地运行数据和仓库中的其他文件不会打入镜像。运行配置、数据库、日志和凭据应保存在容器的 `/data` volume 中。
+Docker 使用 Node.js 24 构建阶段安装锁定的 pnpm 依赖并生成 `web/dist/`，随后只把构建产物复制进 Python 运行镜像。测试文件、Git 历史、Node.js、前端依赖、本地运行数据和仓库中的其他文件不会打入最终镜像。运行配置、数据库、日志和凭据应保存在容器的 `/data` volume 中。
 
 ## 8. 发布验证
 

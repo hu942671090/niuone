@@ -11,11 +11,13 @@
   <a href="https://hub.docker.com/r/kunkundi/niuone"><img src="https://img.shields.io/docker/pulls/kunkundi/niuone?label=Docker%20Pulls" alt="Docker Pulls" /></a>
 </p>
 
-NiuOne is an intelligent market research workspace centered on simulated A-share trading, integrating market data aggregation, strategy research, and portfolio tracking. Users can choose a built-in strategy or write their own trading strategies in natural language.
+## Introduction
 
-The system brings together pre-open call auction data, intraday and post-market data, capital and sector flows, overnight U.S. market performance, institutional ratings, and information from sources you follow. This information is used for candidate screening, news pre-checks, and simulated buy and sell decisions. The simulated account continuously records positions, profit and loss, the equity curve, trading logs, and the rationale behind every decision.
+NiuOne is a research and simulated trading system for China's A-share market. LLMs drive market analysis and trading decisions, while the system provides market data aggregation, news retrieval, strategy configuration, and simulated portfolio tracking.
 
-NiuOne can automatically collect information, make simulated decisions, and archive trading records on a schedule. After a simulated trade is executed, it can send alerts through Feishu, DingTalk, WeCom, or Telegram. The simulated trading process follows the trading discipline and risk rules configured by the user. The project can run on a personal computer or server, while configuration and research data remain under the user's control. All trades take place in a simulated account: NiuOne does not connect to a brokerage or use real funds.
+The web dashboard provides a unified view of market data, analysis results, and simulated portfolio status. Scheduled jobs automatically collect pre-open call auction data, intraday and post-market activity, capital flows, sector performance, overnight U.S. market activity, institutional ratings, and content from a Twitter/X watchlist. Guided by user-configured strategy rules, LLMs perform news retrieval, market analysis, and simulated buy and sell decisions. Portfolio state, trade records, and decision rationale are stored locally, while simulated execution alerts can be delivered through Feishu, DingTalk, WeCom, or Telegram.
+
+NiuOne connects information collection, market analysis, trading decisions, and portfolio records into an automated, traceable, and reviewable simulated trading loop. The system can be deployed on a personal computer or server, with configuration and research data managed by the user. All trades are executed in a simulated account; NiuOne does not connect to brokerage trading interfaces or use real funds.
 
 ## Live Demo
 
@@ -26,7 +28,7 @@ NiuOne can automatically collect information, make simulated decisions, and arch
 ## Feature Overview
 
 - **Unified dashboard**: View indices, sectors, market sentiment, capital flows, and historical news in one place.
-- **Information aggregation**: Organize A-share market data, U.S. market summaries, institutional ratings, and custom sources you follow.
+- **Information aggregation**: Organize A-share market data, U.S. market summaries, institutional ratings, and content from a Twitter/X watchlist.
 - **Intelligent summaries**: Connect compatible large-model services to summarize and structure information from multiple sources.
 - **Custom trading strategies**: Choose a built-in strategy or describe your own candidate-selection, buy, sell, position-sizing, and timing rules in natural language.
 - **Simulated trading and portfolio tracking**: Use your own simulated account for candidate screening, buy and sell decisions, position and P&L tracking, and access to the equity curve and trading logs—all without connecting to a brokerage or using real funds.
@@ -37,16 +39,18 @@ The main README does not cover specific research methods or experimental strateg
 
 When contributing or extending the application, see the [app module architecture](docs/APP_ARCHITECTURE.md) for domain boundaries and compatibility-entrypoint conventions.
 
+The Dashboard has migrated to Vue 3 + Vite and FastAPI/Uvicorn while preserving its existing page layout. Same-origin incremental snapshots reduce public traffic, and trading, market requests, and record computation remain server-side. The public page, `/admin`, and every API share one production port. See [Dashboard Incremental Delivery and Deployment](docs/DASHBOARD_V2_EN.md) for architecture, caching, and CDN/cloud/Tunnel deployment guidance.
+
 ## System Requirements
 
 | Dependency | Requirement | Purpose |
 |---|---|---|
 | Python | 3.11+ | Run services, task scripts, and local tools |
+| Node.js | 22.12+ | Build the Vue 3/Vite frontend; not needed in the runtime container image |
+| pnpm | 11.15.1 (the launcher may invoke it through npx) | Install locked frontend dependencies and build the app |
 | Git | Latest stable release recommended | Download and update the project |
 | Browser | A modern browser such as Chrome, Edge, Safari, or Firefox | Access the local workspace |
-| Network | Access to PyPI is required on the first run | Install Python dependencies |
-
-Node.js 18+ is also required when contributing to the project or running the full validation suite, as it is used to check the JavaScript in the dashboard.
+| Network | PyPI and npm registry access are required on the first run | Install Python and frontend dependencies |
 
 ## Quick Start
 
@@ -87,8 +91,9 @@ On the first run, NiuOne automatically:
 1. Creates the private `.local-data/` runtime directory;
 2. Creates a Python virtual environment at `.local-data/.venv/`;
 3. Installs the dependencies in `requirements.txt`;
-4. Generates `.local-data/dashboard.env`;
-5. Initializes the runtime directory and starts the local dashboard.
+4. Installs and builds the Vue frontend from `web/pnpm-lock.yaml`;
+5. Generates `.local-data/dashboard.env`;
+6. Initializes the runtime directory and starts the FastAPI dashboard.
 
 ### Common Startup Options
 
@@ -130,7 +135,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-By default, the service is available only at `127.0.0.1:8787` on the host. Open <http://127.0.0.1:8787/>. To view logs or stop the service:
+By default, the service is available at `127.0.0.1:8787`; the public page and password-protected `/admin` page share that port. To view logs or stop the service:
 
 ```bash
 docker compose logs -f
@@ -333,6 +338,8 @@ For platform-specific status, restart, uninstall, and unattended-operation instr
 ├── scripts/                # Validation, deployment, and standalone-task scripts
 ├── tests/                  # Automated tests
 ├── tools/                  # Local maintenance tools
+├── web/                    # Vue 3 components, Vite configuration, and dependency lock
+├── frontend/               # Migration CSS and legacy controller assets
 ├── dashboard.env.example   # Example configuration
 ├── run.sh                  # One-command startup for macOS / Linux
 ├── run.bat                 # One-command startup for Windows
@@ -344,8 +351,8 @@ For platform-specific status, restart, uninstall, and unattended-operation instr
 After starting the service, run these health checks:
 
 ```bash
-curl -s -o /dev/null -w 'HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/
-curl -s -o /dev/null -w 'HTTP:%{http_code} TOTAL:%{time_total}\n' 'http://127.0.0.1:8787/api/messages?limit=1'
+curl -s -o /dev/null -w 'HEALTH HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/healthz
+curl -s -o /dev/null -w 'SNAPSHOT HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/api/v2/public/latest
 ```
 
 Both are expected to return `HTTP:200`.
@@ -356,7 +363,7 @@ Development validation:
 ./scripts/validate.sh
 ```
 
-The validation script checks the Python, JavaScript, Shell, and Windows BAT entry points and runs the automated tests under `tests/`.
+The validation script builds the Vue production app, checks the Python, JavaScript, Shell, and Windows BAT entry points, and runs the automated tests under `tests/`.
 
 ## Frequently Asked Questions
 

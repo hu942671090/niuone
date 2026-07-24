@@ -40,6 +40,8 @@ Private runtime directory:
 | `.local-data/runtime/logs/` | Service and task logs |
 | `.local-data/backups/` | Deployment backups, which may contain older configuration |
 
+The Dashboard incremental API may return only content inside `.local-data/runtime/public-data/` that was generated through the field allow-lists in `public_projection.py`. Never configure its parent directory, databases, or `cron/output/` as a static-site root. CDN synchronisation must be limited precisely to `objects/`, `manifests/`, and `latest.json`, and sanitisation tests must be reviewed after every schema change.
+
 Do not copy any of the content above into issues, pull requests, the README, documentation examples, or chat contexts. When troubleshooting, provide only sanitized error types, timestamps, and strictly necessary fields.
 
 ## Model Keys
@@ -48,9 +50,9 @@ Recommended usage:
 
 | Purpose | Recommended model | Settings |
 |---|---|---|
-| X watchlist monitoring and the daily U.S. institutional-rating report | Grok | `DASHBOARD_GROK_BASE_URL`, `DASHBOARD_GROK_API_KEY`, `DASHBOARD_GROK_MODEL` |
+| X watchlist monitoring and the daily U.S. institutional-rating report | Grok | `DASHBOARD_GROK_BASE_URL`, `DASHBOARD_GROK_API_KEY`, `DASHBOARD_GROK_MODEL`, `DASHBOARD_GROK_API_MODE` |
 | Enhanced A-share market summaries | A model compatible with `/chat/completions` | `A_SHARE_MODEL_SUMMARY_BASE_URL`, `A_SHARE_MODEL_SUMMARY_API_KEY`, `A_SHARE_MODEL_SUMMARY_MODEL`; reuse `DASHBOARD_GROK_*` when left empty |
-| News prechecks for A-share candidates | A model with real-time search capability | `DASHBOARD_NEWS_BASE_URL`, `DASHBOARD_NEWS_API_KEY`, `DASHBOARD_NEWS_MODEL` |
+| News prechecks for A-share candidates | A model with real-time search capability | `DASHBOARD_NEWS_BASE_URL`, `DASHBOARD_NEWS_API_KEY`, `DASHBOARD_NEWS_MODEL`, `DASHBOARD_NEWS_API_MODE` |
 | Buy and sell decisions after candidate screening | DeepSeek recommended; other compatible models may be used | `DASHBOARD_DECISION_BASE_URL`, `DASHBOARD_DECISION_API_KEY`, `DASHBOARD_DECISION_MODEL` |
 | Comprehensive decision reference | Local aggregation; no additional model required | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED`, `DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS`, `DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS` |
 
@@ -59,6 +61,10 @@ X watchlist monitoring and the daily U.S. institutional-rating report are contro
 The comprehensive decision reference reads local market-data caches, market-message history, and simulated-account state, then writes a compressed summary to the decision log. It introduces no additional model keys, but the log may contain candidate-news summaries and must still be reviewed under this runtime-data policy before any public troubleshooting disclosure.
 
 Model keys may be stored only in `.local-data/dashboard.env`, `.local-data/runtime/config.yaml`, or controlled system environment variables. Before committing, confirm that no new `.env`, `*.key`, `*.token`, `*.secret`, database, or backup file has been added.
+
+The iWencai data source uses `IWENCAI_API_KEY`, which is subject to the same restriction and may only be stored in `.local-data/dashboard.env` or a controlled system environment variable.
+`IWENCAI_ENABLED` is disabled by default. iWencai data is a research snapshot and supplemental market source; incomplete or cached responses must never overwrite account, fill, or real trading records.
+The dragon-tiger job refreshes at 18:00 China time on A-share trading days by default. Only a non-empty successful response may atomically replace the latest snapshot and write a dated archive; failures and empty responses must preserve the last valid data. If top-five buy/sell seat details fail independently, valid institution, brokerage, and other seat rows already archived for the same trading day are preserved instead of being replaced by missing data.
 
 ## Local Copies and Testing
 

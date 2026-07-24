@@ -163,8 +163,42 @@ class AShareMiddaySummaryTests(unittest.TestCase):
         self.assertIn("现货行情未取到有效数据", report)
         self.assertIn("行业资金流暂不可用", report)
         self.assertIn("风险级别：数据缺失", report)
+        self.assertIn("现货行情缺失或不完整", report)
+        self.assertIn("行业资金流缺失或不完整", report)
+        self.assertIn("封死涨停池、封死跌停池缺失或不完整", report)
+        self.assertNotIn("现货主接口暂不可用", report)
+        self.assertNotIn("封板池暂不可用", report)
         self.assertNotIn("涨停 `0`", report)
         self.assertNotIn("成交额 `0元`", report)
+
+    def test_build_report_hides_source_fallback_when_final_spot_is_complete(self):
+        mod = load_module()
+        mod.NOW = datetime(2026, 7, 2, 11, 40, tzinfo=mod.CN_TZ)
+        fallback_detail = (
+            "akshare东财现货接口失败，已切换东方财富直连："
+            "stock_zh_a_spot_em: RemoteDisconnected"
+        )
+        mod.fetch_spot = lambda: (sample_spot_rows(), fallback_detail)
+        mod.fetch_industry_fund_flow = lambda: (None, None)
+        mod.fetch_limit_pools = lambda: (None, None, None)
+        original_min_rows = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_ROWS")
+        original_min_bse = os.environ.get("A_SHARE_SUMMARY_SPOT_MIN_BSE_ROWS")
+        try:
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = "5"
+            os.environ["A_SHARE_SUMMARY_SPOT_MIN_BSE_ROWS"] = "0"
+            report = mod.build_report()
+        finally:
+            if original_min_rows is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_ROWS"] = original_min_rows
+            if original_min_bse is None:
+                os.environ.pop("A_SHARE_SUMMARY_SPOT_MIN_BSE_ROWS", None)
+            else:
+                os.environ["A_SHARE_SUMMARY_SPOT_MIN_BSE_ROWS"] = original_min_bse
+
+        self.assertNotIn("akshare东财现货接口失败", report)
+        self.assertNotIn("RemoteDisconnected", report)
 
     def test_build_report_ignores_all_zero_fund_flow(self):
         mod = load_module()

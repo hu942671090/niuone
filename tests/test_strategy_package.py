@@ -18,7 +18,7 @@ import strategies  # noqa: E402
 import strategy_registry as legacy_registry  # noqa: E402
 from strategies import registry  # noqa: E402
 from strategies.scoring import STRATEGY_SCORERS, analyze_enriched_rows  # noqa: E402
-from strategies.prompts import build_strategy_prompt_sections  # noqa: E402
+from strategies.prompts import build_position_exit_prompt_section, build_strategy_prompt_sections  # noqa: E402
 
 
 class StrategyPackageTests(unittest.TestCase):
@@ -27,6 +27,7 @@ class StrategyPackageTests(unittest.TestCase):
             "base": ("基础策略：", ("Z哥评分基准", "李大霄")),
             "zettaranc": ("Z哥评分基准", ("基础策略：", "李大霄")),
             "li_daxiao_bottom": ("李大霄", ("Z哥评分基准", "基础策略：")),
+            "sector_tide": ("板块潮汐（市场→行业→个股", ("Z哥评分基准", "基础策略：", "李大霄")),
         }
         for suite, (included, excluded) in cases.items():
             sections = build_strategy_prompt_sections(
@@ -40,6 +41,26 @@ class StrategyPackageTests(unittest.TestCase):
             self.assertIn(included, active)
             for text in excluded:
                 self.assertNotIn(text, active)
+
+    def test_position_exit_prompt_uses_held_strategy_marks_not_active_suite(self):
+        active = build_strategy_prompt_sections(
+            "sector_tide",
+            "",
+            registry.enabled_strategy_ids(strategy_suite_raw="sector_tide"),
+            b3_exit_hhmm="09:37",
+            time_exit_hhmm="14:45",
+        )["active_strategy_section"]
+        exits = build_position_exit_prompt_section(
+            {"b2_confirm"},
+            b3_exit_hhmm="09:37",
+            time_exit_hhmm="14:45",
+        )
+
+        self.assertIn("板块潮汐（市场→行业→个股", active)
+        self.assertNotIn("Z哥", active)
+        self.assertIn("Z哥历史持仓退出纪律", exits)
+        self.assertIn("strategy_mark=B2确认", exits)
+        self.assertNotIn("板块潮汐历史持仓退出纪律", exits)
 
     def test_legacy_registry_is_a_compatibility_view(self):
         self.assertIs(legacy_registry.STRATEGY_DEFINITIONS, registry.STRATEGY_DEFINITIONS)

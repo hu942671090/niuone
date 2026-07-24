@@ -15,6 +15,7 @@ ENTRYPOINTS = SRC / "entrypoints"
 NEWS_ENV_KEYS = {
     "DASHBOARD_ENV_FILE",
     "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_API_MODE",
     "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_MAX_TOKENS",
     "DASHBOARD_NEWS_BASE_URL",
@@ -63,6 +64,63 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         self.assertIsNone(module.load_news_precheck_config())
         self.assertEqual(module.check_candidate_news_precheck([{"code": "000001", "name": "平安银行"}]), "")
 
+    def test_news_precheck_reuses_structured_scanner_cache(self):
+        module = import_trader_with_env({})
+        candidates = [
+            {
+                "code": "000001",
+                "name": "平安银行",
+                "news_precheck": {
+                    "code": "000001",
+                    "name": "平安银行",
+                    "checked": True,
+                    "available": True,
+                    "tone": "positive",
+                    "tone_label": "利好",
+                    "summary": "- 000001 平安银行：重大项目落地（利好）",
+                    "fetched_at": "2026-07-17T09:30:00+08:00",
+                },
+            }
+        ]
+        module.load_news_precheck_config = lambda: self.fail("不应再次加载消息面配置")
+
+        result = module.check_candidate_news_precheck(candidates)
+
+        self.assertIn("扫描阶段缓存", result)
+        self.assertIn("重大项目落地（利好）", result)
+
+    def test_news_precheck_only_fetches_candidates_missing_from_scanner_cache(self):
+        module = import_trader_with_env({
+            "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
+            "DASHBOARD_NEWS_API_KEY": "news-secret",
+            "DASHBOARD_NEWS_MODEL": "search-model",
+        })
+        calls = []
+
+        def fake_request(candidate, **_kwargs):
+            calls.append(candidate["code"])
+            return f"- {candidate['code']} {candidate['name']}：最近3天无明确重大消息（中性）"
+
+        module.request_single_candidate_news_precheck = fake_request
+        result = module.check_candidate_news_precheck([
+            {
+                "code": "000001",
+                "name": "平安银行",
+                "news_precheck": {
+                    "code": "000001",
+                    "name": "平安银行",
+                    "checked": True,
+                    "available": True,
+                    "summary": "- 000001 平安银行：重大项目落地（利好）",
+                },
+            },
+            {"code": "000002", "name": "万科A"},
+        ])
+
+        self.assertEqual(calls, ["000002"])
+        self.assertIn("扫描缓存 + 实时补齐", result)
+        self.assertLess(result.index("000001"), result.index("000002"))
+
     def test_news_precheck_requires_complete_config(self):
         module = import_trader_with_env({
             "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
@@ -83,7 +141,7 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         })
         captured = {}
 
-        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60, **kwargs):
             captured.update({
                 "base_url": base_url,
                 "api_key": api_key,
@@ -91,6 +149,7 @@ class NewsPrecheckConfigTests(unittest.TestCase):
                 "model_name": model_name,
                 "max_retries": max_retries,
                 "timeout": timeout,
+                "kwargs": kwargs,
             })
             return "- 000001 平安银行：无重大消息（中性）"
 
@@ -104,6 +163,9 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         self.assertEqual(captured["model_name"], "search-model")
         self.assertEqual(captured["max_retries"], 1)
         self.assertEqual(captured["timeout"], 45)
+        self.assertEqual(captured["kwargs"]["api_mode"], "auto")
+        self.assertEqual(captured["kwargs"]["tools"], [{"type": "web_search"}])
+        self.assertEqual(captured["kwargs"]["reasoning"], {"effort": "low"})
         self.assertIn("【消息面预检（实时搜索", result)
         self.assertNotIn("Grok", result)
 
@@ -144,6 +206,59 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["model"], "search-model")
         self.assertEqual(captured["headers"]["User-agent"], "NiuOne/1.0")
         self.assertEqual(captured["headers"]["Accept"], "application/json")
+
+    def test_gpt_news_precheck_uses_responses_search_and_parses_forced_sse(self):
+        module = import_trader_with_env({})
+        captured = {}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return (
+                    'event: response.web_search_call.searching\n'
+                    'data: {"type":"response.web_search_call.searching"}\n\n'
+                    'event: response.output_text.delta\n'
+                    'data: {"type":"response.output_text.delta","delta":"搜索结果正常"}\n\n'
+                    'event: response.completed\n'
+                    'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+                ).encode("utf-8")
+
+        original_urlopen = module.urllib.request.urlopen
+        try:
+            def fake_urlopen(req, timeout=0):
+                captured["url"] = req.full_url
+                captured["payload"] = json.loads(req.data.decode("utf-8"))
+                return Resp()
+
+            module.urllib.request.urlopen = fake_urlopen
+            result = module.request_chat_content(
+                "https://news.example/v1",
+                "secret",
+                {
+                    "model": "gpt-5.6-sol",
+                    "messages": [{"role": "user", "content": "search"}],
+                    "max_tokens": 4096,
+                },
+                "gpt-5.6-sol",
+                max_retries=1,
+                timeout=3,
+                api_mode="auto",
+                tools=[{"type": "web_search"}],
+                reasoning={"effort": "low"},
+            )
+        finally:
+            module.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(result, "搜索结果正常")
+        self.assertEqual(captured["url"], "https://news.example/v1/responses")
+        self.assertEqual(captured["payload"]["tools"], [{"type": "web_search"}])
+        self.assertNotIn("max_output_tokens", captured["payload"])
+        self.assertNotIn("max_tokens", captured["payload"])
 
     def test_api_call_with_retry_sends_compatible_user_agent(self):
         module = import_trader_with_env({})
@@ -192,7 +307,7 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         })
         captured = {}
 
-        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60, **kwargs):
             captured.update({"max_retries": max_retries, "timeout": timeout})
             return "- 000001 平安银行：无重大消息（中性）"
 
@@ -211,7 +326,7 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         })
         prompts = []
 
-        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60, **kwargs):
             prompt = payload["messages"][0]["content"]
             prompts.append(prompt)
             if "000001" in prompt:
@@ -242,7 +357,7 @@ class NewsPrecheckConfigTests(unittest.TestCase):
             "DASHBOARD_NEWS_CONCURRENCY": "2",
         })
 
-        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60, **kwargs):
             prompt = payload["messages"][0]["content"]
             if "000002" in prompt:
                 raise RuntimeError("rate limited")
@@ -266,7 +381,7 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         })
         captured = {}
 
-        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60, **kwargs):
             captured["payload"] = payload
             return "- 000001 平安银行：无重大消息（中性）"
 
@@ -286,7 +401,7 @@ class NewsPrecheckConfigTests(unittest.TestCase):
         })
         captured = {}
 
-        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60):
+        def fake_request(base_url, api_key, payload, model_name, max_retries=3, timeout=60, **kwargs):
             captured["payload"] = payload
             return "- 000001 平安银行：无重大消息（中性）"
 

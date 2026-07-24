@@ -39,12 +39,22 @@ from .common import (
 )
 from .li_daxiao import score_li_daxiao_bottom
 from .engine import StrategyScorer, analyze_enriched_rows
+from .sector_tide import (
+    SECTOR_TIDE_STRATEGY_IDS,
+    build_sector_tide_context,
+    score_tide_leader,
+    score_tide_recovery,
+    score_tide_rotation,
+)
 from .zettaranc import (
+    ZETTARANC_INDUSTRY_FLOW_MAX_BONUS,
+    ZETTARANC_STRATEGY_IDS,
     recent_b1_indices,
     score_b2_confirm,
     score_b3_accelerate,
     score_shaofu_b1,
     score_super_b1,
+    zettaranc_industry_flow_signal,
 )
 
 
@@ -56,6 +66,9 @@ _SCORER_BY_NAME: dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | Non
     "score_b3_accelerate": score_b3_accelerate,
     "score_super_b1": score_super_b1,
     "score_li_daxiao_bottom": score_li_daxiao_bottom,
+    "score_tide_leader": score_tide_leader,
+    "score_tide_rotation": score_tide_rotation,
+    "score_tide_recovery": score_tide_recovery,
 }
 
 STRATEGY_SCORERS: dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | None]] = {
@@ -75,8 +88,12 @@ __all__ = [
     "LI_DAXIAO_MAX_TURNOVER",
     "LI_DAXIAO_MIN_AMOUNT",
     "STRATEGY_SCORERS",
+    "SECTOR_TIDE_STRATEGY_IDS",
+    "ZETTARANC_INDUSTRY_FLOW_MAX_BONUS",
+    "ZETTARANC_STRATEGY_IDS",
     "StrategyScorer",
     "analyze_enriched_rows",
+    "build_sector_tide_context",
     "candle_amplitude_pct",
     "candle_body_pct",
     "combine_z_yellow",
@@ -100,10 +117,14 @@ __all__ = [
     "score_b3_accelerate",
     "score_breakout",
     "score_li_daxiao_bottom",
+    "score_tide_leader",
+    "score_tide_rotation",
+    "score_tide_recovery",
     "score_shaofu_b1",
     "score_super_b1",
     "score_trend_pullback",
     "strategy_hard_blockers",
     "volatility_pct",
     "with_strategy_profile",
+    "zettaranc_industry_flow_signal",
 ]

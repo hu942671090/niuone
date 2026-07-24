@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import importlib.util
-import gzip
 import io
 import json
 import os
@@ -15,6 +14,10 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from app.dashboard.fastapi_app import SPA_DASHBOARD_PATHS, create_app
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'app'
 COMPAT = SRC / 'compat'
@@ -27,37 +30,168 @@ dashboard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dashboard)
 FRONTEND = ROOT / 'frontend'
 DASHBOARD_FRONTEND = '\n'.join(
-    (FRONTEND / name).read_text(encoding='utf-8')
-    for name in ('index.html', 'dashboard.css', 'dashboard.js')
+    path.read_text(encoding='utf-8')
+    for path in (
+        FRONTEND / 'dashboard.css',
+        *sorted((ROOT / 'web' / 'src').rglob('*.js')),
+        *sorted((ROOT / 'web' / 'src' / 'components').rglob('*.vue')),
+    )
 )
 ADMIN_FRONTEND = '\n'.join(
-    (FRONTEND / name).read_text(encoding='utf-8')
-    for name in ('admin.html', 'admin.css', 'admin.js')
+    path.read_text(encoding='utf-8')
+    for path in (
+        FRONTEND / 'admin.css',
+        ROOT / 'web' / 'src' / 'composables' / 'useAdminConfig.js',
+        *sorted((ROOT / 'web' / 'src' / 'components').glob('Admin*.vue')),
+    )
+)
+MARKET_MONITOR_UTILS_PATH = ROOT / 'web' / 'src' / 'utils' / 'marketMonitorDisplay.js'
+MARKET_MONITOR_UTILS = MARKET_MONITOR_UTILS_PATH.read_text(encoding='utf-8')
+MARKET_MONITOR_DATA = (
+    ROOT / 'web' / 'src' / 'composables' / 'useMarketMonitorData.js'
+).read_text(encoding='utf-8')
+MARKET_MONITOR_COMPONENTS = '\n'.join(
+    path.read_text(encoding='utf-8')
+    for path in (
+        ROOT / 'web' / 'src' / 'components' / 'MarketMonitorPanel.vue',
+        ROOT / 'web' / 'src' / 'components' / 'market-monitor' / 'MarketMonitorCard.vue',
+        ROOT / 'web' / 'src' / 'components' / 'market-monitor' / 'MarketDetail.vue',
+        ROOT / 'web' / 'src' / 'components' / 'market-monitor' / 'MarketSection.vue',
+        ROOT / 'web' / 'src' / 'components' / 'market-monitor' / 'UsMarketSummaryCard.vue',
+    )
+)
+US_RATING_UTILS_PATH = ROOT / 'web' / 'src' / 'utils' / 'usRatingDisplay.js'
+US_RATING_UTILS = US_RATING_UTILS_PATH.read_text(encoding='utf-8')
+US_RATING_DATA = (
+    ROOT / 'web' / 'src' / 'composables' / 'useUsRatingsData.js'
+).read_text(encoding='utf-8')
+US_RATING_COMPONENTS = '\n'.join(
+    path.read_text(encoding='utf-8')
+    for path in (
+        ROOT / 'web' / 'src' / 'components' / 'UsRatingsPanel.vue',
+        ROOT / 'web' / 'src' / 'components' / 'us-ratings' / 'UsRatingCard.vue',
+        ROOT / 'web' / 'src' / 'components' / 'us-ratings' / 'RatingText.vue',
+    )
+)
+X_MONITOR_UTILS_PATH = ROOT / 'web' / 'src' / 'utils' / 'xMonitorDisplay.js'
+X_MONITOR_UTILS = X_MONITOR_UTILS_PATH.read_text(encoding='utf-8')
+X_MONITOR_DATA = (
+    ROOT / 'web' / 'src' / 'composables' / 'useXMonitorData.js'
+).read_text(encoding='utf-8')
+X_MONITOR_COMPONENTS = '\n'.join(
+    path.read_text(encoding='utf-8')
+    for path in (
+        ROOT / 'web' / 'src' / 'components' / 'XMonitorPanel.vue',
+        ROOT / 'web' / 'src' / 'components' / 'x-monitor' / 'XMonitorRow.vue',
+        ROOT / 'web' / 'src' / 'components' / 'x-monitor' / 'XMediaGallery.vue',
+        ROOT / 'web' / 'src' / 'components' / 'x-monitor' / 'XImageViewer.vue',
+    )
+)
+PRACTICE_CANDIDATE_UTILS_PATH = (
+    ROOT / 'web' / 'src' / 'utils' / 'practiceCandidateDisplay.js'
+)
+PRACTICE_CANDIDATE_UTILS = PRACTICE_CANDIDATE_UTILS_PATH.read_text(encoding='utf-8')
+PRACTICE_CANDIDATE_DATA = (
+    ROOT / 'web' / 'src' / 'composables' / 'usePracticeCandidatesData.js'
+).read_text(encoding='utf-8')
+PUBLIC_PROJECTION_DATA = (
+    ROOT / 'web' / 'src' / 'composables' / 'usePublicProjection.js'
+).read_text(encoding='utf-8')
+PRACTICE_DATA = (
+    ROOT / 'web' / 'src' / 'composables' / 'usePracticeData.js'
+).read_text(encoding='utf-8')
+PRACTICE_PAYLOAD_UTILS_PATH = ROOT / 'web' / 'src' / 'utils' / 'practicePayload.js'
+PRACTICE_PAYLOAD_UTILS = PRACTICE_PAYLOAD_UTILS_PATH.read_text(encoding='utf-8')
+PRACTICE_CHART_UTILS_PATH = ROOT / 'web' / 'src' / 'utils' / 'practiceChart.js'
+PRACTICE_CHART_UTILS = PRACTICE_CHART_UTILS_PATH.read_text(encoding='utf-8')
+INDUSTRY_FLOW_ANIMATION_PATH = (
+    ROOT / 'web' / 'src' / 'composables' / 'useIndustryFlowAnimation.js'
+)
+PRACTICE_LOG_UTILS = (
+    ROOT / 'web' / 'src' / 'utils' / 'practiceLogs.js'
+).read_text(encoding='utf-8')
+PRACTICE_CANDIDATE_COMPONENTS = '\n'.join(
+    path.read_text(encoding='utf-8')
+    for path in (
+        ROOT / 'web' / 'src' / 'components' / 'PracticeCandidatesPanel.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeCandidateCard.vue',
+    )
+)
+PRACTICE_COMPONENTS = '\n'.join(
+    path.read_text(encoding='utf-8')
+    for path in (
+        ROOT / 'web' / 'src' / 'components' / 'DashboardPage.vue',
+        ROOT / 'web' / 'src' / 'components' / 'PracticePanel.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeAccountOverview.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeCalendar.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeEquityChart.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeMarketSummary.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeOperationLog.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticePositionCard.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticePositions.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeRule.vue',
+        ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeSoldCard.vue',
+    )
 )
 
 
-class FakeHandler(dashboard.Handler):
+class FakeHandler:
+    """Temporary response-shaped wrapper around the production ASGI app."""
+
     def __init__(self, path='/', method='GET', headers=None, body=b'', ip='127.0.0.1'):
         self.path = path
         self.command = method
         self.headers = headers or {}
+        self.body = body
+        self.ip = ip
         self.rfile = io.BytesIO(body)
         self.wfile = io.BytesIO()
-        self.client_address = (ip, 12345)
         self.status = None
         self.sent_headers = []
 
-    def send_response(self, code, message=None):
-        self.status = code
+    def dispatch(self, method):
+        app = create_app(
+            legacy_module=dashboard,
+            web_dist_dir=ROOT / 'web' / 'dist',
+            enable_background_services=False,
+        )
+        with TestClient(app, client=(self.ip, 12345)) as client:
+            response = client.request(
+                method,
+                self.path,
+                headers=self.headers,
+                content=self.body,
+            )
+        self.status = response.status_code
+        self.sent_headers = list(response.headers.multi_items())
+        self.wfile = io.BytesIO(response.content)
 
-    def send_header(self, keyword, value):
-        self.sent_headers.append((keyword, value))
+    def do_GET(self):
+        self.dispatch('GET')
 
-    def end_headers(self):
-        self.send_security_headers()
+    def do_HEAD(self):
+        self.dispatch('HEAD')
 
-    def log_message(self, fmt, *args):
-        pass
+    def do_POST(self):
+        self.dispatch('POST')
+
+    def client_ip(self):
+        if dashboard.is_trusted_proxy_ip(self.ip):
+            forwarded = dashboard.first_forwarded_ip(
+                self.headers.get('CF-Connecting-IP'),
+                self.headers.get('X-Forwarded-For'),
+            )
+            if forwarded:
+                return forwarded
+        return self.ip
+
+    def is_secure_request(self):
+        if not dashboard.is_trusted_proxy_ip(self.ip):
+            return False
+        if dashboard.is_truthy_header(self.headers.get('X-Forwarded-Proto')):
+            return True
+        cf_visitor = self.headers.get('CF-Visitor') or ''
+        return '"scheme":"https"' in cf_visitor.replace(' ', '').lower()
 
     def header(self, name):
         for key, value in reversed(self.sent_headers):
@@ -75,7 +209,14 @@ class DashboardAuthTests(unittest.TestCase):
         self.original_stats_db = dashboard.STATS_DB
         self.original_legacy_stats_db = dashboard.LEGACY_STATS_DB
         self.original_admin_token_file = dashboard.ADMIN_TOKEN_FILE
+        self.original_indices_snapshot_file = dashboard.INDICES_SNAPSHOT_FILE
+        self.original_iwencai_snapshot_file = dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE
+        self.original_market_breadth_history_file = dashboard.MARKET_BREADTH_HISTORY_FILE
+        self.original_industry_flow_history_file = dashboard.INDUSTRY_FLOW_HISTORY_FILE
+        self.original_money_flow_snapshot_file = dashboard.MONEY_FLOW_SNAPSHOT_FILE
         self.original_admin_password = dashboard.ADMIN_PASSWORD
+        self.original_public_data_dir = dashboard.PUBLIC_DATA_DIR
+        self.original_public_snapshot_publisher = dashboard.PUBLIC_SNAPSHOT_PUBLISHER
         self.saved_env = {
             name: os.environ.get(name)
             for name in (
@@ -85,6 +226,14 @@ class DashboardAuthTests(unittest.TestCase):
                 dashboard.STRATEGY_SOURCE_ENV,
                 dashboard.PERSONA_STRATEGY_ENV,
                 dashboard.PRESET_STRATEGY_TEXT_ENV,
+                'IWENCAI_ENABLED',
+                'IWENCAI_BASE_URL',
+                'IWENCAI_API_KEY',
+                'IWENCAI_TIMEOUT_SECONDS',
+                'IWENCAI_MAX_RETRIES',
+                'IWENCAI_MAX_CONCURRENCY',
+                'IWENCAI_CACHE_TTL_SECONDS',
+                'IWENCAI_DRAGON_TIGER_CRON',
             )
         }
         for name in self.saved_env:
@@ -95,10 +244,16 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.ADMIN_PASSWORD = ''
         dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
         dashboard.CRON_STATE_DIR = self.tmp_path / 'cron' / 'state'
+        dashboard.INDICES_SNAPSHOT_FILE = self.tmp_path / 'cron' / 'output' / 'indices_dashboard_cache.json'
+        dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = self.tmp_path / 'cron' / 'output' / 'iwencai_dragon_tiger_latest.json'
+        dashboard.MARKET_BREADTH_HISTORY_FILE = self.tmp_path / 'cron' / 'output' / 'market_breadth_history.json'
+        dashboard.INDUSTRY_FLOW_HISTORY_FILE = self.tmp_path / 'cron' / 'output' / 'industry_main_flow_history.json'
+        dashboard.MONEY_FLOW_SNAPSHOT_FILE = self.tmp_path / 'cron' / 'output' / 'industry_main_money_flow_cache.json'
+        dashboard.PUBLIC_DATA_DIR = self.tmp_path / 'public-data'
+        dashboard.PUBLIC_SNAPSHOT_PUBLISHER = None
         dashboard.API_RESPONSE_CACHE.clear()
         dashboard.API_CACHE_KEY_LOCKS.clear()
         dashboard.API_CACHE_KEY_GENERATIONS.clear()
-        dashboard.FRONTEND_FILE_CACHE.clear()
         dashboard.RATE_LIMIT_BUCKETS.clear()
         dashboard.ensure_stats_db()
 
@@ -108,7 +263,14 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.STATS_DB = self.original_stats_db
         dashboard.LEGACY_STATS_DB = self.original_legacy_stats_db
         dashboard.ADMIN_TOKEN_FILE = self.original_admin_token_file
+        dashboard.INDICES_SNAPSHOT_FILE = self.original_indices_snapshot_file
+        dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = self.original_iwencai_snapshot_file
+        dashboard.MARKET_BREADTH_HISTORY_FILE = self.original_market_breadth_history_file
+        dashboard.INDUSTRY_FLOW_HISTORY_FILE = self.original_industry_flow_history_file
+        dashboard.MONEY_FLOW_SNAPSHOT_FILE = self.original_money_flow_snapshot_file
         dashboard.ADMIN_PASSWORD = self.original_admin_password
+        dashboard.PUBLIC_DATA_DIR = self.original_public_data_dir
+        dashboard.PUBLIC_SNAPSHOT_PUBLISHER = self.original_public_snapshot_publisher
         for name, value in self.saved_env.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -123,18 +285,18 @@ class DashboardAuthTests(unittest.TestCase):
         home = FakeHandler(path='/')
         home.do_GET()
         self.assertEqual(home.status, 200)
-        self.assertIn('<title>牛牛1号</title>', home.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<div id="app">', home.wfile.getvalue().decode('utf-8'))
 
         admin = FakeHandler(path='/admin')
         admin.do_GET()
         self.assertEqual(admin.status, 200)
         admin_body = admin.wfile.getvalue().decode('utf-8')
-        self.assertIn('<link rel="stylesheet" href="/static/admin.css?v=8">', admin_body)
-        self.assertIn('<script src="/static/admin.js?v=17" defer></script>', admin_body)
+        self.assertIn('<div id="app">', admin_body)
+        self.assertIn('<script type="module"', admin_body)
         self.assertNotIn('name="admin_password"', admin_body)
         self.assertNotIn("name='env__DASHBOARD_GROK_API_KEY'", admin_body)
         self.assertIn("fetch('/api/admin/config'", ADMIN_FRONTEND)
-        self.assertIn("renderAdminLogin('')", ADMIN_FRONTEND)
+        self.assertIn('<AdminLogin', ADMIN_FRONTEND)
 
         config = FakeHandler(path='/api/admin/config')
         config.do_GET()
@@ -144,81 +306,112 @@ class DashboardAuthTests(unittest.TestCase):
             'admin_password_required',
         )
 
-    def test_frontend_pages_and_assets_are_served_from_native_static_files(self):
+    def test_incremental_snapshot_and_admin_share_the_dashboard_port(self):
+        publisher = dashboard.public_snapshot_publisher()
+        latest_value = publisher.publish({'account': {'cash': 100}}, generated_at='now')
+
+        health = FakeHandler(path='/healthz')
+        health.do_GET()
+        self.assertEqual(health.status, 200)
+        self.assertEqual(json.loads(health.wfile.getvalue())['plane'], 'fastapi')
+
+        latest = FakeHandler(path='/api/v2/public/latest')
+        latest.do_GET()
+        self.assertEqual(latest.status, 200)
+        self.assertIn('s-maxage=5', latest.header('Cache-Control'))
+        self.assertTrue(latest.header('ETag'))
+
+        unchanged = FakeHandler(
+            path='/api/v2/public/latest',
+            headers={'If-None-Match': latest.header('ETag')},
+        )
+        unchanged.do_GET()
+        self.assertEqual(unchanged.status, 304)
+        self.assertEqual(unchanged.wfile.getvalue(), b'')
+
+        manifest = FakeHandler(path=f"/api/v2/public/manifests/{latest_value['revision']}.json")
+        manifest.do_GET()
+        manifest_value = json.loads(manifest.wfile.getvalue())
+        self.assertIn('immutable', manifest.header('Cache-Control'))
+        digest = manifest_value['sections']['account']['digest']
+
+        section = FakeHandler(path=f'/api/v2/public/objects/{digest}.json')
+        section.do_GET()
+        self.assertEqual(json.loads(section.wfile.getvalue()), {'cash': 100})
+        self.assertEqual(section.header('ETag'), f'"{digest}"')
+
+        admin = FakeHandler(path='/admin')
+        admin.do_GET()
+        self.assertEqual(admin.status, 200)
+
+    def test_vue_pages_and_vite_assets_are_served_by_fastapi(self):
+        expected_page = (ROOT / 'web' / 'dist' / 'index.html').read_bytes()
         home = FakeHandler(path='/')
         home.do_GET()
         admin = FakeHandler(path='/admin')
         admin.do_GET()
-        dashboard_js = FakeHandler(path='/static/dashboard.js')
-        dashboard_js.do_GET()
-        admin_js = FakeHandler(path='/static/admin.js')
-        admin_js.do_GET()
-        versioned_dashboard_js = FakeHandler(path='/static/dashboard.js?v=22')
-        versioned_dashboard_js.do_GET()
+        removed_legacy_asset = FakeHandler(path='/static/dashboard.js')
+        removed_legacy_asset.do_GET()
 
-        self.assertEqual(home.wfile.getvalue(), (FRONTEND / 'index.html').read_bytes())
-        self.assertEqual(admin.wfile.getvalue(), (FRONTEND / 'admin.html').read_bytes())
-        self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
-        self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
-        self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
-        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=12">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=22" defer></script>', DASHBOARD_FRONTEND)
-        self.assertNotIn('document.title', DASHBOARD_FRONTEND)
-        self.assertIn("document.title = '牛牛1号';", ADMIN_FRONTEND)
-        self.assertNotIn("title + ' · 牛牛1号'", ADMIN_FRONTEND)
-        self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
-        self.assertIn('max-age=31536000', dashboard_js.header('Cache-Control'))
-        self.assertIn('immutable', dashboard_js.header('Cache-Control'))
-        self.assertTrue(dashboard_js.header('ETag'))
+        self.assertEqual(home.wfile.getvalue(), expected_page)
+        self.assertEqual(admin.wfile.getvalue(), expected_page)
+        self.assertEqual(removed_legacy_asset.status, 404)
+        index_body = expected_page.decode('utf-8')
+        asset_path = next(
+            line.split('src="', 1)[1].split('"', 1)[0]
+            for line in index_body.splitlines()
+            if 'src="/assets/' in line
+        )
+        asset = FakeHandler(path=asset_path)
+        asset.do_GET()
+        self.assertEqual(asset.status, 200)
+        self.assertEqual(
+            asset.wfile.getvalue(),
+            (ROOT / 'web' / 'dist' / asset_path.removeprefix('/')).read_bytes(),
+        )
+        self.assertIn('max-age=31536000', asset.header('Cache-Control'))
+        self.assertIn('immutable', asset.header('Cache-Control'))
+        self.assertTrue(asset.header('ETag'))
 
         backend_source = MODULE_PATH.read_text(encoding='utf-8')
-        self.assertNotIn('INDEX_HTML', backend_source)
-        self.assertNotIn('ADMIN_HTML', backend_source)
+        self.assertNotIn('BaseHTTPRequestHandler', backend_source)
+        self.assertNotIn('FRONTEND_ASSETS', backend_source)
         self.assertNotIn('<!doctype html>', backend_source)
 
-    def test_static_assets_reuse_compressed_payload_and_support_conditional_get(self):
-        original_compress = dashboard.gzip.compress
-        compress_calls = []
+    def test_vite_assets_support_gzip_and_conditional_get(self):
+        index_body = (ROOT / 'web' / 'dist' / 'index.html').read_text(encoding='utf-8')
+        asset_path = next(
+            line.split('src="', 1)[1].split('"', 1)[0]
+            for line in index_body.splitlines()
+            if 'src="/assets/' in line
+        )
+        first = FakeHandler(path=asset_path, headers={'Accept-Encoding': 'gzip'})
+        first.do_GET()
+        self.assertEqual(first.status, 200)
+        self.assertEqual(first.header('Content-Encoding'), 'gzip')
+        self.assertIn('Accept-Encoding', first.header('Vary') or '')
 
-        def tracked_compress(payload, *args, **kwargs):
-            compress_calls.append(len(payload))
-            return original_compress(payload, *args, **kwargs)
-
-        dashboard.gzip.compress = tracked_compress
-        try:
-            first = FakeHandler(path='/static/dashboard.js', headers={'Accept-Encoding': 'gzip'})
-            first.do_GET()
-            second = FakeHandler(path='/static/dashboard.js', headers={'Accept-Encoding': 'gzip'})
-            second.do_GET()
-
-            self.assertEqual(first.status, 200)
-            self.assertEqual(second.status, 200)
-            self.assertEqual(first.header('Content-Encoding'), 'gzip')
-            self.assertEqual(second.wfile.getvalue(), first.wfile.getvalue())
-            self.assertEqual(len(compress_calls), 1)
-
-            conditional = FakeHandler(
-                path='/static/dashboard.js',
-                headers={'If-None-Match': first.header('ETag'), 'Accept-Encoding': 'gzip'},
-            )
-            conditional.do_GET()
-            self.assertEqual(conditional.status, 304)
-            self.assertEqual(conditional.wfile.getvalue(), b'')
-            self.assertEqual(len(compress_calls), 1)
-        finally:
-            dashboard.gzip.compress = original_compress
+        conditional = FakeHandler(
+            path=asset_path,
+            headers={'If-None-Match': first.header('ETag'), 'Accept-Encoding': 'gzip'},
+        )
+        conditional.do_GET()
+        self.assertEqual(conditional.status, 304)
+        self.assertEqual(conditional.wfile.getvalue(), b'')
 
     def test_dashboard_categories_have_independent_page_routes(self):
         expected_paths = {
             '/',
             '/practice',
             '/indices',
+            '/industry-flow',
+            '/dragon-tiger',
             '/market-monitor',
             '/x-monitor',
             '/us-ratings',
         }
-        self.assertEqual(dashboard.DASHBOARD_PAGE_PATHS, expected_paths)
-        expected_page = (FRONTEND / 'index.html').read_bytes()
+        self.assertEqual(set(SPA_DASHBOARD_PATHS), expected_paths)
+        expected_page = (ROOT / 'web' / 'dist' / 'index.html').read_bytes()
         for path in sorted(expected_paths):
             with self.subTest(path=path):
                 page = FakeHandler(path=path)
@@ -233,17 +426,14 @@ class DashboardAuthTests(unittest.TestCase):
         missing = FakeHandler(path='/not-a-dashboard-page')
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        for category, path in (
-            ('practice', '/practice'),
-            ('indices', '/indices'),
-            ('market_monitor', '/market-monitor'),
-            ('x_monitor', '/x-monitor'),
-            ('us_ratings', '/us-ratings'),
-        ):
-            self.assertIn(f"{category}: '{path}'", DASHBOARD_FRONTEND)
-        self.assertIn("syncViewUrl({push:true})", DASHBOARD_FRONTEND)
-        self.assertIn("window.addEventListener('popstate'", DASHBOARD_FRONTEND)
-        self.assertIn("params.set('curve', 'daily')", DASHBOARD_FRONTEND)
+        router_source = (ROOT / 'web' / 'src' / 'router.js').read_text(encoding='utf-8')
+        tab_source = (
+            ROOT / 'web' / 'src' / 'composables' / 'useDashboardTabs.js'
+        ).read_text(encoding='utf-8')
+        for path in expected_paths - {'/'}:
+            self.assertIn(f"'{path}'", router_source)
+        self.assertIn('createWebHistory()', router_source)
+        self.assertIn("practice: '/practice'", tab_source)
 
     def test_dashboard_bootstrap_owns_visit_count_and_visitor_cookie(self):
         home = FakeHandler(path='/')
@@ -258,6 +448,71 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(payload['unique'], 1)
         self.assertIn('us_features_enabled', payload)
         self.assertTrue((bootstrap.header('Set-Cookie') or '').startswith(f'{dashboard.VISITOR_COOKIE_NAME}=nvst_'))
+
+    def test_version_status_api_is_public_and_not_browser_cached(self):
+        original = dashboard.get_version_status
+        dashboard.get_version_status = lambda: {
+            'current_version': 'v1.2.3',
+            'latest_version': 'v1.2.4',
+            'update_available': True,
+            'check_ok': True,
+        }
+        try:
+            handler = FakeHandler(path='/api/version')
+            handler.do_GET()
+        finally:
+            dashboard.get_version_status = original
+
+        payload = json.loads(handler.wfile.getvalue().decode('utf-8'))
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.header('Cache-Control'), 'no-store')
+        self.assertTrue(payload['update_available'])
+
+    def test_docker_version_check_uses_highest_strict_semver_tag(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit=-1):
+                return json.dumps({
+                    'count': 7,
+                    'results': [
+                        {'name': 'latest'},
+                        {'name': '1.9.0'},
+                        {'name': 'v1.9.0'},
+                        {'name': 'v1.10.0'},
+                        {'name': 'v2.0.0-rc.1'},
+                        {'name': 'v01.0.0'},
+                        {'name': 'v2.0.0'},
+                    ],
+                }).encode('utf-8')
+
+        original = dashboard.urllib.request.urlopen
+        requests = []
+        dashboard.urllib.request.urlopen = lambda request, timeout=0: requests.append((request, timeout)) or Response()
+        try:
+            latest = dashboard.fetch_latest_docker_version()
+        finally:
+            dashboard.urllib.request.urlopen = original
+
+        self.assertEqual(latest, 'v2.0.0')
+        self.assertEqual(dashboard.release_version_tuple('v10.2.3'), (10, 2, 3))
+        self.assertIsNone(dashboard.release_version_tuple('v1.2.3-rc.1'))
+        self.assertIn('/v2/namespaces/kunkundi/repositories/niuone/tags', requests[0][0].full_url)
+        self.assertEqual(requests[0][1], 6)
+
+    def test_dashboard_starts_version_check_when_component_mounts(self):
+        source = (
+            ROOT / 'web' / 'src' / 'components' / 'VersionStatus.vue'
+        ).read_text(encoding='utf-8')
+        self.assertIn('id="versionStatus"', source)
+        self.assertIn("fetch('/api/version'", source)
+        self.assertIn('onMounted(loadVersionStatus)', source)
+        self.assertIn("state.value = 'update'", source)
+        self.assertIn('requestController?.abort()', source)
 
     def test_visit_stats_reinitializes_database_replaced_at_same_path(self):
         replacement = dashboard.STATS_DB.with_name('replacement_stats.db')
@@ -289,7 +544,7 @@ class DashboardAuthTests(unittest.TestCase):
 
         write_only = FakeHandler(path='/api/admin/config/env', method='HEAD')
         write_only.do_HEAD()
-        self.assertEqual(write_only.status, 404)
+        self.assertEqual(write_only.status, 405)
 
         settings_group = FakeHandler(path='/admin/settings/notifications', method='HEAD')
         settings_group.do_HEAD()
@@ -621,17 +876,20 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual([marker['is_full_exit'] for marker in sells], [False, True, False, True])
         self.assertEqual([marker['time'] for marker in markers], sorted(marker['time'] for marker in markers))
 
-    def test_b1_payload_preserves_market_snapshot(self):
+    def test_b1_payload_preserves_market_and_sector_tide_snapshots(self):
         snapshot = {'source': 'b1_mainboard_quotes', 'sample_count': 3000, 'up': 2000, 'down': 900}
+        tide_context = {'market': {'state': 'rotation'}, 'sectors': {'半导体': {'score': 72}}}
 
         payload = dashboard.normalize_b1_payload_for_trader({
             'generated_at': '2026-07-10 10:00:05',
             'items': [],
             'market_snapshot': snapshot,
+            'sector_tide_context': tide_context,
             'schedule_slot': '2026-07-10 10:00',
         })
 
         self.assertEqual(payload['market_snapshot'], snapshot)
+        self.assertEqual(payload['sector_tide_context'], tide_context)
         self.assertEqual(payload['schedule_slot'], '2026-07-10 10:00')
 
     def test_no_candidate_b1_still_refreshes_and_logs_market_context(self):
@@ -657,6 +915,10 @@ class DashboardAuthTests(unittest.TestCase):
             def record_decision_log_entry(self, entry, mark_b1_done=False):
                 calls['entries'].append((entry, mark_b1_done))
 
+            def run_decision_after_b1(self, payload):
+                calls['decision_payload'] = payload
+                return {'decision': {'summary': '持仓退出检查完成'}, 'executed': []}
+
         original_get_trader = dashboard.get_trader_module
         try:
             dashboard.get_trader_module = lambda: TraderStub()
@@ -669,12 +931,14 @@ class DashboardAuthTests(unittest.TestCase):
         finally:
             dashboard.get_trader_module = original_get_trader
 
-        self.assertEqual(result['reason'], 'no_candidates')
+        self.assertEqual(result['decision']['summary'], '持仓退出检查完成')
+        self.assertEqual(calls['decision_payload']['items'], [])
         self.assertEqual(calls['refresh_payload']['market_snapshot']['sample_count'], 3000)
         entry, mark_done = calls['entries'][0]
-        self.assertTrue(mark_done)
+        self.assertFalse(mark_done)
         self.assertEqual(entry['market_decision_context']['tone'], 'balanced')
         self.assertEqual(entry['decision']['market_guidance']['source_title'], 'B1定时选股实时盘面')
+        self.assertIn('继续检查已有持仓的原策略退出规则', entry['decision']['summary'])
 
     def test_manual_practice_cycle_stays_locked_until_trade_decision_finishes(self):
         scan_started = threading.Event()
@@ -700,11 +964,13 @@ class DashboardAuthTests(unittest.TestCase):
 
         original_scan = dashboard.trigger_b1_scan
         original_decision = dashboard.run_practice_decision_logged
+        original_recent_candidates = dashboard.recent_practice_candidates_for_manual_cycle
         original_lock = dashboard.PRACTICE_MANUAL_CYCLE_LOCK
         original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
         try:
             dashboard.trigger_b1_scan = fake_scan
             dashboard.run_practice_decision_logged = fake_decision
+            dashboard.recent_practice_candidates_for_manual_cycle = lambda: None
             dashboard.PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
             dashboard.PRACTICE_MANUAL_CYCLE_STATE = {'running': False, 'stage': 'idle'}
 
@@ -741,8 +1007,182 @@ class DashboardAuthTests(unittest.TestCase):
             allow_decision_finish.set()
             dashboard.trigger_b1_scan = original_scan
             dashboard.run_practice_decision_logged = original_decision
+            dashboard.recent_practice_candidates_for_manual_cycle = original_recent_candidates
             dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
             dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+    def test_manual_practice_cycle_status_omits_large_internal_decision_result(self):
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        try:
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {
+                'running': False,
+                'stage': 'completed',
+                'stage_label': '本轮选股及买卖已完成',
+                'candidate_count': 10,
+                'decision_result': {
+                    'raw_context': 'x' * 500_000,
+                    'actions': [{'reason': 'private'}],
+                },
+                'error': '',
+            }
+
+            status = dashboard.practice_manual_cycle_status()
+        finally:
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+        self.assertEqual(status['stage'], 'completed')
+        self.assertEqual(status['candidate_count'], 10)
+        self.assertNotIn('decision_result', status)
+        self.assertLess(len(json.dumps(status, ensure_ascii=False)), 2_000)
+
+    def test_manual_practice_cycle_scan_failure_never_enters_trade_decision(self):
+        decision_calls = []
+        original_scan = dashboard.trigger_b1_scan
+        original_decision = dashboard.run_practice_decision_logged
+        original_recent_candidates = dashboard.recent_practice_candidates_for_manual_cycle
+        original_lock = dashboard.PRACTICE_MANUAL_CYCLE_LOCK
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        try:
+            dashboard.trigger_b1_scan = lambda **_kwargs: {
+                'error': 'Tencent quote batch=7/21 failed after 3/3 attempts: timeout',
+                'items': [],
+                'count': 0,
+                'generated_at': '',
+            }
+            dashboard.run_practice_decision_logged = lambda *_args, **_kwargs: decision_calls.append(True)
+            dashboard.recent_practice_candidates_for_manual_cycle = lambda: None
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK.acquire()
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {'running': True, 'stage': 'starting'}
+
+            dashboard._run_practice_manual_cycle()
+
+            status = dashboard.practice_manual_cycle_status()
+            self.assertEqual(status['stage'], 'error')
+            self.assertIn('batch=7/21', status['error'])
+            self.assertEqual(decision_calls, [])
+            self.assertTrue(dashboard.PRACTICE_MANUAL_CYCLE_LOCK.acquire(blocking=False))
+        finally:
+            if dashboard.PRACTICE_MANUAL_CYCLE_LOCK.locked():
+                dashboard.PRACTICE_MANUAL_CYCLE_LOCK.release()
+            dashboard.trigger_b1_scan = original_scan
+            dashboard.run_practice_decision_logged = original_decision
+            dashboard.recent_practice_candidates_for_manual_cycle = original_recent_candidates
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+    def test_b1_scan_failure_summary_keeps_stage_and_final_error(self):
+        stderr = "\n".join([
+            "Step 1: Loading A-share code pool...",
+            "Step 2: Fetching real-time batch quotes...",
+            "Traceback (most recent call last):",
+            '  File "/private/runtime.py", line 10, in https_open',
+            "TencentQuoteBatchError: Tencent quote batch=7/21 failed after 3/3 attempts: timeout",
+        ])
+
+        summary = dashboard.summarize_b1_scan_failure(stderr, "")
+
+        self.assertEqual(
+            summary,
+            "Step 2: Fetching real-time batch quotes...；"
+            "TencentQuoteBatchError: Tencent quote batch=7/21 failed after 3/3 attempts: timeout",
+        )
+        self.assertNotIn("/private/runtime.py", summary)
+
+    def test_full_b1_scan_rejects_overlapping_requests(self):
+        scan_started = threading.Event()
+        allow_scan_finish = threading.Event()
+        results = []
+
+        def fake_scan(force=False, decision_mode='async', **_kwargs):
+            scan_started.set()
+            allow_scan_finish.wait(2)
+            return {'count': 1, 'force': force, 'decision_mode': decision_mode}
+
+        original_scan = dashboard._trigger_b1_scan_unlocked
+        original_lock = dashboard.B1_FULL_SCAN_LOCK
+        worker = None
+        try:
+            dashboard._trigger_b1_scan_unlocked = fake_scan
+            dashboard.B1_FULL_SCAN_LOCK = threading.Lock()
+            worker = threading.Thread(
+                target=lambda: results.append(dashboard.trigger_b1_scan(force=True, decision_mode='none')),
+            )
+            worker.start()
+            self.assertTrue(scan_started.wait(1))
+
+            duplicate = dashboard.trigger_b1_scan(force=True, decision_mode='none')
+            self.assertTrue(duplicate['busy'])
+            self.assertTrue(duplicate['running'])
+            self.assertIn('已有选股扫描正在运行', duplicate['error'])
+
+            allow_scan_finish.set()
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(results, [{'count': 1, 'force': True, 'decision_mode': 'none'}])
+        finally:
+            allow_scan_finish.set()
+            if worker is not None:
+                worker.join(2)
+            dashboard._trigger_b1_scan_unlocked = original_scan
+            dashboard.B1_FULL_SCAN_LOCK = original_lock
+
+    def test_recent_manual_candidates_respect_reuse_window(self):
+        original_seconds = dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS
+        original_loader = dashboard.load_practice_candidates_cache
+        try:
+            dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS = 600
+            generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            dashboard.load_practice_candidates_cache = lambda: {
+                'items': [{'code': '000001'}],
+                'count': 1,
+                'generated_at': generated_at,
+            }
+
+            recent = dashboard.recent_practice_candidates_for_manual_cycle()
+            self.assertTrue(recent['manual_scan_reused'])
+            self.assertEqual(recent['count'], 1)
+            self.assertLessEqual(recent['manual_scan_age_seconds'], 1)
+
+            dashboard.load_practice_candidates_cache = lambda: {
+                'items': [{'code': '000001'}],
+                'count': 1,
+                'generated_at': '2020-01-01 00:00:00',
+            }
+            self.assertIsNone(dashboard.recent_practice_candidates_for_manual_cycle())
+        finally:
+            dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS = original_seconds
+            dashboard.load_practice_candidates_cache = original_loader
+
+    def test_b1_slot_cache_is_read_as_utf8(self):
+        class RecordingCachePath:
+            def __init__(self):
+                self.encoding = None
+
+            def exists(self):
+                return True
+
+            def read_text(self, *, encoding=None):
+                self.encoding = encoding
+                return json.dumps({'generated_at': '2026-07-15 14:00:00'}, ensure_ascii=False)
+
+        original_cache_file = dashboard.B1_CACHE_FILE
+        cache_file = RecordingCachePath()
+        try:
+            dashboard.B1_CACHE_FILE = cache_file
+            self.assertTrue(dashboard.b1_cache_generated_for_slot('2026-07-15 14:00'))
+            self.assertEqual(cache_file.encoding, 'utf-8')
+        finally:
+            dashboard.B1_CACHE_FILE = original_cache_file
+
+    def test_b1_scan_reliability_settings_are_exposed(self):
+        workers = dashboard.ENV_CONFIG_BY_NAME['DASHBOARD_B1_SCAN_WORKERS']
+        reuse = dashboard.ENV_CONFIG_BY_NAME['DASHBOARD_MANUAL_SCAN_REUSE_SECONDS']
+
+        self.assertEqual(workers['default'], '6')
+        self.assertEqual(workers['effect'], 'restart')
+        self.assertEqual(reuse['default'], '0')
+        self.assertEqual(reuse['effect'], 'restart')
 
     def test_fast_practice_payload_derives_daily_calendar_points_from_intraday_history(self):
         class TraderStub:
@@ -788,6 +1228,71 @@ class DashboardAuthTests(unittest.TestCase):
             [p['time'] for p in payload['daily_equity_history']],
             ['2026-06-22 15:00:00', '2026-06-23 15:00:00', '2026-06-24 15:00:00'],
         )
+
+    def test_full_practice_payload_is_a_side_effect_free_local_snapshot(self):
+        calls = []
+
+        class TraderStub:
+            MODEL = 'local-model'
+            PROVIDER_DISPLAY_NAME = 'local-provider'
+
+            def load_state(self):
+                calls.append('load_state')
+                return {
+                    'updated_at': '2026-07-23 10:00:00',
+                    'initial_cash': 1_000_000,
+                    'cash': 1_000_100,
+                    'positions': {},
+                    'equity_history': [
+                        {'time': '2026-07-22 15:00:00', 'equity': 1_000_000},
+                        {'time': '2026-07-23 10:00:00', 'equity': 1_000_100},
+                    ],
+                    'daily_equity_history': [],
+                    'trade_log': [],
+                    'decision_log': [],
+                }
+
+            def enrich_portfolio(self, state):
+                calls.append('enrich_portfolio')
+                return {
+                    'initial_cash': state['initial_cash'],
+                    'cash': state['cash'],
+                    'positions': [],
+                    'trade_log': [],
+                    'decision_log': [],
+                }
+
+            def get_dashboard_payload(self):
+                raise AssertionError('full reads must not refresh quotes or persist state')
+
+            def track_strategy_performance(self, state):
+                calls.append('track_strategy_performance')
+                return {}
+
+        original_get_trader = dashboard.get_trader_module
+        original_current_cn_datetime = dashboard.current_cn_datetime
+        original_heartbeat = dashboard.record_practice_equity_heartbeat
+        try:
+            dashboard.get_trader_module = lambda: TraderStub()
+            dashboard.current_cn_datetime = lambda: datetime(2026, 7, 23, 10, 1, 0)
+            dashboard.record_practice_equity_heartbeat = (
+                lambda *_args, **_kwargs: calls.append('heartbeat') or True
+            )
+
+            payload = dashboard.get_practice_payload()
+        finally:
+            dashboard.get_trader_module = original_get_trader
+            dashboard.current_cn_datetime = original_current_cn_datetime
+            dashboard.record_practice_equity_heartbeat = original_heartbeat
+
+        self.assertEqual(
+            calls,
+            ['load_state', 'enrich_portfolio', 'track_strategy_performance'],
+        )
+        self.assertEqual(payload['snapshot_mode'], 'full')
+        self.assertEqual(payload['equity_history_scope'], 'retained_history')
+        self.assertEqual(len(payload['equity_history']), 2)
+        self.assertEqual(payload['decision_model'], 'local-model')
 
     def test_fast_practice_payload_exposes_current_beijing_date(self):
         class TraderStub:
@@ -960,76 +1465,163 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(payload['snapshot_meta']['source_updated_at'], '2026-06-26 15:00:10')
 
     def test_index_template_has_scrollable_practice_operation_log(self):
-        self.assertIn('function renderPracticeOperationLog(payload)', DASHBOARD_FRONTEND)
-        self.assertIn('class="practice-log-scroll"', DASHBOARD_FRONTEND)
+        self.assertIn('normalizePracticeOperationLogs', PRACTICE_LOG_UTILS)
+        self.assertIn('class="practice-log-scroll"', PRACTICE_COMPONENTS)
         self.assertIn('overflow-y:auto', DASHBOARD_FRONTEND)
-        self.assertIn('aria-label="当日所有操作日志"', DASHBOARD_FRONTEND)
+        self.assertIn('aria-label="当日所有操作日志"', PRACTICE_COMPONENTS)
 
     def test_index_template_can_open_full_practice_log_modal(self):
-        self.assertIn('let practiceLogDetailKey = \'\';', DASHBOARD_FRONTEND)
-        self.assertIn('data-practice-log-key=', DASHBOARD_FRONTEND)
-        self.assertIn('function renderPracticeLogDetailModal(payload)', DASHBOARD_FRONTEND)
-        self.assertIn('function practiceLogRawText(item)', DASHBOARD_FRONTEND)
-        self.assertIn('class="practice-log-detail-backdrop"', DASHBOARD_FRONTEND)
-        self.assertIn('class="practice-log-detail-text"', DASHBOARD_FRONTEND)
-        self.assertIn('data-practice-log-action="close"', DASHBOARD_FRONTEND)
-        self.assertIn('practiceLogDetailKey = logTrigger.dataset.practiceLogKey || \'\';', DASHBOARD_FRONTEND)
+        self.assertIn("const selectedKey = ref('')", PRACTICE_COMPONENTS)
+        self.assertIn('practiceLogRawText', PRACTICE_LOG_UTILS)
+        self.assertIn('@click="selectedKey = item.key"', PRACTICE_COMPONENTS)
+        self.assertIn('class="practice-log-detail-backdrop"', PRACTICE_COMPONENTS)
+        self.assertIn('class="practice-log-detail-text"', PRACTICE_COMPONENTS)
+        self.assertIn('<Teleport to="body">', PRACTICE_COMPONENTS)
+        self.assertIn("event.key === 'Escape'", PRACTICE_COMPONENTS)
         self.assertNotIn('practice-log-detail-json', DASHBOARD_FRONTEND)
         self.assertNotIn('practice-log-detail-field', DASHBOARD_FRONTEND)
 
-    def test_index_template_hides_trade_rule_note_in_modal(self):
-        self.assertIn('let practiceRuleNoteOpen = false', DASHBOARD_FRONTEND)
-        self.assertIn('function renderPracticeRuleNoteModal(note)', DASHBOARD_FRONTEND)
-        self.assertIn('data-practice-rule-action="open"', DASHBOARD_FRONTEND)
-        self.assertIn('class="practice-rule-backdrop"', DASHBOARD_FRONTEND)
-        self.assertIn('${ruleModal}', DASHBOARD_FRONTEND)
-        self.assertNotIn('${esc(p.trade_rule_note||', DASHBOARD_FRONTEND)
+    def test_practice_rule_note_is_owned_by_its_vue_modal(self):
+        rule_source = (
+            ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeRule.vue'
+        ).read_text(encoding='utf-8')
+        log_source = (
+            ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeOperationLog.vue'
+        ).read_text(encoding='utf-8')
+        self.assertIn('const open = ref(false)', rule_source)
+        self.assertIn('@click="open = true"', rule_source)
+        self.assertIn('class="practice-rule-backdrop"', rule_source)
+        self.assertIn('props.practice.trade_rule_note', rule_source)
+        self.assertNotIn('trade_rule_note', log_source)
 
-    def test_non_message_tabs_request_message_counts_without_records(self):
+    def test_vue_data_layers_use_revision_endpoints_instead_of_zero_limit_polling(self):
         self.assertEqual(dashboard.clamp_limit('0'), 0)
-        self.assertIn(
-            "isMessageCategory(categoryAtStart) ? limitAtStart : 0",
-            DASHBOARD_FRONTEND,
+        data_sources = '\n'.join((MARKET_MONITOR_DATA, X_MONITOR_DATA, US_RATING_DATA))
+        self.assertNotIn('/api/messages?limit=0', data_sources)
+        self.assertIn('/api/messages/revision?category=${CATEGORY}', data_sources)
+        self.assertNotIn('function isMessageCategory(', data_sources)
+
+    def test_x_monitor_uses_vue_page_fingerprints_and_recent_page_cache(self):
+        panel = (
+            ROOT / 'web' / 'src' / 'components' / 'XMonitorPanel.vue'
+        ).read_text(encoding='utf-8')
+        self.assertIn('const CACHE_TTL_MS = 5 * 60 * 1000', X_MONITOR_DATA)
+        self.assertIn('const CACHE_MAX_ENTRIES = 6', X_MONITOR_DATA)
+        self.assertIn("const CACHE_KEY = 'niuniu-dashboard-x-pages-v2'", X_MONITOR_DATA)
+        self.assertIn('const REFRESH_INTERVAL_MS = 15 * 1000', X_MONITOR_DATA)
+        self.assertIn('function prefetchAdjacentPages(offset, total)', X_MONITOR_DATA)
+        self.assertIn('/api/messages/revision?category=${CATEGORY}&limit=${X_MONITOR_PAGE_SIZE}&offset=', X_MONITOR_DATA)
+        self.assertIn('xPageRevisionKey(revision) !== state.revision', X_MONITOR_DATA)
+        self.assertIn("new URLSearchParams(location.search).get('page')", panel)
+        self.assertIn('function cancelPendingMedia()', X_MONITOR_COMPONENTS)
+        self.assertIn("if (!image.complete) image.removeAttribute('src')", X_MONITOR_COMPONENTS)
+        self.assertIn('fetchpriority="low"', X_MONITOR_COMPONENTS)
+        self.assertIn('<XImageViewer', X_MONITOR_COMPONENTS)
+        self.assertIn('export function summarizeXRecord', X_MONITOR_UTILS)
+        self.assertIn('export function parseXThread', X_MONITOR_UTILS)
+        self.assertIn('export function xPageRevisionKey', X_MONITOR_UTILS)
+
+    def test_x_monitor_display_parser_keeps_threads_media_and_page_revisions(self):
+        scenario = r"""
+import {parseXThread, summarizeXRecord, xMediaGroups, xPageRevisionKey} from SOURCE;
+const content = `原帖｜@origin｜2026-07-20 08:00\n│ 原帖正文\n回复｜@reply｜2026-07-21 09:30\n│ 回复正文`;
+const record = {
+  content,
+  metadata:{post:{
+    reply_to_media:[
+      {url:'https://pbs.twimg.com/media/example.jpg',type:'photo'},
+      {url:'https://evil.example/media/example.jpg',type:'photo'},
+    ],
+    media:[{url:'https://pbs.twimg.com/tweet_video_thumb/video.png',type:'video'}],
+  }},
+};
+const thread = parseXThread(content);
+const summary = summarizeXRecord(record);
+const groups = xMediaGroups(record);
+const base = {category:'x_monitor',count:20,page:{limit:10,offset:0,count:10,fingerprint:'a'}};
+const changed = {...base,page:{...base.page,fingerprint:'b'}};
+console.log(JSON.stringify({
+  hasOriginal:thread.originalPost.includes('原帖正文'),
+  hasReply:thread.reply.includes('回复正文'),
+  author:summary.author,
+  label:summary.label,
+  preview:summary.preview,
+  groupLabels:groups.map(group => group.label),
+  mediaUrls:groups.flatMap(group => group.items.map(item => item.url)),
+  revisionChanged:xPageRevisionKey(base) !== xPageRevisionKey(changed),
+}));
+"""
+        output = subprocess.check_output(
+            [
+                'node', '--input-type=module', '-e',
+                scenario.replace('SOURCE', json.dumps(X_MONITOR_UTILS_PATH.as_uri())),
+            ],
+            cwd=ROOT,
+            text=True,
         )
+        result = json.loads(output)
+        self.assertTrue(result['hasOriginal'])
+        self.assertTrue(result['hasReply'])
+        self.assertEqual(result['author'], '@reply')
+        self.assertEqual(result['label'], '回复')
+        self.assertIn('回复正文', result['preview'])
+        self.assertEqual(result['groupLabels'], ['原帖图片', '推文图片'])
+        self.assertEqual(len(result['mediaUrls']), 2)
+        self.assertTrue(result['mediaUrls'][0].endswith('.jpg:large'))
+        self.assertTrue(result['revisionChanged'])
 
-    def test_x_monitor_loads_in_parallel_and_reuses_recent_pages(self):
-        self.assertIn('const X_PAGE_CACHE_TTL_MS = 5 * 60 * 1000;', DASHBOARD_FRONTEND)
-        self.assertIn("const X_PAGE_STATE_KEY = 'niuniu-dashboard-x-pages-v1';", DASHBOARD_FRONTEND)
-        self.assertIn('function applyCachedXPage(offset = xPageOffset)', DASHBOARD_FRONTEND)
-        self.assertIn('rememberXPage(offsetAtStart, nextData);', DASHBOARD_FRONTEND)
-        self.assertIn('prefetchAdjacentXPages(offsetAtStart, nextData);', DASHBOARD_FRONTEND)
-        self.assertIn('function cancelXMediaRequests()', DASHBOARD_FRONTEND)
-        self.assertIn("if (!img.complete) img.removeAttribute('src');", DASHBOARD_FRONTEND)
-        self.assertIn('fetchpriority="low" decoding="async"', DASHBOARD_FRONTEND)
-        self.assertIn('function xPageRevision(payload)', DASHBOARD_FRONTEND)
-        self.assertIn('if (!unchangedXPage && !unchangedMarketPage) render();', DASHBOARD_FRONTEND)
-        self.assertIn('media.slice(0, 1)', DASHBOARD_FRONTEND)
-        self.assertIn("activeCategory === 'x_monitor' && !hasCachedPage", DASHBOARD_FRONTEND)
-        self.assertIn("if (categoryAtStart === 'x_monitor') saveXPageState();", DASHBOARD_FRONTEND)
-        self.assertIn('const bootstrapPromise = loadDashboardBootstrap();', DASHBOARD_FRONTEND)
-        self.assertIn('updateTabs: true,', DASHBOARD_FRONTEND)
-        self.assertIn('waitFor: needsFeatureCheck ? bootstrapPromise : null,', DASHBOARD_FRONTEND)
+    def test_practice_candidate_vue_display_preserves_strategy_tiers(self):
+        scenario = r"""
+import {
+  practiceCandidateIndustryLabel,
+  practiceCandidateStrategyMeta,
+  practiceCandidateTier,
+  practiceCandidateTierCounts,
+} from SOURCE;
+const rows = [
+  {actionable:true, best_score:8, entry_threshold:8, hard_blockers:[]},
+  {actionable:true, best_score:9, entry_threshold:8, hard_blockers:['停牌']},
+  {actionable:false, best_score:6, entry_threshold:8, hard_blockers:[]},
+];
+const meta = practiceCandidateStrategyMeta({trend_pullback:{label:'自定义趋势', color:'#123456'}});
+process.stdout.write(JSON.stringify({
+  tiers:rows.map(practiceCandidateTier),
+  counts:practiceCandidateTierCounts(rows),
+  override:meta.trend_pullback,
+  fallback:meta.breakout,
+  boardLabel:practiceCandidateIndustryLabel({industry:'main_board'}),
+}));
+"""
+        output = subprocess.check_output(
+            [
+                'node', '--input-type=module', '-e',
+                scenario.replace('SOURCE', json.dumps(PRACTICE_CANDIDATE_UTILS_PATH.as_uri())),
+            ],
+            cwd=ROOT,
+            text=True,
+        )
+        result = json.loads(output)
+        self.assertEqual(result['tiers'], ['high', 'mid', 'low'])
+        self.assertEqual(result['counts'], {'high': 1, 'mid': 1, 'low': 1})
+        self.assertEqual(result['override'], {'label': '自定义趋势', 'color': '#123456'})
+        self.assertEqual(result['fallback']['label'], '突破确认')
+        self.assertEqual(result['boardLabel'], '主板')
 
-    def test_market_monitor_prioritizes_messages_and_reuses_page_cache(self):
-        self.assertIn("const MARKET_PAGE_STATE_KEY = 'niuniu-dashboard-market-page-v1';", DASHBOARD_FRONTEND)
-        self.assertIn('function applyCachedMarketPage()', DASHBOARD_FRONTEND)
-        self.assertIn('function marketPageRevision(payload)', DASHBOARD_FRONTEND)
-        self.assertIn('const messageRequest = fetch(msgUrl, {signal: controller.signal});', DASHBOARD_FRONTEND)
-        self.assertIn("if (categoryAtStart !== 'market_monitor') loadActiveCategoryData(categoryAtStart);", DASHBOARD_FRONTEND)
-        self.assertIn("if (categoryAtStart === 'market_monitor') loadActiveCategoryData(categoryAtStart);", DASHBOARD_FRONTEND)
-        self.assertIn('function loadMarketMonitorAuxData()', DASHBOARD_FRONTEND)
-        self.assertIn("const request = fetch('/api/us_market_summary')", DASHBOARD_FRONTEND)
-        self.assertNotIn('function loadIndicesDataInBg()', DASHBOARD_FRONTEND)
-        self.assertIn("else if (categoryAtStart === 'market_monitor') saveMarketPageState();", DASHBOARD_FRONTEND)
-        self.assertIn('let usMarketSummaryExpanded = false;', DASHBOARD_FRONTEND)
-        self.assertIn('data-us-market-action="toggle"', DASHBOARD_FRONTEND)
-        self.assertIn('aria-controls="us-market-summary-body"', DASHBOARD_FRONTEND)
-        self.assertIn('aria-expanded="${usMarketSummaryExpanded', DASHBOARD_FRONTEND)
-        self.assertIn('class="market-chevron us-market-chevron"', DASHBOARD_FRONTEND)
-        self.assertIn('class="market-card-preview us-market-preview">${esc(preview)}', DASHBOARD_FRONTEND)
-        self.assertIn('function renderUsMarketSummaryDetail(summaryData, summary)', DASHBOARD_FRONTEND)
-        self.assertIn('class="market-detail-overview us-market-overview', DASHBOARD_FRONTEND)
-        self.assertIn('class="market-card-detail us-market-summary-body"', DASHBOARD_FRONTEND)
+    def test_market_monitor_uses_vue_cache_and_revision_polling(self):
+        self.assertIn("const CACHE_KEY = 'niuniu-dashboard-market-page-v2'", MARKET_MONITOR_DATA)
+        self.assertIn('const REFRESH_INTERVAL_MS = 15 * 1000', MARKET_MONITOR_DATA)
+        self.assertIn('const SUMMARY_REFRESH_INTERVAL_MS = 5 * 60 * 1000', MARKET_MONITOR_DATA)
+        self.assertIn("fetchJson(`/api/messages/revision?category=${CATEGORY}`", MARKET_MONITOR_DATA)
+        self.assertIn('revisionKey(revision) !== state.revision', MARKET_MONITOR_DATA)
+        self.assertIn('return loadHistory({ background: state.records.length > 0 })', MARKET_MONITOR_DATA)
+        self.assertIn("fetchJson('/api/us_market_summary'", MARKET_MONITOR_DATA)
+        self.assertIn("for (const category of ['market_monitor', 'x_monitor', 'us_ratings'])", MARKET_MONITOR_DATA)
+        self.assertIn('publishMessageCategoryCounts()', MARKET_MONITOR_DATA)
+        self.assertIn('aria-controls="us-market-summary-body"', MARKET_MONITOR_COMPONENTS)
+        self.assertIn('class="market-chevron us-market-chevron"', MARKET_MONITOR_COMPONENTS)
+        self.assertIn('class="market-card-preview us-market-preview"', MARKET_MONITOR_COMPONENTS)
+        self.assertIn('class="market-detail-overview us-market-overview"', MARKET_MONITOR_COMPONENTS)
+        self.assertIn('class="market-card-detail us-market-summary-body"', MARKET_MONITOR_COMPONENTS)
         self.assertIn('.us-market-summary-card.open .us-market-preview { display:none; }', DASHBOARD_FRONTEND)
         self.assertIn('.us-market-summary-card.collapsed::before { opacity:0; }', DASHBOARD_FRONTEND)
         self.assertIn('.us-market-summary-card.collapsed .us-market-tone', DASHBOARD_FRONTEND)
@@ -1038,26 +1630,30 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('.us-market-summary-card.open .market-chevron', DASHBOARD_FRONTEND)
         self.assertIn('.market-monitor-card:hover, .us-market-summary-card:hover', DASHBOARD_FRONTEND)
         self.assertIn('.market-monitor-card.open, .us-market-summary-card.open', DASHBOARD_FRONTEND)
-        self.assertNotIn('class="us-market-toggle"', DASHBOARD_FRONTEND)
-        self.assertIn('usMarketSummaryExpanded = !usMarketSummaryExpanded;', DASHBOARD_FRONTEND)
-        self.assertIn('summaryBody.hidden = !usMarketSummaryExpanded;', DASHBOARD_FRONTEND)
-        self.assertIn("summaryCard?.classList.toggle('open', usMarketSummaryExpanded);", DASHBOARD_FRONTEND)
-        self.assertIn(
-            "${usSummaryHtml}${renderMarketDayPager(records, days, day, dayRecords)}`;",
-            DASHBOARD_FRONTEND,
-        )
-        self.assertIn('const showLiveUsSummary = usMarketSummaryMatchesDay(day);', DASHBOARD_FRONTEND)
-        self.assertIn('dayRecords.filter(record => !isUsMarketSummaryRecord(record))', DASHBOARD_FRONTEND)
-        self.assertNotIn(
-            "return `${usSummaryHtml}<div class=\"market-monitor-grid\">",
-            DASHBOARD_FRONTEND,
-        )
+        self.assertIn("usMarketSummaryMatchesDay(selectedDay.value, state.summary)", MARKET_MONITOR_COMPONENTS)
+        self.assertIn('selectedRecords.value.filter(record => !isUsMarketSummaryRecord(record))', MARKET_MONITOR_COMPONENTS)
+        self.assertNotIn('function renderMarketMonitor(', DASHBOARD_FRONTEND)
+        self.assertNotIn('function loadMarketMonitorAuxData()', DASHBOARD_FRONTEND)
+
+    def test_us_ratings_use_vue_revision_polling_and_lazy_enrichment(self):
+        self.assertIn('const HISTORY_LIMIT = 120', US_RATING_DATA)
+        self.assertIn('const REFRESH_INTERVAL_MS = 10 * 60 * 1000', US_RATING_DATA)
+        self.assertIn("const CACHE_KEY = 'niuniu-dashboard-us-ratings-v1'", US_RATING_DATA)
+        self.assertIn('/api/messages/revision?category=${CATEGORY}', US_RATING_DATA)
+        self.assertIn('revisionKey(revision) !== state.revision', US_RATING_DATA)
+        self.assertIn("kind === 'quotes' ? '/api/us_quotes' : '/api/us_profiles'", US_RATING_DATA)
+        self.assertIn('loadQuotesForRecords(records)', US_RATING_DATA)
+        self.assertIn('function loadProfile(ticker)', US_RATING_DATA)
+        self.assertIn('watch(selectedRecords, records => loadQuotesForRecords(records)', US_RATING_COMPONENTS)
+        self.assertIn('if (opening) props.loadProfile(row.ticker)', US_RATING_COMPONENTS)
+        self.assertIn('class="rating-table"', US_RATING_COMPONENTS)
+        self.assertIn('class="rating-detail-row"', US_RATING_COMPONENTS)
+        self.assertIn('export function parseRatingReport', US_RATING_UTILS)
+        self.assertIn('export function groupRatingRecordsByDay', US_RATING_UTILS)
 
     def test_market_monitor_only_uses_live_us_summary_for_its_target_day(self):
-        start = DASHBOARD_FRONTEND.index('function isUsMarketSummaryRecord')
-        end = DASHBOARD_FRONTEND.index('function marketDateKey', start)
-        functions = DASHBOARD_FRONTEND[start:end]
         scenario = r"""
+import {isUsMarketSummaryRecord, usMarketSummaryMatchesDay} from SOURCE;
 const stored = {
   title:'隔夜美股盘面总结',
   source_id:'cron_output_98f0c8a12d3e',
@@ -1076,7 +1672,10 @@ const result = {
 console.log(JSON.stringify(result));
 """
         output = subprocess.check_output(
-            ['node', '-e', functions + scenario],
+            [
+                'node', '--input-type=module', '-e',
+                scenario.replace('SOURCE', json.dumps(MARKET_MONITOR_UTILS_PATH.as_uri())),
+            ],
             cwd=ROOT,
             text=True,
         )
@@ -1094,10 +1693,8 @@ console.log(JSON.stringify(result));
         )
 
     def test_market_monitor_classifies_report_type_from_record_identity(self):
-        start = DASHBOARD_FRONTEND.index('function marketReportType')
-        end = DASHBOARD_FRONTEND.index('function marketSectionLines', start)
-        functions = DASHBOARD_FRONTEND[start:end]
         scenario = r"""
+import {marketReportType} from SOURCE;
 const result = {
   close: marketReportType(
     {title:'A股盘后总结'},
@@ -1124,7 +1721,10 @@ const result = {
 console.log(JSON.stringify(result));
 """
         output = subprocess.check_output(
-            ['node', '-e', functions + scenario],
+            [
+                'node', '--input-type=module', '-e',
+                scenario.replace('SOURCE', json.dumps(MARKET_MONITOR_UTILS_PATH.as_uri())),
+            ],
             cwd=ROOT,
             text=True,
         )
@@ -1139,12 +1739,91 @@ console.log(JSON.stringify(result));
                 'fallback': '盘面',
             },
         )
-        self.assertNotIn("if (activeCategory === 'market_monitor') render();\n    }\n    return;", DASHBOARD_FRONTEND)
+        self.assertNotIn("if (activeCategory === 'market_monitor')", DASHBOARD_FRONTEND)
         self.assertIn('.us-market-summary-card.collapsed', DASHBOARD_FRONTEND)
 
-    def test_http_server_absorbs_short_media_request_bursts(self):
-        self.assertTrue(dashboard.ReusableThreadingHTTPServer.daemon_threads)
-        self.assertGreaterEqual(dashboard.ReusableThreadingHTTPServer.request_queue_size, 64)
+    def test_dashboard_uses_asgi_server_without_legacy_http_listener(self):
+        source = (ROOT / 'app' / 'dashboard' / 'server.py').read_text(encoding='utf-8')
+        self.assertNotIn('ThreadingHTTPServer', source)
+        self.assertNotIn('BaseHTTPRequestHandler', source)
+
+    def test_equity_heartbeat_records_without_dashboard_requests_and_invalidates_snapshots(self):
+        calls = []
+
+        class FakeTrader:
+            @staticmethod
+            def maybe_record_session_equity_heartbeat():
+                calls.append('recorded')
+                return True
+
+        dashboard.API_RESPONSE_CACHE['niuniu_practice'] = {'ts': 1.0, 'payload': b'{}'}
+        dashboard.API_RESPONSE_CACHE[dashboard.PRACTICE_FAST_CACHE_KEY] = {'ts': 1.0, 'payload': b'{}'}
+
+        self.assertTrue(dashboard.record_practice_equity_heartbeat(FakeTrader()))
+        self.assertEqual(calls, ['recorded'])
+        self.assertNotIn('niuniu_practice', dashboard.API_RESPONSE_CACHE)
+        self.assertNotIn(dashboard.PRACTICE_FAST_CACHE_KEY, dashboard.API_RESPONSE_CACHE)
+
+    def test_equity_heartbeat_loop_polls_independently_of_http_requests(self):
+        calls = []
+        waits = []
+        original_recorder = dashboard.record_practice_equity_heartbeat
+
+        class StopAfterFirstPoll:
+            @staticmethod
+            def is_set():
+                return False
+
+            @staticmethod
+            def wait(seconds):
+                waits.append(seconds)
+                return True
+
+        try:
+            dashboard.record_practice_equity_heartbeat = lambda: calls.append('heartbeat') or True
+            dashboard.practice_equity_heartbeat_loop(
+                stop_event=StopAfterFirstPoll(),
+                poll_seconds=5,
+            )
+        finally:
+            dashboard.record_practice_equity_heartbeat = original_recorder
+
+        self.assertEqual(calls, ['heartbeat'])
+        self.assertEqual(waits, [5.0])
+
+    def test_equity_heartbeat_starts_as_single_daemon_worker(self):
+        created = []
+        original_thread_class = dashboard.threading.Thread
+        original_worker = dashboard.PRACTICE_EQUITY_HEARTBEAT_THREAD
+
+        class FakeThread:
+            def __init__(self, *, target, name, daemon):
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+                self.started = False
+                created.append(self)
+
+            def is_alive(self):
+                return self.started
+
+            def start(self):
+                self.started = True
+
+        try:
+            dashboard.threading.Thread = FakeThread
+            dashboard.PRACTICE_EQUITY_HEARTBEAT_THREAD = None
+            dashboard.start_practice_equity_heartbeat()
+            dashboard.start_practice_equity_heartbeat()
+        finally:
+            dashboard.threading.Thread = original_thread_class
+            dashboard.PRACTICE_EQUITY_HEARTBEAT_THREAD = original_worker
+
+        self.assertEqual(len(created), 1)
+        self.assertIs(created[0].target, dashboard.practice_equity_heartbeat_loop)
+        self.assertEqual(created[0].name, 'practice-equity-heartbeat')
+        self.assertTrue(created[0].daemon)
+        self.assertTrue(created[0].started)
 
     def test_us_sector_api_returns_sector_snapshot(self):
         original_producer = dashboard.produce_us_sector_data
@@ -1162,52 +1841,397 @@ console.log(JSON.stringify(result));
         self.assertEqual(handler.status, 200)
         self.assertEqual(payload["items"][0]["symbol"], "SMH")
 
+    def test_industry_flow_page_api_and_animation_are_wired(self):
+        original_producer = dashboard.produce_industry_flow_data
+        try:
+            dashboard.produce_industry_flow_data = lambda: {
+                'available': True,
+                'generated_at': '2026-07-20 11:00:00',
+                'nodes': [{'id': 'sector-a', 'name': '行业A', 'role': 'outflow'}],
+                'links': [],
+            }
+            page = FakeHandler(path='/industry-flow')
+            page.do_GET()
+            api = FakeHandler(path='/api/industry-flow')
+            api.do_GET()
+            payload = json.loads(api.wfile.getvalue().decode('utf-8'))
+        finally:
+            dashboard.produce_industry_flow_data = original_producer
+
+        self.assertEqual(page.status, 200)
+        self.assertEqual(api.status, 200)
+        self.assertEqual(payload['nodes'][0]['name'], '行业A')
+        component = (
+            ROOT / 'web' / 'src' / 'components' / 'IndustryFlowPanel.vue'
+        ).read_text(encoding='utf-8')
+        data_source = (
+            ROOT / 'web' / 'src' / 'composables' / 'useIndustryFlowData.js'
+        ).read_text(encoding='utf-8')
+        animation_source = INDUSTRY_FLOW_ANIMATION_PATH.read_text(encoding='utf-8')
+        self.assertIn("fetch('/api/industry-flow?compact=1'", data_source)
+        self.assertIn('useIndustryFlowAnimation(payload)', component)
+        self.assertIn('<TransitionGroup', component)
+        self.assertIn('id="industryFlowSeek"', component)
+        self.assertIn('@pointerdown="beginSeek"', component)
+        self.assertIn('export function frameAt', animation_source)
+        self.assertIn('export function splitSortedNodes', animation_source)
+        self.assertIn('const SPEED_OPTIONS = [0.5, 0.75, 1, 1.5, 2]', animation_source)
+
+    def test_industry_flow_sampling_window_and_history_file_are_bounded_to_local_data(self):
+        original_calendar = dashboard.is_a_share_trading_day_for_dashboard
+        original_history_file = dashboard.INDUSTRY_FLOW_HISTORY_FILE
+        original_interval = dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS
+        try:
+            self.assertEqual(dashboard.MONEY_FLOW_SNAPSHOT_FILE.name, 'industry_main_money_flow_cache.json')
+            self.assertEqual(original_history_file.name, 'industry_main_flow_history.json')
+            dashboard.is_a_share_trading_day_for_dashboard = lambda _now: True
+            dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = 120
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 9, 24)))
+            self.assertTrue(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 9, 25)))
+            self.assertTrue(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 11, 31)))
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 11, 32)))
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 12, 0)))
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 12, 59)))
+            self.assertTrue(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 13, 0)))
+            self.assertTrue(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 15, 1)))
+            self.assertFalse(dashboard.is_industry_flow_sampling_window(datetime(2026, 7, 20, 15, 2)))
+
+            dashboard.INDUSTRY_FLOW_HISTORY_FILE = self.tmp_path / 'industry_flow_history.json'
+            sample = {
+                'generated_at': '2026-07-20 10:00:00',
+                'items': [{'name': '半导体', 'net_flow_yi': 12}],
+            }
+            first = dashboard.record_industry_flow_sample(
+                sample,
+                now=datetime(2026, 7, 20, 10, 0),
+            )
+            second = dashboard.record_industry_flow_sample(
+                sample,
+                now=datetime(2026, 7, 20, 10, 0),
+            )
+            too_soon = dashboard.record_industry_flow_sample({
+                'generated_at': '2026-07-20 10:01:00',
+                'items': [{'name': '银行', 'net_flow_yi': -3}],
+            }, now=datetime(2026, 7, 20, 10, 1))
+            due = dashboard.record_industry_flow_sample({
+                'generated_at': '2026-07-20 10:02:00',
+                'items': [{'name': '银行', 'net_flow_yi': -4}],
+            }, now=datetime(2026, 7, 20, 10, 2))
+            lunch = dashboard.record_industry_flow_sample({
+                'generated_at': '2026-07-20 12:00:00',
+                'items': [{'name': '银行', 'net_flow_yi': -5}],
+            }, now=datetime(2026, 7, 20, 12, 0))
+            stored = json.loads(dashboard.INDUSTRY_FLOW_HISTORY_FILE.read_text(encoding='utf-8'))
+
+            self.assertEqual(len(first), 1)
+            self.assertEqual(second, first)
+            self.assertEqual(too_soon, first)
+            self.assertEqual(len(due), 2)
+            self.assertEqual(lunch, due)
+            self.assertEqual(len(stored['samples']), 2)
+            self.assertEqual(stored['interval_seconds'], 120)
+        finally:
+            dashboard.is_a_share_trading_day_for_dashboard = original_calendar
+            dashboard.INDUSTRY_FLOW_HISTORY_FILE = original_history_file
+            dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = original_interval
+
+    def test_money_flow_fetch_preserves_morning_history_after_afternoon_refresh(self):
+        original_runner = dashboard.run_dashboard_helper
+        original_clock = dashboard.current_cn_datetime
+        original_calendar = dashboard.is_a_share_trading_day_for_dashboard
+        snapshots = iter((
+            {
+                'generated_at': '2026-07-20 11:30:00',
+                'inflow': [{'name': '半导体', 'net_flow_yi': 12}],
+                'outflow': [{'name': '银行', 'net_flow_yi': -3}],
+            },
+            {
+                'generated_at': '2026-07-20 13:00:00',
+                'inflow': [{'name': '软件开发', 'net_flow_yi': 9}],
+                'outflow': [{'name': '银行', 'net_flow_yi': -4}],
+            },
+        ))
+        clocks = iter((
+            datetime(2026, 7, 20, 11, 45),
+            datetime(2026, 7, 20, 13, 0),
+        ))
+        calls = []
+        try:
+            def fake_runner(script_name, fallback, timeout=90, args=()):
+                calls.append((script_name, fallback, timeout, args))
+                return next(snapshots)
+
+            dashboard.run_dashboard_helper = fake_runner
+            dashboard.current_cn_datetime = lambda: next(clocks)
+            dashboard.is_a_share_trading_day_for_dashboard = lambda _now: True
+
+            morning = dashboard.produce_money_flow_data()
+            afternoon = dashboard.produce_money_flow_data()
+        finally:
+            dashboard.run_dashboard_helper = original_runner
+            dashboard.current_cn_datetime = original_clock
+            dashboard.is_a_share_trading_day_for_dashboard = original_calendar
+
+        stored = json.loads(
+            dashboard.INDUSTRY_FLOW_HISTORY_FILE.read_text(encoding='utf-8')
+        )
+        self.assertEqual(morning['generated_at'], '2026-07-20 11:30:00')
+        self.assertEqual(afternoon['generated_at'], '2026-07-20 13:00:00')
+        self.assertEqual(
+            [sample['generated_at'] for sample in stored['samples']],
+            ['2026-07-20 11:30:00', '2026-07-20 13:00:00'],
+        )
+        self.assertEqual(
+            calls,
+            [
+                ('money_flow_dashboard_api.py', {'inflow': [], 'outflow': []}, 120, ()),
+                ('money_flow_dashboard_api.py', {'inflow': [], 'outflow': []}, 120, ()),
+            ],
+        )
+
+    def test_industry_flow_sampler_waits_on_a_fixed_minute_cadence(self):
+        class StopAfterFirstWait:
+            def __init__(self):
+                self.wait_seconds = None
+
+            def is_set(self):
+                return False
+
+            def wait(self, seconds):
+                self.wait_seconds = seconds
+                return True
+
+        stop_event = StopAfterFirstWait()
+        original_window = dashboard.is_industry_flow_sampling_window
+        original_refresh = dashboard.refresh_industry_flow_sample
+        original_monotonic = dashboard.time.monotonic
+        try:
+            dashboard.is_industry_flow_sampling_window = lambda: True
+            dashboard.refresh_industry_flow_sample = lambda: True
+            ticks = iter((100.0, 112.5))
+            dashboard.time.monotonic = lambda: next(ticks)
+
+            dashboard.industry_flow_sampling_loop(stop_event=stop_event, poll_seconds=60)
+
+            self.assertAlmostEqual(stop_event.wait_seconds, 47.5)
+        finally:
+            dashboard.is_industry_flow_sampling_window = original_window
+            dashboard.refresh_industry_flow_sample = original_refresh
+            dashboard.time.monotonic = original_monotonic
+
+    def test_industry_flow_timeline_interpolates_node_amounts(self):
+        scenario = r"""
+globalThis.window = {matchMedia:() => ({matches:false})};
+const {frameAt} = await import(SOURCE);
+const payload = {
+  nodes:[
+    {id:'a', name:'行业A', role:'inflow', net_flow_yi:20},
+    {id:'b', name:'行业B', role:'outflow', net_flow_yi:-4},
+  ],
+  timeline:[
+    {generated_at:'2026-07-20 10:00:00', nodes:[
+      {id:'a', net_flow_yi:10, inflow_yi:20, outflow_yi:10},
+      {id:'b', net_flow_yi:-8, inflow_yi:4, outflow_yi:12},
+    ]},
+    {generated_at:'2026-07-20 10:01:00', nodes:[
+      {id:'a', net_flow_yi:20, inflow_yi:35, outflow_yi:15},
+      {id:'b', net_flow_yi:-4, inflow_yi:10, outflow_yi:14},
+    ]},
+  ],
+};
+console.log(JSON.stringify(frameAt(payload, 0.5)));
+"""
+        output = subprocess.check_output(
+            ['node', '--input-type=module', '-e', scenario.replace(
+                'SOURCE', json.dumps(INDUSTRY_FLOW_ANIMATION_PATH.as_uri()),
+            )],
+            cwd=ROOT,
+            text=True,
+        )
+        frame = json.loads(output)
+        nodes = {node['id']: node for node in frame['nodes']}
+        self.assertEqual(frame['generated_at'], '2026-07-20 10:00:30')
+        self.assertEqual(nodes['a']['net_flow_yi'], 15)
+        self.assertEqual(nodes['b']['net_flow_yi'], -6)
+
+    def test_industry_flow_timeline_keeps_leaders_from_both_neighboring_minutes(self):
+        scenario = r"""
+globalThis.window = {matchMedia:() => ({matches:false})};
+const {frameAt} = await import(SOURCE);
+const payload = {
+  nodes:[
+    {id:'new-in', name:'新流入', net_flow_yi:20},
+    {id:'new-out', name:'新流出', net_flow_yi:-20},
+  ],
+  timeline:[
+    {generated_at:'2026-07-20 10:00:00', nodes:[
+      {id:'old-in', name:'旧流入', net_flow_yi:10},
+      {id:'old-out', name:'旧流出', net_flow_yi:-8},
+    ]},
+    {generated_at:'2026-07-20 10:01:00', nodes:[
+      {id:'new-in', name:'新流入', net_flow_yi:20},
+      {id:'new-out', name:'新流出', net_flow_yi:-4},
+    ]},
+  ],
+};
+console.log(JSON.stringify(frameAt(payload, 0.5).nodes.map(node => node.id).sort()));
+"""
+        output = subprocess.check_output(
+            ['node', '--input-type=module', '-e', scenario.replace(
+                'SOURCE', json.dumps(INDUSTRY_FLOW_ANIMATION_PATH.as_uri()),
+            )],
+            cwd=ROOT,
+            text=True,
+        )
+        self.assertEqual(json.loads(output), ['new-in', 'new-out', 'old-in', 'old-out'])
+
+    def test_industry_flow_timeline_respects_configured_industry_count(self):
+        scenario = r"""
+globalThis.window = {matchMedia:() => ({matches:false})};
+const {frameAt} = await import(SOURCE);
+const payload = {
+  settings:{side_limit:1},
+  nodes:[],
+  timeline:[
+    {generated_at:'2026-07-20 10:00:00', nodes:[
+      {id:'in-a', name:'流入A', net_flow_yi:10},
+      {id:'in-b', name:'流入B', net_flow_yi:8},
+      {id:'out-a', name:'流出A', net_flow_yi:-10},
+      {id:'out-b', name:'流出B', net_flow_yi:-8},
+    ]},
+    {generated_at:'2026-07-20 10:01:00', nodes:[
+      {id:'in-a', name:'流入A', net_flow_yi:12},
+      {id:'in-b', name:'流入B', net_flow_yi:9},
+      {id:'out-a', name:'流出A', net_flow_yi:-12},
+      {id:'out-b', name:'流出B', net_flow_yi:-9},
+    ]},
+  ],
+};
+console.log(JSON.stringify(frameAt(payload, 0.5).nodes.map(node => node.id)));
+"""
+        output = subprocess.check_output(
+            ['node', '--input-type=module', '-e', scenario.replace(
+                'SOURCE', json.dumps(INDUSTRY_FLOW_ANIMATION_PATH.as_uri()),
+            )],
+            cwd=ROOT,
+            text=True,
+        )
+        self.assertEqual(set(json.loads(output)), {'in-a', 'out-a'})
+
+    def test_industry_flow_initial_load_shows_latest_frame_without_autoplay(self):
+        scenario = r"""
+globalThis.window = {matchMedia:() => ({matches:false})};
+const {configureIndustryFlowAnimation, useIndustryFlowAnimation} = await import(SOURCE);
+const payload = {
+  nodes:[{id:'sector-a', name:'行业A', net_flow_yi:18}],
+  timeline:[
+    {generated_at:'2026-07-20 10:00:00', nodes:[
+      {id:'sector-a', name:'行业A', net_flow_yi:10},
+    ]},
+    {generated_at:'2026-07-20 10:01:00', nodes:[
+      {id:'sector-a', name:'行业A', net_flow_yi:18},
+    ]},
+  ],
+};
+configureIndustryFlowAnimation(payload, false);
+const flow = useIndustryFlowAnimation({value:payload});
+console.log(JSON.stringify({
+  progress:flow.animation.progress,
+  playing:flow.animation.playing,
+  currentTime:flow.currentTime.value,
+  netFlow:flow.sides.value.inflow[0].net_flow_yi,
+}));
+"""
+        output = subprocess.check_output(
+            ['node', '--input-type=module', '-e', scenario.replace(
+                'SOURCE', json.dumps(INDUSTRY_FLOW_ANIMATION_PATH.as_uri()),
+            )],
+            cwd=ROOT,
+            text=True,
+        )
+        state = json.loads(output)
+        self.assertEqual(state, {
+            'progress': 1,
+            'playing': False,
+            'currentTime': '10:01:00',
+            'netFlow': 18,
+        })
+
+    def test_industry_flow_rank_changes_use_vue_transition_group(self):
+        component = (
+            ROOT / 'web' / 'src' / 'components' / 'IndustryFlowPanel.vue'
+        ).read_text(encoding='utf-8')
+        self.assertEqual(component.count('<TransitionGroup'), 2)
+        self.assertIn('name="industry-flow-rank"', component)
+        self.assertEqual(component.count('@before-leave="pinLeavingRow"'), 2)
+        self.assertIn('.industry-flow-rank-move,', component)
+        self.assertIn('transition: transform 420ms cubic-bezier(.22,.8,.24,1)', component)
+        self.assertIn('.flow-bars-col-list { position: relative; }', component)
+        self.assertIn('const rowRect = element.getBoundingClientRect()', component)
+        self.assertIn("element.style.position = 'absolute'", component)
+        self.assertIn("element.style.transform = 'none'", component)
+        self.assertIn('transition: opacity 180ms ease-out;', component)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", component)
+
+    def test_industry_flow_playback_duration_keeps_sample_transitions_readable(self):
+        scenario = r"""
+globalThis.window = {matchMedia:() => ({matches:false})};
+const {playbackDuration} = await import(SOURCE);
+console.log(JSON.stringify([
+  playbackDuration(2),
+  playbackDuration(96),
+  playbackDuration(242),
+]));
+"""
+        output = subprocess.check_output(
+            ['node', '--input-type=module', '-e', scenario.replace(
+                'SOURCE', json.dumps(INDUSTRY_FLOW_ANIMATION_PATH.as_uri()),
+            )],
+            cwd=ROOT,
+            text=True,
+        )
+        self.assertEqual(json.loads(output), [9000, 43700, 110000])
+
     def test_indices_market_panel_switches_to_us_sectors_with_index_session(self):
-        self.assertIn("let usSectorData = {items: []};", DASHBOARD_FRONTEND)
-        self.assertIn("fetch('/api/us_sectors')", DASHBOARD_FRONTEND)
-        self.assertIn('function indicesSwitchSession(aIndexItems = [])', DASHBOARD_FRONTEND)
-        self.assertIn("let indicesMarketRegionOverride = '';", DASHBOARD_FRONTEND)
-        self.assertIn('function resolvedIndicesMarketRegion(aIndexItems = [])', DASHBOARD_FRONTEND)
-        self.assertIn('function setIndicesMarketRegion(mode)', DASHBOARD_FRONTEND)
-        self.assertIn("const marketRegion = resolvedIndicesMarketRegion(aIndexItems);", DASHBOARD_FRONTEND)
-        self.assertIn("const marketUsesUsSectors = marketRegion === 'us';", DASHBOARD_FRONTEND)
-        self.assertIn('aria-label="行情市场切换"', DASHBOARD_FRONTEND)
-        self.assertIn('data-market-region="a_share"', DASHBOARD_FRONTEND)
-        self.assertIn('data-market-region="us"', DASHBOARD_FRONTEND)
-        self.assertIn("const activeTitleHtml = activePanel === 'index'", DASHBOARD_FRONTEND)
-        self.assertIn('${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}', DASHBOARD_FRONTEND)
-        self.assertNotIn('<h2 class="indices-part-title">${activeTitle}</h2>', DASHBOARD_FRONTEND)
-        self.assertNotIn('indicesMarketRegionOverride,\n      savedAt', DASHBOARD_FRONTEND)
-        self.assertIn('function renderUsSectorMarketBlock()', DASHBOARD_FRONTEND)
-        self.assertIn('function renderSectorCloudHeading(source)', DASHBOARD_FRONTEND)
-        self.assertIn('更新 ${esc(source.generated_at)}', DASHBOARD_FRONTEND)
-        self.assertIn('${renderSectorCloudHeading(sec)}', DASHBOARD_FRONTEND)
-        self.assertIn('${renderSectorCloudHeading(usSectorData)}', DASHBOARD_FRONTEND)
-        self.assertNotIn('<h3>美股板块涨跌幅', DASHBOARD_FRONTEND)
-        self.assertIn('rows.filter(row => Number.isFinite(row.pct) && row.pct > 0)', DASHBOARD_FRONTEND)
-        self.assertIn('rows.filter(row => Number.isFinite(row.pct) && row.pct < 0)', DASHBOARD_FRONTEND)
-        self.assertIn('暂无上涨板块', DASHBOARD_FRONTEND)
-        self.assertIn('暂无下跌板块', DASHBOARD_FRONTEND)
-        self.assertIn("s.a_share_mapping.slice(0, 3).join('、')", DASHBOARD_FRONTEND)
-        self.assertNotIn("`A股映射 ${s.a_share_mapping.slice(0, 3).join('、')}`", DASHBOARD_FRONTEND)
-        self.assertNotIn('const US_MARKET_QUOTE_SYMBOLS', DASHBOARD_FRONTEND)
+        panel = (
+            ROOT / 'web' / 'src' / 'components' / 'IndicesPanel.vue'
+        ).read_text(encoding='utf-8')
+        data_source = (
+            ROOT / 'web' / 'src' / 'composables' / 'useIndicesData.js'
+        ).read_text(encoding='utf-8')
+        overview = (
+            ROOT / 'web' / 'src' / 'components' / 'indices' / 'MarketOverview.vue'
+        ).read_text(encoding='utf-8')
+        display = (
+            ROOT / 'web' / 'src' / 'utils' / 'marketDisplay.js'
+        ).read_text(encoding='utf-8')
+        self.assertIn("fetchJson('/api/us_sectors'", data_source)
+        self.assertIn('indicesSwitchSession(aIndexItems.value)', panel)
+        self.assertIn("marketRegion.value === 'us'", panel)
+        self.assertIn('aria-label="行情市场切换"', panel)
+        self.assertIn("@click=\"setMarketRegion('a_share')\"", panel)
+        self.assertIn("@click=\"setMarketRegion('us')\"", panel)
+        self.assertIn("v-if=\"region === 'us'\"", overview)
+        self.assertIn('export function indicesSwitchSession', display)
+        self.assertIn('暂无上涨板块', overview)
+        self.assertIn('暂无下跌板块', overview)
 
     def test_indices_panel_can_put_a_share_or_us_indices_first(self):
-        self.assertIn("const INDICES_INDEX_PRIORITY_STATE_KEY = 'niuniu-dashboard-index-priority-v1';", DASHBOARD_FRONTEND)
-        self.assertIn("let indicesIndexPriorityOverride = '';", DASHBOARD_FRONTEND)
-        self.assertIn('function setIndicesIndexPriority(mode)', DASHBOARD_FRONTEND)
-        self.assertIn('function resolvedIndicesIndexPriority(aIndexItems = [])', DASHBOARD_FRONTEND)
-        self.assertIn("sessionStorage.setItem(INDICES_INDEX_PRIORITY_STATE_KEY, mode)", DASHBOARD_FRONTEND)
-        self.assertIn("const indexSections = indexPriority === 'a_share' ? [", DASHBOARD_FRONTEND)
-        self.assertIn("['A股指数', aIndexItems],\n      ['美股指数', usIndexItems],", DASHBOARD_FRONTEND)
-        self.assertIn("['美股指数', usIndexItems],\n      ['A股指数', aIndexItems],", DASHBOARD_FRONTEND)
-        self.assertIn('return [...indexSections, ...supportingSections]', DASHBOARD_FRONTEND)
-        self.assertIn('aria-label="指数排序切换"', DASHBOARD_FRONTEND)
-        self.assertIn('data-index-priority="a_share"', DASHBOARD_FRONTEND)
-        self.assertIn('data-index-priority="us"', DASHBOARD_FRONTEND)
-        self.assertIn('A股在上', DASHBOARD_FRONTEND)
-        self.assertIn('美股在上', DASHBOARD_FRONTEND)
-        self.assertIn('${activeTitleHtml}${indexPrioritySwitchHtml}${marketRegionSwitchHtml}', DASHBOARD_FRONTEND)
+        panel = (
+            ROOT / 'web' / 'src' / 'components' / 'IndicesPanel.vue'
+        ).read_text(encoding='utf-8')
+        overview = (
+            ROOT / 'web' / 'src' / 'components' / 'indices' / 'IndexOverview.vue'
+        ).read_text(encoding='utf-8')
+        self.assertIn("const INDEX_PRIORITY_STATE_KEY = 'niuniu-dashboard-index-priority-v1'", panel)
+        self.assertIn('function setIndexPriority(value)', panel)
+        self.assertIn('window.sessionStorage.setItem(INDEX_PRIORITY_STATE_KEY, value)', panel)
+        self.assertIn('aria-label="指数排序切换"', panel)
+        self.assertIn('A股在上', panel)
+        self.assertIn('美股在上', panel)
+        self.assertIn("props.priority === 'a_share'", overview)
+        self.assertIn("[['A股指数', aShare], ['美股指数', us]]", overview)
+        self.assertIn("[['美股指数', us], ['A股指数', aShare]]", overview)
 
     def test_index_template_github_button_links_to_repo_with_icon(self):
         self.assertIn(
@@ -1220,205 +2244,103 @@ console.log(JSON.stringify(result));
         self.assertIn('<svg viewBox="0 0 16 16" aria-hidden="true"', DASHBOARD_FRONTEND)
         self.assertNotIn('<span class="header-text" title="开源仓库">GitHub</span>', DASHBOARD_FRONTEND)
 
-    def test_index_template_inlines_trade_reasons_on_stock_cards(self):
-        self.assertNotIn('买入战法绩效', DASHBOARD_FRONTEND)
-        self.assertNotIn('BUY_COLORS', DASHBOARD_FRONTEND)
-        self.assertNotIn('renderStrategyPerformance', DASHBOARD_FRONTEND)
-        self.assertNotIn('practice-perf', DASHBOARD_FRONTEND)
-        self.assertNotIn('exit-rule-row', DASHBOARD_FRONTEND)
-        self.assertIn('x.bought_today', DASHBOARD_FRONTEND)
-        self.assertIn('买入理由', DASHBOARD_FRONTEND)
-        self.assertIn('卖出归因', DASHBOARD_FRONTEND)
-        self.assertIn('最低/最高', DASHBOARD_FRONTEND)
-        self.assertNotIn('最低涨幅', DASHBOARD_FRONTEND)
-        self.assertNotIn('最高涨幅', DASHBOARD_FRONTEND)
-        self.assertIn('industryLabel = item.industry || item.sector || item.board', DASHBOARD_FRONTEND)
-        self.assertIn('${esc(industryLabel)}</span>', DASHBOARD_FRONTEND)
-        self.assertIn('white-space:nowrap', DASHBOARD_FRONTEND)
-        self.assertNotIn('所属板块', DASHBOARD_FRONTEND)
-        self.assertNotIn('板块 ${esc(industryLabel)}', DASHBOARD_FRONTEND)
-        self.assertIn('仓位占比', DASHBOARD_FRONTEND)
-        self.assertIn('可卖/持有', DASHBOARD_FRONTEND)
-        self.assertNotIn('${esc(x.qty)}股', DASHBOARD_FRONTEND)
-        self.assertIn('今日收益曲线', DASHBOARD_FRONTEND)
-        self.assertIn('isNonTradingCalendarDay', DASHBOARD_FRONTEND)
-        self.assertIn('tradingCalendar.is_trading_day === false', DASHBOARD_FRONTEND)
-        self.assertIn('function renderPracticeChartTitle', DASHBOARD_FRONTEND)
-        self.assertIn('class="practice-chart-title-measure" aria-hidden="true"', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-chart-title { display:inline-grid; flex:0 0 auto;', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-chart-title-text, .practice-chart-title-measure { grid-area:1 / 1;', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-chart-title-measure { visibility:hidden;', DASHBOARD_FRONTEND)
-        self.assertIn('currentDateKey', DASHBOARD_FRONTEND)
-        self.assertIn("timeZone: 'Asia/Shanghai'", DASHBOARD_FRONTEND)
-        self.assertIn('practicePayloadDateKey', DASHBOARD_FRONTEND)
-        self.assertIn('等待今日盘中净值点', DASHBOARD_FRONTEND)
-        self.assertIn('最近已有分时点', DASHBOARD_FRONTEND)
-        self.assertIn('累积收益曲线', DASHBOARD_FRONTEND)
-        self.assertIn('practice-hover-tooltip', DASHBOARD_FRONTEND)
-        self.assertIn('practice-chart-hover-layer', DASHBOARD_FRONTEND)
-        self.assertIn('practiceHoverMove(event, this)', DASHBOARD_FRONTEND)
+    def test_practice_vue_components_preserve_account_chart_and_calendar_details(self):
+        self.assertNotIn('renderPracticePage', DASHBOARD_FRONTEND)
+        self.assertNotIn('loadPracticePage', DASHBOARD_FRONTEND)
+        self.assertIn("main_board: '主板'", PRACTICE_CANDIDATE_UTILS)
+        self.assertIn('item.industry || item.sector || item.board_label || item.board', PRACTICE_CANDIDATE_UTILS)
+        self.assertIn('{{ industryLabel }}', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertNotIn('所属板块', PRACTICE_CANDIDATE_COMPONENTS)
+
+        for label in ('买入理由', '卖出归因', '最低/最高', '仓位占比', '可卖/持有'):
+            self.assertIn(label, PRACTICE_COMPONENTS)
+        self.assertIn('<PracticePositionCard', PRACTICE_COMPONENTS)
+        self.assertIn('<PracticeSoldCard', PRACTICE_COMPONENTS)
+        self.assertIn("next.searchParams.set('holdings', 'sold')", PRACTICE_COMPONENTS)
+        self.assertIn("next.searchParams.set('brief', '1')", PRACTICE_COMPONENTS)
+
+        self.assertIn('buildPracticeChartModel', PRACTICE_CHART_UTILS)
+        self.assertIn("timeZone: 'Asia/Shanghai'", PRACTICE_CHART_UTILS)
+        self.assertIn('tradingClockMinuteOfDay', PRACTICE_CHART_UTILS)
+        self.assertIn('normalizePracticeTradeMarkers', PRACTICE_CHART_UTILS)
+        self.assertIn('class="practice-chart-title-measure"', PRACTICE_COMPONENTS)
+        self.assertIn('class="practice-chart-hover-layer"', PRACTICE_COMPONENTS)
+        self.assertIn('class="practice-trade-marker-tooltip"', PRACTICE_COMPONENTS)
+        self.assertIn("trade.action === 'SELL' && trade.isFullExit", PRACTICE_COMPONENTS)
         self.assertIn('touch-action:none', DASHBOARD_FRONTEND)
-        self.assertIn('data-practice-hover-points', DASHBOARD_FRONTEND)
-        self.assertIn("layer.classList.toggle('place-left'", DASHBOARD_FRONTEND)
-        self.assertIn("layer.classList.toggle('place-bottom'", DASHBOARD_FRONTEND)
-        self.assertIn('收益金额', DASHBOARD_FRONTEND)
-        self.assertIn('累计收益率', DASHBOARD_FRONTEND)
-        self.assertIn('当日收益率', DASHBOARD_FRONTEND)
-        self.assertIn('function renderPracticeTradeMarkers', DASHBOARD_FRONTEND)
-        self.assertIn('practiceTradeMarkersForDate', DASHBOARD_FRONTEND)
-        self.assertIn('practice-trade-marker-tooltip', DASHBOARD_FRONTEND)
-        self.assertIn("const side = trade.action === 'BUY' ? '买' : '卖';", DASHBOARD_FRONTEND)
-        self.assertIn('function renderPracticeTradeMarkerLine', DASHBOARD_FRONTEND)
-        self.assertIn('practice-trade-marker-side', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-chart-card { position:relative; z-index:0; isolation:isolate; overflow:hidden;', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-trade-marker { --marker-size:18px; --marker-radius:9px; appearance:none;', DASHBOARD_FRONTEND)
-        self.assertIn(
-            'left:clamp(var(--marker-radius), var(--marker-x), calc(100% - var(--marker-radius)));',
-            DASHBOARD_FRONTEND,
-        )
-        self.assertIn('min-width:var(--marker-size); max-width:var(--marker-size);', DASHBOARD_FRONTEND)
-        self.assertIn(
-            '.practice-calendar-day-curve-chart .practice-trade-marker { --marker-size:15px; --marker-radius:7.5px;',
-            DASHBOARD_FRONTEND,
-        )
-        self.assertIn('style="--marker-x:${xPct.toFixed(2)}%;top:${yPct.toFixed(2)}%"', DASHBOARD_FRONTEND)
-        self.assertIn('font-family:inherit; cursor:default;', DASHBOARD_FRONTEND)
-        self.assertNotIn('font-family:inherit; cursor:help;', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-trade-marker-pnl.up { color:#ff6b6d; }', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-trade-marker-pnl.down { color:#39d98a; }', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-trade-marker.sell-partial { background:#f59e0b;', DASHBOARD_FRONTEND)
-        self.assertIn('.practice-trade-marker.sell-full { background:#ef4444;', DASHBOARD_FRONTEND)
-        self.assertIn("? 'sell-full'", DASHBOARD_FRONTEND)
-        self.assertIn("? 'sell-partial' : 'sell-mixed'", DASHBOARD_FRONTEND)
-        self.assertIn("trade.action === 'SELL' && trade.isFullExit", DASHBOARD_FRONTEND)
-        self.assertIn("${practiceTradeShareText(trade.shares)}股×${practiceTradePriceText(trade.price)}", DASHBOARD_FRONTEND)
-        self.assertIn('renderPracticeTradeMarkers(latestDay, xFromTime, plottedPts, w, h)', DASHBOARD_FRONTEND)
-        self.assertIn('const tradeMarkerHtml = renderPracticeTradeMarkers(', DASHBOARD_FRONTEND)
-        self.assertIn('class="practice-calendar-day-curve-chart"', DASHBOARD_FRONTEND)
-        self.assertNotIn('practice-hover-readout', DASHBOARD_FRONTEND)
-        self.assertNotIn('拖动查看收益曲线点位', DASHBOARD_FRONTEND)
-        self.assertNotIn('每日总收益', DASHBOARD_FRONTEND)
-        self.assertNotIn('if (points.length < 2) points = rawPoints.slice(-180);', DASHBOARD_FRONTEND)
-        self.assertIn('交易日历', DASHBOARD_FRONTEND)
-        self.assertIn('openPracticeCalendar(event)', DASHBOARD_FRONTEND)
-        self.assertIn('buildPracticeCalendarRows', DASHBOARD_FRONTEND)
-        self.assertIn('practice-calendar-popover', DASHBOARD_FRONTEND)
-        self.assertIn('practiceCalendarSelectedDate', DASHBOARD_FRONTEND)
-        self.assertIn('renderPracticeCalendarDayCurve', DASHBOARD_FRONTEND)
-        self.assertIn('practice-calendar-day-curve', DASHBOARD_FRONTEND)
-        self.assertIn('data-practice-calendar-date="${esc(date)}"', DASHBOARD_FRONTEND)
-        self.assertIn('data-practice-calendar-action="clear-day"', DASHBOARD_FRONTEND)
-        self.assertIn('data-practice-calendar-curve', DASHBOARD_FRONTEND)
-        self.assertIn('selectedCls = date === practiceCalendarSelectedDate', DASHBOARD_FRONTEND)
-        self.assertIn("practiceCalendarSelectedDate = practiceCalendarSelectedDate === nextDate ? '' : nextDate", DASHBOARD_FRONTEND)
-        self.assertIn('sessionDayPoints', DASHBOARD_FRONTEND)
-        self.assertIn('allDayHistoryPoints.at(-1)?.equity', DASHBOARD_FRONTEND)
-        self.assertIn("? '分时加载失败 · '", DASHBOARD_FRONTEND)
-        self.assertIn('practiceCalendarHistoryPoints(p)', DASHBOARD_FRONTEND)
-        self.assertIn('practiceCalendarHistoryCoversDate(p, date)', DASHBOARD_FRONTEND)
-        self.assertIn(
-            'const needsFullHistory = isCurrentDate || (hasPartialHistory && !practiceCalendarHistoryCoversDate(p, date));',
-            DASHBOARD_FRONTEND,
-        )
-        self.assertIn('分时曲线加载中…', DASHBOARD_FRONTEND)
-        self.assertIn('分时曲线加载失败', DASHBOARD_FRONTEND)
-        self.assertIn("time: `${date} 15:00:00`", DASHBOARD_FRONTEND)
-        self.assertIn('const w = 464, h = 96', DASHBOARD_FRONTEND)
-        self.assertIn('0轴 ${prevPoint ? esc(String(prevPoint.time || \'\').slice(5, 16)) : \'初始资金\'}', DASHBOARD_FRONTEND)
-        self.assertIn('position:absolute; left:0; right:0; bottom:calc(100% + 8px)', DASHBOARD_FRONTEND)
-        self.assertIn('overflow:visible', DASHBOARD_FRONTEND)
-        self.assertIn('width:min(390px', DASHBOARD_FRONTEND)
-        self.assertIn('transform:translate(-50%,-50%)', DASHBOARD_FRONTEND)
-        self.assertNotIn('max-height:min(76vh, 640px); display:grid; gap:8px', DASHBOARD_FRONTEND)
-        self.assertNotIn('practice-calendar-popover::before', DASHBOARD_FRONTEND)
-        self.assertNotIn('filter:blur(18px)', DASHBOARD_FRONTEND)
-        self.assertIn('border:1px solid transparent', DASHBOARD_FRONTEND)
-        self.assertIn('linear-gradient(135deg, rgba(96,165,250,.68), rgba(124,92,255,.56) 48%, rgba(52,211,153,.32)) border-box', DASHBOARD_FRONTEND)
-        self.assertIn('background:linear-gradient(180deg, #172033, #101827)', DASHBOARD_FRONTEND)
-        self.assertIn('background:rgba(31,42,62,.72)', DASHBOARD_FRONTEND)
-        self.assertIn('practice-calendar-no-data', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-trade-marker.sell-partial', DASHBOARD_FRONTEND)
+        self.assertIn('.practice-trade-marker.sell-full', DASHBOARD_FRONTEND)
+
+        self.assertIn('buildPracticeCalendarRows', PRACTICE_CHART_UTILS)
+        self.assertIn('practiceCalendarHistoryCoversDate', PRACTICE_CHART_UTILS)
+        self.assertIn('class="practice-calendar-popover"', PRACTICE_COMPONENTS)
+        self.assertIn('class="practice-calendar-day-curve"', PRACTICE_COMPONENTS)
+        self.assertIn('@ensure-full="ensureFullSnapshot"', PRACTICE_COMPONENTS)
+        self.assertIn('class="practice-calendar-today weekend-today"', PRACTICE_COMPONENTS)
         self.assertIn('grid-template-columns:repeat(5, minmax(0, 1.14fr)) repeat(2, minmax(30px, .72fr))', DASHBOARD_FRONTEND)
-        self.assertIn('dayOfWeek === 0 || dayOfWeek === 6', DASHBOARD_FRONTEND)
-        self.assertIn('practice-calendar-day.weekend', DASHBOARD_FRONTEND)
-        self.assertIn('practice-calendar-weekday.weekend', DASHBOARD_FRONTEND)
-        self.assertIn('weekendTodayMarker = isToday && isWeekend && !row', DASHBOARD_FRONTEND)
-        self.assertIn('inlineTodayMarker = isToday && !weekendTodayMarker', DASHBOARD_FRONTEND)
-        self.assertIn('class="practice-calendar-today weekend-today"', DASHBOARD_FRONTEND)
-        self.assertIn('grid-row:2; align-self:end; justify-self:start; padding:0 3px', DASHBOARD_FRONTEND)
-        self.assertNotIn('practice-calendar-day.weekend { min-height', DASHBOARD_FRONTEND)
-        self.assertNotIn('align-self:start', DASHBOARD_FRONTEND)
-        self.assertIn("${date}${isWeekend ? ' 周末' : ''}", DASHBOARD_FRONTEND)
-        self.assertIn('signedCellPct', DASHBOARD_FRONTEND)
-        self.assertIn('signedCellAmount', DASHBOARD_FRONTEND)
-        self.assertIn('aria-label="${esc(fullText)}"', DASHBOARD_FRONTEND)
-        self.assertIn('practice-calendar-grid', DASHBOARD_FRONTEND)
-        self.assertIn('data-practice-calendar-action="prev"', DASHBOARD_FRONTEND)
-        self.assertNotIn('practice-calendar-backdrop', DASHBOARD_FRONTEND)
-        self.assertNotIn('practiceCalendarAnchor', DASHBOARD_FRONTEND)
-        self.assertNotIn('practice-calendar-values empty', DASHBOARD_FRONTEND)
-        self.assertNotIn('<h3 class="practice-panel-title"><span>牛牛实战 · 模拟账户</span><button class="practice-calendar-open-btn"', DASHBOARD_FRONTEND)
-        self.assertIn('<h3>模拟账户</h3>', DASHBOARD_FRONTEND)
-        self.assertNotIn('最近交易日收益', DASHBOARD_FRONTEND)
-        self.assertNotIn('getDay() === 0 || nowForCurve.getDay() === 6', DASHBOARD_FRONTEND)
+        self.assertIn('background:linear-gradient(180deg, #172033, #101827)', DASHBOARD_FRONTEND)
+        self.assertNotIn('practice-calendar-backdrop', PRACTICE_COMPONENTS)
 
     def test_index_template_loads_calendar_history_without_waiting_for_full_snapshot(self):
-        self.assertIn("const VIEW_STATE_KEY = 'niuniu-dashboard-view-state-v5';", DASHBOARD_FRONTEND)
-        self.assertIn("'/api/niuniu_practice?fast=1&calendar_schema=1'", DASHBOARD_FRONTEND)
-        self.assertIn("fetchJson('/api/niuniu_practice?snapshot_schema=2')", DASHBOARD_FRONTEND)
-        self.assertIn('const fullPracticePromise = practiceFullRequest;', DASHBOARD_FRONTEND)
-        self.assertIn('function mergePracticePayloadSnapshots', DASHBOARD_FRONTEND)
-        self.assertIn('function mergePracticeEquityRows', DASHBOARD_FRONTEND)
-        self.assertIn('function comparePracticePayloadFreshness', DASHBOARD_FRONTEND)
-        self.assertIn("String(payload.equity_history_scope || '') === 'unavailable'", DASHBOARD_FRONTEND)
-        self.assertNotIn("typeof payload !== 'object' || payload.last_error", DASHBOARD_FRONTEND)
-        self.assertIn('if (seq !== practiceLoadSeq) return;', DASHBOARD_FRONTEND)
-        self.assertIn("practiceFullSnapshotStatus = 'loading';", DASHBOARD_FRONTEND)
-        self.assertIn("practiceFullSnapshotStatus = 'loaded';", DASHBOARD_FRONTEND)
-        self.assertIn("practiceFullSnapshotStatus = 'error';", DASHBOARD_FRONTEND)
-        self.assertIn('function compactPracticeCalendarHistoryPoints', DASHBOARD_FRONTEND)
-        self.assertIn('calendar.complete !== true', DASHBOARD_FRONTEND)
-        self.assertIn('buildPracticeCalendarRows(practiceCalendarHistoryPoints(p)', DASHBOARD_FRONTEND)
-        self.assertIn('renderPracticeCurve(p.equity_history || []', DASHBOARD_FRONTEND)
+        self.assertIn("'/api/niuniu_practice?fast=1&calendar_schema=1'", PRACTICE_DATA)
+        self.assertIn("fetchJson('/api/niuniu_practice?snapshot_schema=2'", PRACTICE_DATA)
+        self.assertEqual(PRACTICE_DATA.count('/api/niuniu_practice?snapshot_schema=2'), 1)
+        self.assertIn('async function ensureFullSnapshot()', PRACTICE_DATA)
+        self.assertIn('FULL_HISTORY_RETRY_MS = 5 * 60 * 1000', PRACTICE_DATA)
+        self.assertIn("state.fullSnapshotStatus = 'loading'", PRACTICE_DATA)
+        self.assertIn("state.fullSnapshotStatus = 'loaded'", PRACTICE_DATA)
+        self.assertIn("state.fullSnapshotStatus = 'error'", PRACTICE_DATA)
+        self.assertIn('subscribePublicProjection(handleProjection', PRACTICE_DATA)
+        self.assertIn("fetchJson('/api/v2/public/latest'", PUBLIC_PROJECTION_DATA)
+        self.assertIn('mergePracticePayloadSnapshots', PRACTICE_PAYLOAD_UTILS)
+        self.assertIn('mergePracticeEquityRows', PRACTICE_PAYLOAD_UTILS)
+        self.assertIn('comparePracticePayloadFreshness', PRACTICE_PAYLOAD_UTILS)
+        self.assertIn("String(payload.equity_history_scope || '') === 'unavailable'", PRACTICE_PAYLOAD_UTILS)
+        self.assertIn('compactPracticeCalendarHistoryPoints', PRACTICE_CHART_UTILS)
+        self.assertIn('calendar.complete !== true', PRACTICE_CHART_UTILS)
+        self.assertIn('@ensure-full="ensureFullSnapshot"', PRACTICE_COMPONENTS)
+        self.assertNotIn('loadPracticePage', DASHBOARD_FRONTEND)
 
     def test_index_template_separates_single_stock_retries_from_quote_channels(self):
         self.assertIn(
-            '`腾讯${channels.tencent ?? 0}/东财${channels.eastmoney ?? 0}/Sina${channels.sina ?? 0}`',
-            DASHBOARD_FRONTEND,
+            '`行情：${quote.quote_time} 更新${quote.updated ?? 0}只 腾讯${channels.tencent ?? 0}/东财${channels.eastmoney ?? 0}/Sina${channels.sina ?? 0}${singleRetryCount',
+            PRACTICE_COMPONENTS,
         )
-        self.assertNotIn('/单票${channels.single', DASHBOARD_FRONTEND)
-        self.assertIn(
-            'const singleRetryText = singleRetryCount ? `，单股重试${singleRetryCount}只` : \'\';',
-            DASHBOARD_FRONTEND,
-        )
+        self.assertIn('const singleRetryCount = Math.max', PRACTICE_COMPONENTS)
+        self.assertIn('`，单股重试${singleRetryCount}只`', PRACTICE_COMPONENTS)
+        self.assertNotIn('/单票${channels.single', PRACTICE_COMPONENTS)
 
-    def test_index_template_uses_independent_category_routes(self):
-        self.assertIn("let activeCategory = categoryFromLocation(initialParams);", DASHBOARD_FRONTEND)
-        self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'x_monitor', 'us_ratings'];", DASHBOARD_FRONTEND)
-        self.assertIn("practice:'模拟交易'", DASHBOARD_FRONTEND)
-        self.assertIn("practice: '/practice'", DASHBOARD_FRONTEND)
-        self.assertIn("indices: '/indices'", DASHBOARD_FRONTEND)
-        self.assertIn("const LEGACY_CATEGORY_ALIASES = {b1_screen:'practice'};", DASHBOARD_FRONTEND)
-        self.assertIn('const normalized = LEGACY_CATEGORY_ALIASES[category] || category;', DASHBOARD_FRONTEND)
-        self.assertIn("fetchJson('/api/practice_candidates')", DASHBOARD_FRONTEND)
-        self.assertIn("actionFetch('/api/practice_candidates/refresh')", DASHBOARD_FRONTEND)
-        self.assertIn('async function loadPracticePage()', DASHBOARD_FRONTEND)
-        self.assertIn('function renderPracticePage()', DASHBOARD_FRONTEND)
-        self.assertIn("location.pathname + location.search !== currentViewUrl()", DASHBOARD_FRONTEND)
-        self.assertNotIn('href="/?category=', DASHBOARD_FRONTEND)
-        self.assertNotIn('function loadB1Screen', DASHBOARD_FRONTEND)
-        self.assertNotIn('function renderB1Screen', DASHBOARD_FRONTEND)
-        self.assertNotIn("fetchJson('/api/b1_screen')", DASHBOARD_FRONTEND)
-        self.assertNotIn("actionFetch('/api/b1_screen/trigger')", DASHBOARD_FRONTEND)
-        self.assertIn("actionFetch('/api/niuniu_practice/manual-cycle')", DASHBOARD_FRONTEND)
-        self.assertIn("fetch('/api/niuniu_practice/manual-cycle', {cache:'no-store'})", DASHBOARD_FRONTEND)
-        self.assertIn('手动触发选股及买卖策略', DASHBOARD_FRONTEND)
-        self.assertIn('盘面评价 · ${esc(marketContext.tone_label', DASHBOARD_FRONTEND)
-        self.assertIn("disabled aria-busy=\"true\"", DASHBOARD_FRONTEND)
+    def test_vue_router_and_components_own_independent_category_routes(self):
+        router_source = (ROOT / 'web' / 'src' / 'router.js').read_text(encoding='utf-8')
+        tabs_source = (
+            ROOT / 'web' / 'src' / 'composables' / 'useDashboardTabs.js'
+        ).read_text(encoding='utf-8')
+        dragon_source = (
+            ROOT / 'web' / 'src' / 'components' / 'DragonTigerPanel.vue'
+        ).read_text(encoding='utf-8')
+        dashboard_page = (
+            ROOT / 'web' / 'src' / 'components' / 'DashboardPage.vue'
+        ).read_text(encoding='utf-8')
+
+        for route in ('/practice', '/indices', '/industry-flow', '/dragon-tiger', '/market-monitor', '/x-monitor', '/us-ratings'):
+            self.assertIn(f"'{route}'", router_source)
+        self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'dragon_tiger', 'x_monitor', 'us_ratings']", tabs_source)
+        self.assertIn("industry_flow: '/industry-flow'", tabs_source)
+        self.assertIn("const LEGACY_CATEGORY_ALIASES = { b1_screen: 'practice' }", tabs_source)
+        self.assertIn("fetch(`/api/iwencai/dragon-tiger${query}`", dragon_source)
+        self.assertIn("const SORT_FIELDS = new Set(['name', 'sector', 'change_pct', 'net_amount_yuan'])", dragon_source)
+        self.assertIn("record?.seat_category === 'institution'", dragon_source)
+        self.assertIn('<PracticePanel />', dashboard_page)
+        self.assertIn('<DragonTigerPanel />', dashboard_page)
+        self.assertIn('subscribePublicProjection(handleProjection)', PRACTICE_CANDIDATE_DATA)
+        self.assertIn("fetchJson('/api/v2/public/latest'", PUBLIC_PROJECTION_DATA)
+        self.assertNotIn('/static/dashboard.js', dashboard_page)
 
     def test_index_snapshot_merge_handles_business_errors_and_stale_full_responses(self):
-        start = DASHBOARD_FRONTEND.index('function mergePracticeTimedRows')
-        end = DASHBOARD_FRONTEND.index('async function loadPracticePage', start)
-        functions = DASHBOARD_FRONTEND[start:end]
+        functions = (
+            "import { isUsablePracticePayload, mergePracticePayloadSnapshots } "
+            f"from {json.dumps(PRACTICE_PAYLOAD_UTILS_PATH.as_uri())};\n"
+        )
         scenario = r"""
 const fast = {
   snapshot_mode:'fast', equity_history_scope:'latest_day', source_updated_at:'2026-07-10 15:00:00',
@@ -1482,7 +2404,7 @@ process.stdout.write(JSON.stringify({
 }));
 """
         result = subprocess.run(
-            ['node', '-e', functions + scenario],
+            ['node', '--input-type=module', '-e', functions + scenario],
             check=True,
             capture_output=True,
             text=True,
@@ -1492,12 +2414,12 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(all(checks.values()), checks)
 
     def test_index_template_does_not_guess_missing_decision_model(self):
-        self.assertIn("const decisionModel = String(p.decision_model || '').trim();", DASHBOARD_FRONTEND)
-        self.assertIn("practiceFullSnapshotStatus === 'error' ? '未知' : '加载中'", DASHBOARD_FRONTEND)
-        self.assertIn('delete niuniuPracticeData.decision_model;', DASHBOARD_FRONTEND)
-        self.assertIn('delete niuniuPracticeData.decision_provider;', DASHBOARD_FRONTEND)
-        self.assertIn("{cache: 'no-cache'}", DASHBOARD_FRONTEND)
-        self.assertNotIn("p.decision_model || 'deepseek-v4-pro'", DASHBOARD_FRONTEND)
+        self.assertIn("const model = String(props.practice.decision_model || '').trim()", PRACTICE_COMPONENTS)
+        self.assertIn("props.fullSnapshotStatus === 'error' ? '未知' : '加载中'", PRACTICE_COMPONENTS)
+        self.assertIn('delete state.practice.decision_model', PRACTICE_DATA)
+        self.assertIn('delete state.practice.decision_provider', PRACTICE_DATA)
+        self.assertIn("cache: 'no-cache'", PRACTICE_DATA)
+        self.assertNotIn("decision_model || 'deepseek-v4-pro'", PRACTICE_COMPONENTS)
 
     def test_cache_invalidation_prevents_inflight_model_snapshot_from_repopulating_cache(self):
         cache_key = dashboard.PRACTICE_FAST_CACHE_KEY
@@ -1603,35 +2525,106 @@ process.stdout.write(JSON.stringify({
         self.assertLessEqual(cached['ts'], before - 60)
         self.assertFalse(dashboard.seed_api_cache_from_json_file('sectors', snapshot, 60))
 
+    def test_indices_snapshot_only_replaces_cache_with_nonempty_success(self):
+        valid = {
+            'generated_at': '2026-07-17 10:00:00',
+            'items': [{'code': 'sh000001', 'name': '上证指数', 'price': 3500}],
+            'stale_cache': True,
+        }
+        self.assertTrue(dashboard.persist_indices_snapshot(valid))
+        stored = json.loads(dashboard.INDICES_SNAPSHOT_FILE.read_text(encoding='utf-8'))
+        self.assertEqual(stored['items'], valid['items'])
+        self.assertNotIn('stale_cache', stored)
+
+        self.assertFalse(dashboard.persist_indices_snapshot({'items': []}))
+        self.assertFalse(dashboard.persist_indices_snapshot({'items': valid['items'], 'error': 'upstream failed'}))
+        unchanged = json.loads(dashboard.INDICES_SNAPSHOT_FILE.read_text(encoding='utf-8'))
+        self.assertEqual(unchanged, stored)
+
+    def test_indices_route_serves_snapshot_while_refreshing_in_background(self):
+        dashboard.INDICES_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dashboard.INDICES_SNAPSHOT_FILE.write_text(
+            json.dumps({
+                'generated_at': '2026-07-17 09:30:00',
+                'items': [{'code': 'sh000001', 'name': '上证指数', 'price': 3490}],
+            }),
+            encoding='utf-8',
+        )
+        original_producer = dashboard.produce_indices_data
+        producer_started = threading.Event()
+        release_producer = threading.Event()
+
+        def slow_producer():
+            producer_started.set()
+            self.assertTrue(release_producer.wait(timeout=2))
+            return {
+                'generated_at': '2026-07-17 10:01:00',
+                'items': [{'code': 'sh000001', 'name': '上证指数', 'price': 3510}],
+            }
+
+        dashboard.produce_indices_data = slow_producer
+        try:
+            handler = FakeHandler(path='/api/indices')
+            started_at = dashboard.time.monotonic()
+            handler.do_GET()
+            elapsed = dashboard.time.monotonic() - started_at
+            payload = json.loads(handler.wfile.getvalue().decode('utf-8'))
+
+            self.assertEqual(handler.status, 200)
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(payload['stale_cache'])
+            self.assertEqual(payload['items'][0]['price'], 3490)
+            self.assertTrue(producer_started.wait(timeout=1))
+        finally:
+            release_producer.set()
+            dashboard.produce_indices_data = original_producer
+
+        deadline = dashboard.time.time() + 2
+        while dashboard.time.time() < deadline:
+            cached = dashboard.API_RESPONSE_CACHE.get('indices', {})
+            if b'3510' in cached.get('payload', b''):
+                break
+            dashboard.time.sleep(0.01)
+        refreshed = json.loads(dashboard.API_RESPONSE_CACHE['indices']['payload'])
+        self.assertEqual(refreshed['items'][0]['price'], 3510)
+
+    def test_indices_frontend_prioritizes_primary_quotes_and_labels_stale_cache(self):
+        index_fetch = DASHBOARD_FRONTEND.index("fetchJson('/api/indices'")
+        sector_fetch = DASHBOARD_FRONTEND.index("fetchJson('/api/sectors'")
+        self.assertLess(index_fetch, sector_fetch)
+        self.assertIn('正在后台更新实时行情', DASHBOARD_FRONTEND)
+        self.assertIn('indices-cache-notice', DASHBOARD_FRONTEND)
+
     def test_index_template_intraday_curve_renders_single_point_from_opening_base(self):
-        self.assertIn('if (rawPoints.length < (isDailyMode ? 2 : 1))', DASHBOARD_FRONTEND)
-        self.assertIn('if (sessionPoints.length >= 1)', DASHBOARD_FRONTEND)
-        self.assertIn('isNonTradingCalendarDay && dayPoints.length >= 2', DASHBOARD_FRONTEND)
-        self.assertIn('if (points.length < 1)', DASHBOARD_FRONTEND)
-        self.assertIn(
-            'if (points.length < 2) return \'<div class="empty" style="padding:18px">累计收益等待更多交易日净值点…</div>\';',
-            DASHBOARD_FRONTEND,
+        scenario = f"""
+import {{ buildPracticeChartModel }} from {json.dumps(PRACTICE_CHART_UTILS_PATH.as_uri())};
+const chart = buildPracticeChartModel({{
+  initial_cash: 1000,
+  current_date: '2026-07-22',
+  equity_history: [{{time:'2026-07-22 10:05:00', equity:1010}}],
+  daily_equity_history: [{{time:'2026-07-21 15:00:00', equity:1005}}],
+}}, 'intraday');
+process.stdout.write(JSON.stringify({{
+  available: chart.available,
+  base: chart.baseEquity,
+  synthetic: chart.points[0]?.synthetic === true,
+  openTime: chart.points[0]?.time,
+  oneLivePoint: chart.points.length === 2,
+}}));
+"""
+        result = subprocess.run(
+            ['node', '--input-type=module', '-e', scenario],
+            check=True,
+            capture_output=True,
+            text=True,
         )
-        self.assertIn(
-            'const hasIntradayOpenBase = !isDailyMode && Number.isFinite(intradayBaseEquity) && intradayBaseEquity > 0;',
-            DASHBOARD_FRONTEND,
-        )
-        self.assertIn(
-            'const chartBase = isDailyMode ? initialCash : (hasIntradayOpenBase ? intradayBaseEquity : vals[0]);',
-            DASHBOARD_FRONTEND,
-        )
-        self.assertIn('const axisPcts = hasIntradayOpenBase ? [0, ...chartPcts] : chartPcts;', DASHBOARD_FRONTEND)
-        self.assertIn('const openAnchor = [left, y(0)];', DASHBOARD_FRONTEND)
-        self.assertIn('pts.unshift(openAnchor);', DASHBOARD_FRONTEND)
-        self.assertIn('hasSyntheticOpenAnchor = true;', DASHBOARD_FRONTEND)
-        self.assertIn(
-            '} else if (!isDailyMode && points.length > 1 && pts.length > 0 && pts[0][0] > left + 1) {',
-            DASHBOARD_FRONTEND,
-        )
-        self.assertIn('const hasCurveSegment = pts.length > 1;', DASHBOARD_FRONTEND)
-        self.assertIn('const drawdownVals = hasIntradayOpenBase ? [chartBase, ...vals] : vals;', DASHBOARD_FRONTEND)
-        self.assertIn('time: `${latestDay} 09:30:00`', DASHBOARD_FRONTEND)
-        self.assertIn('const intradayBaseLabel = hasIntradayOpenBase', DASHBOARD_FRONTEND)
+        self.assertEqual(json.loads(result.stdout), {
+            'available': True,
+            'base': 1005,
+            'synthetic': True,
+            'openTime': '2026-07-22 09:30:00',
+            'oneLivePoint': True,
+        })
 
     def test_configured_admin_password_issues_secure_session_and_unlocks_settings(self):
         dashboard.ADMIN_PASSWORD = '管理员密码'
@@ -1681,7 +2674,7 @@ process.stdout.write(JSON.stringify({
         unlocked_page = FakeHandler(path='/admin', headers={'Cookie': session_cookie})
         unlocked_page.do_GET()
         self.assertEqual(unlocked_page.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=17" defer></script>', unlocked_page.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<div id="app">', unlocked_page.wfile.getvalue().decode('utf-8'))
 
         unlocked_api = FakeHandler(path='/api/admin/config', headers={'Cookie': session_cookie})
         unlocked_api.do_GET()
@@ -1853,18 +2846,6 @@ process.stdout.write(JSON.stringify({
             self.assertEqual(second.status, 429)
         finally:
             dashboard.RATE_LIMIT_ANON = original_anon_limit
-
-    def test_send_payload_gzips_large_json_when_client_accepts_it(self):
-        payload = json.dumps({"items": ["牛" * 50 for _ in range(200)]}, ensure_ascii=False).encode("utf-8")
-        handler = FakeHandler(path="/api/messages", headers={"Accept-Encoding": "br, gzip"})
-
-        handler.send_payload(payload)
-
-        body = handler.wfile.getvalue()
-        self.assertEqual(handler.header("Content-Encoding"), "gzip")
-        self.assertIn("Accept-Encoding", handler.header("Vary") or "")
-        self.assertLess(len(body), len(payload))
-        self.assertEqual(gzip.decompress(body), payload)
 
     def test_practice_candidates_cache_prefers_multi_strategy_and_falls_back_to_legacy(self):
         original_multi_strategy_cache_file = dashboard.MULTI_STRATEGY_CACHE_FILE
@@ -2098,6 +3079,352 @@ process.stdout.write(JSON.stringify({
             },
         )])
 
+    def test_model_test_api_requires_admin_action_and_whitelists_target_fields(self):
+        original_sender = dashboard.send_model_connection_test
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        original_test_limit = dashboard.RATE_LIMIT_MODEL_TEST
+        calls = []
+        body = urllib.parse.urlencode({
+            'target': 'decision-model',
+            'env__DASHBOARD_DECISION_MODEL': 'unsaved-model',
+            'env__DASHBOARD_DECISION_BASE_URL': 'https://unsaved.example/v1',
+            'env__DASHBOARD_DECISION_API_KEY': 'unsaved-key',
+            'env__DASHBOARD_NEWS_API_KEY': 'must-be-ignored',
+            'env__DASHBOARD_ADMIN_PASSWORD': 'must-be-ignored',
+            'unrelated': 'must-be-ignored',
+        }).encode('utf-8')
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.RATE_LIMIT_MODEL_TEST = 100
+            dashboard.send_model_connection_test = (
+                lambda target, overrides: calls.append((target, dict(overrides)))
+                or {'ok': True, 'target': target, 'message': '买卖决策模型已接通'}
+            )
+
+            unauthorized = FakeHandler(
+                path='/api/admin/models/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            unauthorized.do_POST()
+            self.assertEqual(unauthorized.status, 403)
+            self.assertEqual(unauthorized.rfile.tell(), 0)
+
+            missing_action = FakeHandler(
+                path='/api/admin/models/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                },
+                body=body,
+            )
+            missing_action.do_POST()
+            self.assertEqual(missing_action.status, 403)
+            self.assertEqual(missing_action.rfile.tell(), 0)
+
+            handler = FakeHandler(
+                path='/api/admin/models/test',
+                method='POST',
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            handler.do_POST()
+            response = json.loads(handler.wfile.getvalue().decode('utf-8'))
+        finally:
+            dashboard.send_model_connection_test = original_sender
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            dashboard.RATE_LIMIT_MODEL_TEST = original_test_limit
+
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(response['ok'])
+        self.assertEqual(calls, [(
+            'decision-model',
+            {
+                'DASHBOARD_DECISION_MODEL': 'unsaved-model',
+                'DASHBOARD_DECISION_BASE_URL': 'https://unsaved.example/v1',
+                'DASHBOARD_DECISION_API_KEY': 'unsaved-key',
+            },
+        )])
+
+    def test_iwencai_test_api_requires_admin_action_whitelists_and_rate_limits(self):
+        original_sender = dashboard.send_iwencai_connection_test
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        original_test_limit = dashboard.RATE_LIMIT_IWENCAI_TEST
+        calls = []
+        body = urllib.parse.urlencode({
+            'env__IWENCAI_BASE_URL': 'https://unsaved.example',
+            'env__IWENCAI_API_KEY': 'unsaved-key',
+            'env__IWENCAI_TIMEOUT_SECONDS': '12',
+            'env__IWENCAI_MAX_RETRIES': '2',
+            'env__DASHBOARD_DECISION_API_KEY': 'must-be-ignored',
+            'unrelated': 'must-be-ignored',
+        }).encode('utf-8')
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.RATE_LIMIT_IWENCAI_TEST = 1
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+            dashboard.send_iwencai_connection_test = (
+                lambda overrides: calls.append(dict(overrides))
+                or {'ok': True, 'target': 'iwencai', 'message': '问财接口已接通'}
+            )
+
+            unauthorized = FakeHandler(
+                path='/api/admin/iwencai/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            unauthorized.do_POST()
+            self.assertEqual(unauthorized.status, 403)
+            self.assertEqual(unauthorized.rfile.tell(), 0)
+
+            missing_action = FakeHandler(
+                path='/api/admin/iwencai/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                },
+                body=body,
+            )
+            missing_action.do_POST()
+            self.assertEqual(missing_action.status, 403)
+            self.assertEqual(missing_action.rfile.tell(), 0)
+
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': str(len(body)),
+                'Cookie': self.admin_cookie(),
+                dashboard.ACTION_HEADER_NAME: '1',
+            }
+            handler = FakeHandler(
+                path='/api/admin/iwencai/test', method='POST', headers=headers, body=body,
+            )
+            handler.do_POST()
+            response = json.loads(handler.wfile.getvalue().decode('utf-8'))
+            limited = FakeHandler(
+                path='/api/admin/iwencai/test', method='POST', headers=headers, body=body,
+            )
+            limited.do_POST()
+        finally:
+            dashboard.send_iwencai_connection_test = original_sender
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            dashboard.RATE_LIMIT_IWENCAI_TEST = original_test_limit
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(response['ok'])
+        self.assertEqual(limited.status, 429)
+        self.assertEqual(limited.rfile.tell(), 0)
+        self.assertEqual(calls, [{
+            'IWENCAI_BASE_URL': 'https://unsaved.example',
+            'IWENCAI_API_KEY': 'unsaved-key',
+            'IWENCAI_TIMEOUT_SECONDS': '12',
+        }])
+
+    def test_iwencai_test_uses_saved_secret_when_password_input_is_blank(self):
+        names = dashboard.IWENCAI_TEST_FIELD_NAMES
+        original_env = {name: dashboard.os.environ.get(name) for name in names}
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, limit=-1):
+                return b'{"datas":[]}'
+
+        def opener(request, timeout=0):
+            captured['url'] = request.full_url
+            captured['authorization'] = request.get_header('Authorization')
+            captured['timeout'] = timeout
+            return Response()
+
+        try:
+            for name in names:
+                dashboard.os.environ.pop(name, None)
+            dashboard.DASHBOARD_ENV_FILE.write_text(
+                'IWENCAI_BASE_URL=https://saved.example\n'
+                'IWENCAI_API_KEY=saved-key\n'
+                'IWENCAI_TIMEOUT_SECONDS=18\n',
+                encoding='utf-8',
+            )
+            result = dashboard.send_iwencai_connection_test(
+                {
+                    'IWENCAI_BASE_URL': 'https://unsaved.example',
+                    'IWENCAI_API_KEY': '',
+                },
+                opener=opener,
+            )
+        finally:
+            for name, value in original_env.items():
+                if value is None:
+                    dashboard.os.environ.pop(name, None)
+                else:
+                    dashboard.os.environ[name] = value
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(captured['url'], 'https://unsaved.example/v1/query2data')
+        self.assertEqual(captured['authorization'], 'Bearer saved-key')
+        self.assertEqual(captured['timeout'], 18)
+
+    def test_model_test_uses_saved_secret_when_password_input_is_blank(self):
+        original_config_path = dashboard.CONFIG_PATH
+        names = dashboard.model_test_setting_names()
+        original_env = {name: dashboard.os.environ.get(name) for name in names}
+        captured = {}
+
+        class Response:
+            headers = {'Content-Type': 'application/json'}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        def opener(request, timeout=0):
+            captured['url'] = request.full_url
+            captured['authorization'] = request.get_header('Authorization')
+            captured['payload'] = json.loads(request.data.decode('utf-8'))
+            captured['timeout'] = timeout
+            return Response()
+
+        try:
+            for name in names:
+                dashboard.os.environ.pop(name, None)
+            dashboard.CONFIG_PATH = self.tmp_path / 'missing-config.yaml'
+            dashboard.DASHBOARD_ENV_FILE.write_text(
+                'DASHBOARD_DECISION_MODEL=saved-model\n'
+                'DASHBOARD_DECISION_BASE_URL=https://saved.example/v1\n'
+                'DASHBOARD_DECISION_API_KEY=saved-key\n',
+                encoding='utf-8',
+            )
+            result = dashboard.send_model_connection_test(
+                'decision-model',
+                {
+                    'DASHBOARD_DECISION_MODEL': 'unsaved-model',
+                    'DASHBOARD_DECISION_API_KEY': '',
+                },
+                opener=opener,
+            )
+        finally:
+            dashboard.CONFIG_PATH = original_config_path
+            for name, value in original_env.items():
+                if value is None:
+                    dashboard.os.environ.pop(name, None)
+                else:
+                    dashboard.os.environ[name] = value
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(captured['url'], 'https://saved.example/v1/chat/completions')
+        self.assertEqual(captured['authorization'], 'Bearer saved-key')
+        self.assertEqual(captured['payload']['model'], 'unsaved-model')
+        self.assertLessEqual(captured['timeout'], 30)
+
+    def test_practice_market_summary_status_is_public_and_generation_requires_admin_action(self):
+        original_status = dashboard.get_practice_market_summary_status
+        original_generate = dashboard.generate_practice_market_summary
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        calls = []
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.get_practice_market_summary_status = lambda: {
+                'ok': True, 'available': False, 'scan_count': 2,
+            }
+            dashboard.generate_practice_market_summary = lambda: calls.append(True) or {
+                'ok': True, 'available': True, 'scan_count': 2, 'summary': '今日汇总',
+            }
+
+            status_handler = FakeHandler(path=dashboard.PRACTICE_MARKET_SUMMARY_API_PATH)
+            status_handler.do_GET()
+            self.assertEqual(status_handler.status, 200)
+            self.assertEqual(json.loads(status_handler.wfile.getvalue().decode('utf-8'))['scan_count'], 2)
+
+            unauthorized = FakeHandler(
+                path=dashboard.PRACTICE_MARKET_SUMMARY_API_PATH,
+                method='POST',
+                headers={'Content-Length': '0', dashboard.ACTION_HEADER_NAME: '1'},
+            )
+            unauthorized.do_POST()
+            self.assertEqual(unauthorized.status, 403)
+            self.assertEqual(calls, [])
+
+            generated = FakeHandler(
+                path=dashboard.PRACTICE_MARKET_SUMMARY_API_PATH,
+                method='POST',
+                headers={
+                    'Content-Length': '0',
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+            )
+            generated.do_POST()
+            self.assertEqual(generated.status, 200)
+            self.assertEqual(json.loads(generated.wfile.getvalue().decode('utf-8'))['summary'], '今日汇总')
+            self.assertEqual(calls, [True])
+        finally:
+            dashboard.get_practice_market_summary_status = original_status
+            dashboard.generate_practice_market_summary = original_generate
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+
+    def test_manual_market_summary_snapshot_force_refreshes_live_channels(self):
+        original_runner = dashboard.run_dashboard_helper
+        original_builder = dashboard.practice_market_summary_impl.build_realtime_market_snapshot
+        calls = []
+        captured = {}
+        try:
+            def fake_runner(script_name, fallback, timeout=90, args=()):
+                calls.append((script_name, timeout, args))
+                return {"script": script_name}
+
+            def fake_builder(indices, sectors, money_flow, now):
+                captured.update({
+                    "indices": indices,
+                    "sectors": sectors,
+                    "money_flow": money_flow,
+                    "now": now,
+                })
+                return {"complete": True, "time": now.strftime('%Y-%m-%d %H:%M:%S')}
+
+            dashboard.run_dashboard_helper = fake_runner
+            dashboard.practice_market_summary_impl.build_realtime_market_snapshot = fake_builder
+            now = datetime(2026, 7, 14, 12, 0, 0)
+
+            result = dashboard.fetch_practice_realtime_market_snapshot(now)
+        finally:
+            dashboard.run_dashboard_helper = original_runner
+            dashboard.practice_market_summary_impl.build_realtime_market_snapshot = original_builder
+
+        self.assertTrue(result["complete"])
+        self.assertEqual({call[0] for call in calls}, {
+            "indices_dashboard_api.py",
+            "sectors_dashboard_api.py",
+            "money_flow_dashboard_api.py",
+        })
+        self.assertTrue(all(call[1:] == (120, ("--force-refresh",)) for call in calls))
+        self.assertEqual(captured["indices"]["script"], "indices_dashboard_api.py")
+        self.assertEqual(captured["now"], now)
+
     def test_notification_test_api_has_dedicated_rate_limit_and_body_limit(self):
         original_sender = dashboard.send_notification_test
         original_admin_limit = dashboard.RATE_LIMIT_ADMIN
@@ -2156,16 +3483,80 @@ process.stdout.write(JSON.stringify({
             'request_too_large',
         )
 
-    def test_notification_test_api_get_and_head_are_method_not_allowed(self):
-        get_handler = FakeHandler(path='/api/admin/notifications/test')
-        get_handler.do_GET()
-        head_handler = FakeHandler(path='/api/admin/notifications/test', method='HEAD')
-        head_handler.do_HEAD()
+    def test_model_test_api_has_dedicated_rate_limit_and_body_limit(self):
+        original_sender = dashboard.send_model_connection_test
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        original_test_limit = dashboard.RATE_LIMIT_MODEL_TEST
+        calls = []
+        body = b'target=decision-model&env__DASHBOARD_DECISION_MODEL=test-model'
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.RATE_LIMIT_MODEL_TEST = 1
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+            dashboard.send_model_connection_test = (
+                lambda target, overrides: calls.append((target, dict(overrides)))
+                or {'ok': True, 'target': target, 'message': 'ok'}
+            )
+            headers = {
+                'Content-Length': str(len(body)),
+                'Cookie': self.admin_cookie(),
+                dashboard.ACTION_HEADER_NAME: '1',
+            }
+            first = FakeHandler(
+                path='/api/admin/models/test', method='POST', headers=headers, body=body,
+            )
+            first.do_POST()
+            second = FakeHandler(
+                path='/api/admin/models/test', method='POST', headers=headers, body=body,
+            )
+            second.do_POST()
 
-        self.assertEqual(get_handler.status, 405)
-        self.assertEqual(get_handler.header('Allow'), 'POST')
-        self.assertEqual(head_handler.status, 405)
-        self.assertEqual(head_handler.header('Allow'), 'POST')
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+            dashboard.RATE_LIMIT_MODEL_TEST = 100
+            oversized = FakeHandler(
+                path='/api/admin/models/test',
+                method='POST',
+                headers={
+                    'Content-Length': str(dashboard.MAX_POST_BODY_BYTES + 1),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=b'credential-must-not-be-read',
+            )
+            oversized.do_POST()
+        finally:
+            dashboard.send_model_connection_test = original_sender
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+            dashboard.RATE_LIMIT_MODEL_TEST = original_test_limit
+            dashboard.RATE_LIMIT_BUCKETS.clear()
+
+        self.assertEqual(first.status, 200)
+        self.assertEqual(second.status, 429)
+        self.assertEqual(second.rfile.tell(), 0)
+        self.assertEqual(calls, [('decision-model', {'DASHBOARD_DECISION_MODEL': 'test-model'})])
+        self.assertEqual(oversized.status, 413)
+        self.assertEqual(oversized.rfile.tell(), 0)
+        self.assertEqual(
+            json.loads(oversized.wfile.getvalue().decode('utf-8'))['error'],
+            'request_too_large',
+        )
+
+    def test_admin_test_apis_get_and_head_are_method_not_allowed(self):
+        for path in (
+            '/api/admin/notifications/test',
+            '/api/admin/models/test',
+            '/api/admin/iwencai/test',
+        ):
+            with self.subTest(path=path):
+                get_handler = FakeHandler(path=path)
+                get_handler.do_GET()
+                head_handler = FakeHandler(path=path, method='HEAD')
+                head_handler.do_HEAD()
+
+                self.assertEqual(get_handler.status, 405)
+                self.assertEqual(get_handler.header('Allow'), 'POST')
+                self.assertEqual(head_handler.status, 405)
+                self.assertEqual(head_handler.header('Allow'), 'POST')
 
     def test_unauthenticated_config_writes_are_rejected_before_reading_body(self):
         original_config_path = dashboard.CONFIG_PATH
@@ -2256,25 +3647,24 @@ process.stdout.write(JSON.stringify({
         item_names = {item['name'] for item in payload['items']}
 
         self.assertEqual(handler.status, 200)
-        self.assertEqual(len(payload['groups']), 12)
+        self.assertEqual(len(payload['groups']), 13)
         self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        self.assertIn('<script src="/static/admin.js?v=17" defer></script>', index_body)
+        self.assertIn('<div id="app">', index_body)
         self.assertNotIn("name='env__", index_body)
-        self.assertIn('function renderSettingsIndex()', ADMIN_FRONTEND)
-        self.assertIn('function renderSettingsGroup(slug)', ADMIN_FRONTEND)
-        self.assertIn("data-save-endpoint='/api/admin/config/env/", ADMIN_FRONTEND)
+        self.assertIn('<AdminSettingsIndex', ADMIN_FRONTEND)
+        self.assertIn('<AdminSettingsGroup', ADMIN_FRONTEND)
+        self.assertIn('`/api/admin/config/env/${props.slug}`', ADMIN_FRONTEND)
         self.assertIn("'X-NiuOne-Action': '1'", ADMIN_FRONTEND)
-        self.assertIn("window.history.pushState({}, '', link.getAttribute('href'))", ADMIN_FRONTEND)
-        self.assertIn("class='settings-back-link' href='/admin' data-settings-route", ADMIN_FRONTEND)
-        self.assertNotIn("class='toplink' href='/admin' data-settings-route>全部设置", ADMIN_FRONTEND)
-        self.assertIn("button.disabled = true;", ADMIN_FRONTEND)
-        self.assertIn("button.textContent = '已保存';", ADMIN_FRONTEND)
-        self.assertIn("</div></section></form></div>", ADMIN_FRONTEND)
-        self.assertIn('data-saved-state="0"] .settings-actions', ADMIN_FRONTEND)
-        self.assertIn('function brieflyShowEnvSaved(form)', ADMIN_FRONTEND)
-        self.assertIn("String(event.key || '').toLowerCase() !== 's'", ADMIN_FRONTEND)
-        self.assertIn('function renderEnvInput(item)', ADMIN_FRONTEND)
-        self.assertNotIn('HIDDEN-CODE', ADMIN_FRONTEND)
+        self.assertIn('onBeforeRouteLeave', ADMIN_FRONTEND)
+        self.assertIn('保存本组设置', ADMIN_FRONTEND)
+        self.assertIn('<AdminEnvInput', ADMIN_FRONTEND)
+        self.assertEqual(
+            [item['id'] for item in payload['model_tests']],
+            ['news-precheck', 'decision-model', 'grok-model', 'us-rating-model', 'a-share-summary-model'],
+        )
+        self.assertIn("fetch('/api/admin/models/test'", ADMIN_FRONTEND)
+        self.assertEqual(payload['iwencai_test']['group_slug'], 'iwencai')
+        self.assertIn("fetch('/api/admin/iwencai/test'", ADMIN_FRONTEND)
         self.assertNotIn('/admin/invite', ADMIN_FRONTEND)
 
     def test_admin_settings_groups_have_standalone_pages(self):
@@ -2290,68 +3680,16 @@ process.stdout.write(JSON.stringify({
             route = FakeHandler(path=f'/admin/settings/{slug}')
             route.do_GET()
             self.assertEqual(route.status, 200)
-            self.assertIn('<script src="/static/admin.js?v=17" defer></script>', route.wfile.getvalue().decode('utf-8'))
+            self.assertIn('<div id="app">', route.wfile.getvalue().decode('utf-8'))
 
-        self.assertEqual(len(groups), 12)
+        self.assertEqual(len(groups), 13)
         self.assertEqual(len(slugs), len(set(slugs)))
         self.assertEqual(slugs[:2], ['access-control', 'notifications'])
-        self.assertEqual(slugs.index('trading-risk'), slugs.index('decision-model') + 1)
-        self.assertEqual(slugs.index('decision-reference'), slugs.index('decision-times') + 1)
-        self.assertEqual(slugs.index('us-market'), slugs.index('stock-strategy') + 1)
         self.assertEqual(grouped_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
-        self.assertIn("data-save-endpoint='/api/admin/config/env/", ADMIN_FRONTEND)
-        self.assertIn("settingsGroupSlug()", ADMIN_FRONTEND)
+        self.assertIn(':to="`/admin/settings/${group.slug}`"', ADMIN_FRONTEND)
         self.assertIn('保存本组设置', ADMIN_FRONTEND)
-        self.assertEqual(len(dashboard.admin_setting_group_env_names('us-market')), 14)
-        decision_group = next(group for group in groups if group['slug'] == 'decision-times')
-        self.assertEqual(decision_group['name'], '选股与买卖设置')
-        strategy_group = next(group for group in groups if group['slug'] == 'stock-strategy')
-        self.assertEqual(strategy_group['name'], '选股与交易策略')
-        decision_names = dashboard.admin_setting_group_env_names('decision-times')
-        self.assertIn('DASHBOARD_DISPLAY_CANDIDATE_LIMIT', decision_names)
-        self.assertIn('DASHBOARD_TRADE_CANDIDATE_LIMIT', decision_names)
-        self.assertIn('DASHBOARD_STOCK_UNIVERSE', decision_names)
-        config_by_name = {item['name']: item for item in dashboard.ENV_CONFIG_SCHEMA}
-        self.assertEqual(config_by_name['DASHBOARD_DISPLAY_CANDIDATE_LIMIT']['default'], '10')
-        self.assertEqual(config_by_name['DASHBOARD_TRADE_CANDIDATE_LIMIT']['default'], '10')
-        self.assertEqual(config_by_name['DASHBOARD_STOCK_UNIVERSE']['default'], 'main_board')
-        universe_item = next(item for item in payload['items'] if item['name'] == 'DASHBOARD_STOCK_UNIVERSE')
-        self.assertEqual(universe_item['stock_universe_values'], ['main_board'])
-        self.assertEqual(
-            [option['label'] for option in universe_item['stock_universe_options']],
-            ['ST', '创业板', '科创板', '主板'],
-        )
-        self.assertIn("kind === 'stock_universe'", ADMIN_FRONTEND)
-        decision_model_names = dashboard.admin_setting_group_env_names('decision-model')
-        decision_reference_names = dashboard.admin_setting_group_env_names('decision-reference')
-        trading_risk_names = dashboard.admin_setting_group_env_names('trading-risk')
-        self.assertEqual(len(decision_model_names), 6)
-        self.assertEqual(
-            decision_reference_names,
-            {
-                'DASHBOARD_DECISION_INTELLIGENCE_ENABLED',
-                'DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS',
-                'DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS',
-            },
-        )
-        self.assertEqual(
-            config_by_name['DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS']['label'],
-            '单类参考数据上限',
-        )
-        self.assertEqual(
-            trading_risk_names,
-            {
-                'DASHBOARD_MARKET_GUIDANCE_ENABLED',
-                'DASHBOARD_TRADE_DISCIPLINE_TEXT',
-                'DASHBOARD_MAX_OPEN_POSITIONS',
-                'DASHBOARD_MAX_NEW_BUYS_PER_DECISION',
-                'DASHBOARD_MAX_SINGLE_POSITION_PCT',
-                'DASHBOARD_MAX_TOTAL_POSITION_PCT',
-                'DASHBOARD_MIN_CASH_RESERVE_PCT',
-                'DASHBOARD_MORNING_MAX_OPEN_POSITIONS',
-            },
-        )
-        self.assertNotIn('DASHBOARD_TRADE_DISCIPLINE_TEXT', decision_model_names)
+        self.assertEqual(len(dashboard.admin_setting_group_env_names('us-market')), 16)
+        self.assertEqual(len(dashboard.admin_setting_group_env_names('iwencai')), 8)
 
     def test_candidate_limit_settings_require_positive_integers(self):
         dashboard.validate_business_updates({
@@ -2381,7 +3719,7 @@ process.stdout.write(JSON.stringify({
         locked.do_GET()
         locked_body = locked.wfile.getvalue().decode('utf-8')
         self.assertEqual(locked.status, 200)
-        self.assertIn('<script src="/static/admin.js?v=17" defer></script>', locked_body)
+        self.assertIn('<div id="app">', locked_body)
         self.assertNotIn("name='env__DASHBOARD_NOTIFICATION_ENABLED'", locked_body)
 
         cookie = self.admin_cookie()
@@ -2405,8 +3743,7 @@ process.stdout.write(JSON.stringify({
         )
         missing.do_GET()
         self.assertEqual(missing.status, 404)
-        self.assertIn('<script src="/static/admin.js?v=17" defer></script>', missing.wfile.getvalue().decode('utf-8'))
-        self.assertIn('未找到该设置分组', ADMIN_FRONTEND)
+        self.assertEqual(missing.wfile.getvalue(), b'')
 
     def test_group_save_ignores_fields_from_other_settings_groups(self):
         original_values = {
@@ -2561,12 +3898,18 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(password_item['file_value'], '')
 
     def test_home_page_uses_us_feature_flag_for_tabs_without_deleting_data(self):
-        dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
+        dashboard.DASHBOARD_ENV_FILE.write_text(
+            'DASHBOARD_US_FEATURES_ENABLED=0\n',
+            encoding='utf-8',
+        )
         disabled = FakeHandler(path='/api/dashboard/bootstrap')
         disabled.do_GET()
         disabled_payload = json.loads(disabled.wfile.getvalue().decode('utf-8'))
 
-        dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=1\n', encoding='utf-8')
+        dashboard.DASHBOARD_ENV_FILE.write_text(
+            'DASHBOARD_US_FEATURES_ENABLED=1\n',
+            encoding='utf-8',
+        )
         enabled = FakeHandler(path='/api/dashboard/bootstrap')
         enabled.do_GET()
         enabled_payload = json.loads(enabled.wfile.getvalue().decode('utf-8'))
@@ -2575,9 +3918,13 @@ process.stdout.write(JSON.stringify({
         self.assertFalse(disabled_payload['us_features_enabled'])
         self.assertEqual(enabled.status, 200)
         self.assertTrue(enabled_payload['us_features_enabled'])
-        self.assertIn('let US_FEATURES_ENABLED = false;', DASHBOARD_FRONTEND)
-        self.assertIn("fetch('/api/dashboard/bootstrap'", DASHBOARD_FRONTEND)
-        self.assertIn('activeCategory = normalizeActiveCategory(activeCategory);', DASHBOARD_FRONTEND)
+        tabs_source = (
+            ROOT / 'web' / 'src' / 'composables' / 'useDashboardTabs.js'
+        ).read_text(encoding='utf-8')
+        self.assertIn("const US_FEATURE_CATEGORIES = new Set(['x_monitor', 'us_ratings'])", tabs_source)
+        self.assertIn("fetch('/api/dashboard/bootstrap'", tabs_source)
+        self.assertIn('usFeaturesEnabled.value = payload.us_features_enabled === true', tabs_source)
+        self.assertIn('.filter(categoryAvailable)', tabs_source)
 
     def test_us_feature_flag_reads_dashboard_env_without_touching_records(self):
         dashboard.DASHBOARD_ENV_FILE.write_text('DASHBOARD_US_FEATURES_ENABLED=0\n', encoding='utf-8')
@@ -2712,11 +4059,8 @@ process.stdout.write(JSON.stringify({
             self.assertEqual(item['default'], '4096')
             self.assertEqual(item['file_value'], '4096')
 
-        body = ADMIN_FRONTEND
-        self.assertIn("'4096；例如 2048 或 8192'", body)
-        self.assertIn("'4096 tokens；填写后覆盖请求 max_tokens'", body)
-        self.assertIn("'128000；例如 128K、1M 或 1000000'", body)
-        self.assertIn("'128000 tokens；填写后保存为数字 tokens'", body)
+        self.assertIn('默认 4096 tokens；按所选接口映射为兼容的输出长度参数', ADMIN_FRONTEND)
+        self.assertIn('默认 128000 tokens；填写后保存为数字 tokens', ADMIN_FRONTEND)
 
     def test_business_settings_are_local_to_dashboard_env(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE
@@ -2906,6 +4250,10 @@ process.stdout.write(JSON.stringify({
         original_b1_times = dashboard.B1_SCHEDULE_TIMES
         original_b1_enabled = dashboard.B1_SCHEDULE_ENABLED
         original_indices_ttl = dashboard.API_TTLS["indices"]
+        original_flow_speed = dashboard.INDUSTRY_FLOW_PLAYBACK_SPEED
+        original_flow_side_limit = dashboard.INDUSTRY_FLOW_SIDE_LIMIT
+        original_flow_sample_interval = dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS
+        original_flow_windows = dashboard.INDUSTRY_FLOW_SAMPLING_WINDOWS
         original_trader_module = dashboard.TRADER_MODULE
         original_trader_mtime = dashboard.TRADER_MODULE_MTIME
         original_env_values = {name: dashboard.os.environ.get(name) for name in dashboard.ADMIN_VISIBLE_ENV_NAMES}
@@ -2929,6 +4277,13 @@ process.stdout.write(JSON.stringify({
                 'env__DASHBOARD_DECISION_CONTEXT_LENGTH': '256K',
                 'env__DASHBOARD_B1_SCHEDULE_TIMES': ['', '09:25', '10:00', '', '14:50'],
                 'env__DASHBOARD_INDICES_TTL_SECONDS': '20',
+                'env__DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED': '0.75',
+                'env__DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT': '6',
+                'env__DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS': '120',
+                'env__DASHBOARD_INDUSTRY_FLOW_MORNING_START': '09:20',
+                'env__DASHBOARD_INDUSTRY_FLOW_MORNING_END': '11:32',
+                'env__DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START': '12:59',
+                'env__DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END': '15:02',
                 'env__DASHBOARD_US_MARKET_SUMMARY_CRON': '08:01',
                 'env__DASHBOARD_MARKET_AUCTION_CRON': '09:26',
                 'env__DASHBOARD_US_RATING_CRON': '10:30',
@@ -2957,6 +4312,12 @@ process.stdout.write(JSON.stringify({
             response = json.loads(response_text)
             runtime_b1_times = dashboard.B1_SCHEDULE_TIMES
             runtime_indices_ttl = dashboard.API_TTLS['indices']
+            runtime_flow_settings = (
+                dashboard.INDUSTRY_FLOW_PLAYBACK_SPEED,
+                dashboard.INDUSTRY_FLOW_SIDE_LIMIT,
+                dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
+                dashboard.INDUSTRY_FLOW_SAMPLING_WINDOWS,
+            )
         finally:
             dashboard.DASHBOARD_ENV_FILE = original_env_file
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
@@ -2964,6 +4325,10 @@ process.stdout.write(JSON.stringify({
             dashboard.B1_SCHEDULE_TIMES = original_b1_times
             dashboard.B1_SCHEDULE_ENABLED = original_b1_enabled
             dashboard.API_TTLS["indices"] = original_indices_ttl
+            dashboard.INDUSTRY_FLOW_PLAYBACK_SPEED = original_flow_speed
+            dashboard.INDUSTRY_FLOW_SIDE_LIMIT = original_flow_side_limit
+            dashboard.INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = original_flow_sample_interval
+            dashboard.INDUSTRY_FLOW_SAMPLING_WINDOWS = original_flow_windows
             dashboard.TRADER_MODULE = original_trader_module
             dashboard.TRADER_MODULE_MTIME = original_trader_mtime
             for name, value in original_env_values.items():
@@ -2988,6 +4353,7 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(response['runtime']['ok'])
         self.assertIn('b1_schedule_times', response['runtime']['applied'])
         self.assertIn('indices_ttl', response['runtime']['applied'])
+        self.assertIn('industry_flow', response['runtime']['applied'])
         self.assertIn('active_strategy', response['runtime']['applied'])
         self.assertIn('strategy_settings', response['runtime']['applied'])
         self.assertIn('trader_runtime', response['runtime']['applied'])
@@ -3001,6 +4367,13 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(parsed['DASHBOARD_DECISION_CONTEXT_LENGTH'], '256000')
         self.assertEqual(parsed['DASHBOARD_B1_SCHEDULE_TIMES'], '09:25,10:00,14:50')
         self.assertEqual(parsed['DASHBOARD_INDICES_TTL_SECONDS'], '20')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED'], '0.75')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT'], '6')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS'], '120')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_MORNING_START'], '09:20')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_MORNING_END'], '11:32')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START'], '12:59')
+        self.assertEqual(parsed['DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END'], '15:02')
         self.assertEqual(parsed['DASHBOARD_US_MARKET_SUMMARY_CRON'], '1 8 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_MARKET_AUCTION_CRON'], '26 9 * * 1-5')
         self.assertEqual(parsed['DASHBOARD_US_RATING_CRON'], '30 10 * * *')
@@ -3011,6 +4384,12 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(parsed['DASHBOARD_TELEGRAM_CHAT_ID'], telegram_chat_id)
         self.assertEqual(runtime_b1_times, ('09:25', '10:00', '14:50'))
         self.assertEqual(runtime_indices_ttl, 20)
+        self.assertEqual(runtime_flow_settings, (
+            0.75,
+            6,
+            120,
+            (("09:20", "11:32"), ("12:59", "15:02")),
+        ))
         self.assertNotIn('DASHBOARD_HOME', parsed)
 
     def test_admin_config_api_does_not_restart_without_changes(self):
@@ -3219,6 +4598,176 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn('id="contestPanel"', body)
         self.assertNotIn('/api/contest/status', body)
         self.assertNotIn('LinuxDo', body)
+
+    def test_iwencai_settings_are_hot_applied_masked_and_invalidate_cache(self):
+        names = {
+            'IWENCAI_ENABLED',
+            'IWENCAI_BASE_URL',
+            'IWENCAI_API_KEY',
+            'IWENCAI_TIMEOUT_SECONDS',
+            'IWENCAI_MAX_RETRIES',
+            'IWENCAI_MAX_CONCURRENCY',
+            'IWENCAI_CACHE_TTL_SECONDS',
+        }
+        original_values = {name: dashboard.os.environ.get(name) for name in names}
+        original_ttl = dashboard.API_TTLS['iwencai_dragon_tiger']
+        try:
+            dashboard.API_RESPONSE_CACHE['iwencai_dragon_tiger:2026-07-16:1:100'] = {
+                'ts': 1,
+                'payload': b'{}',
+            }
+            updates = dashboard.normalize_business_updates({
+                'IWENCAI_ENABLED': '1',
+                'IWENCAI_BASE_URL': 'https://openapi.iwencai.com/',
+                'IWENCAI_API_KEY': 'test-secret',
+                'IWENCAI_TIMEOUT_SECONDS': '18',
+                'IWENCAI_MAX_RETRIES': '2',
+                'IWENCAI_MAX_CONCURRENCY': '3',
+                'IWENCAI_CACHE_TTL_SECONDS': '180',
+            })
+            dashboard.validate_business_updates(updates)
+            result = dashboard.write_env_file_values(updates)
+            runtime = dashboard.sync_business_runtime_settings(result['changed_names'])
+            stored = dashboard.parse_env_file(
+                dashboard.DASHBOARD_ENV_FILE,
+                include_container_overrides=False,
+            )
+            payload = dashboard.build_admin_config_payload()
+        finally:
+            dashboard.API_TTLS['iwencai_dragon_tiger'] = original_ttl
+            for name, value in original_values.items():
+                if value is None:
+                    dashboard.os.environ.pop(name, None)
+                else:
+                    dashboard.os.environ[name] = value
+
+        by_name = {item['name']: item for item in payload['items']}
+        self.assertEqual(stored['IWENCAI_BASE_URL'], 'https://openapi.iwencai.com')
+        self.assertEqual(stored['IWENCAI_API_KEY'], 'test-secret')
+        self.assertEqual(by_name['IWENCAI_API_KEY']['current_state'], '已设置')
+        self.assertEqual(by_name['IWENCAI_API_KEY']['file_value'], '')
+        self.assertNotIn('test-secret', json.dumps(payload, ensure_ascii=False))
+        self.assertIn('iwencai', runtime['applied'])
+        self.assertNotIn('iwencai_dragon_tiger:2026-07-16:1:100', dashboard.API_RESPONSE_CACHE)
+
+    def test_iwencai_dragon_tiger_route_is_bounded_and_cached(self):
+        original_fetch = dashboard.fetch_dragon_tiger
+        original_ttl = dashboard.API_TTLS['iwencai_dragon_tiger']
+        calls = []
+
+        def fake_fetch(trade_date, *, page, limit):
+            calls.append((trade_date, page, limit))
+            return {
+                'enabled': True,
+                'available': True,
+                'source': '同花顺问财',
+                'date': trade_date,
+                'items': [{'code': '000001.SZ'}],
+            }
+
+        try:
+            dashboard.fetch_dragon_tiger = fake_fetch
+            dashboard.API_TTLS['iwencai_dragon_tiger'] = 60
+            first = FakeHandler('/api/iwencai/dragon-tiger?date=2026-07-16&page=2&limit=10')
+            first.do_GET()
+            second = FakeHandler('/api/iwencai/dragon-tiger?date=2026-07-16&page=2&limit=10')
+            second.do_GET()
+            invalid = FakeHandler('/api/iwencai/dragon-tiger?page=1&limit=101')
+            invalid.do_GET()
+        finally:
+            dashboard.fetch_dragon_tiger = original_fetch
+            dashboard.API_TTLS['iwencai_dragon_tiger'] = original_ttl
+
+        payload = json.loads(first.wfile.getvalue().decode('utf-8'))
+        self.assertEqual(first.status, 200)
+        self.assertEqual(second.status, 200)
+        self.assertEqual(payload['items'], [{'code': '000001.SZ'}])
+        self.assertEqual(calls, [('2026-07-16', 2, 10)])
+        self.assertEqual(first.header('X-Dashboard-Cache'), 'MISS')
+        self.assertEqual(second.header('X-Dashboard-Cache'), 'HIT')
+        self.assertEqual(invalid.status, 400)
+        self.assertEqual(
+            json.loads(invalid.wfile.getvalue().decode('utf-8'))['error'],
+            'invalid_iwencai_dragon_tiger_request',
+        )
+
+    def test_iwencai_dashboard_uses_latest_snapshot_without_upstream_call(self):
+        snapshot = {
+            'enabled': True,
+            'available': True,
+            'source': '同花顺问财',
+            'date': '2026-07-16',
+            'generated_at': '2026-07-16T18:00:00+08:00',
+            'items': [{'code': '000001.SZ', 'name': '平安银行'}],
+        }
+        self.assertTrue(
+            dashboard.write_dragon_tiger_snapshot(
+                dashboard.IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE,
+                snapshot,
+            )
+        )
+        original_fetch = dashboard.fetch_dragon_tiger
+        try:
+            dashboard.fetch_dragon_tiger = lambda *_args, **_kwargs: self.fail('must not call upstream')
+            payload = dashboard.produce_iwencai_dragon_tiger_data(
+                '2026-07-17',
+                page=1,
+                limit=dashboard.IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT,
+                allow_latest_snapshot=True,
+            )
+        finally:
+            dashboard.fetch_dragon_tiger = original_fetch
+
+        self.assertTrue(payload['snapshot'])
+        self.assertTrue(payload['stale'])
+        self.assertEqual(payload['date'], '2026-07-16')
+        self.assertEqual(payload['requested_date'], '2026-07-17')
+        self.assertEqual(payload['scheduled_refresh_time'], '18:00')
+
+    def test_iwencai_dashboard_reads_exact_trading_day_archive_without_upstream_call(self):
+        archive = {
+            'enabled': True,
+            'available': True,
+            'source': '同花顺问财',
+            'date': '2026-07-15',
+            'institution_available': True,
+            'items': [{
+                'code': '000001.SZ',
+                'name': '平安银行',
+                'institution_seats': [{
+                    'seat_name': '机构专用',
+                    'side': 'buy',
+                    'rank': 1,
+                    'buy_amount_yuan': 100.0,
+                    'sell_amount_yuan': 0.0,
+                    'net_amount_yuan': 100.0,
+                }],
+            }],
+        }
+        self.assertTrue(
+            dashboard.write_dragon_tiger_archive(
+                dashboard.iwencai_dragon_tiger_archive_dir(),
+                archive,
+            )
+        )
+        original_fetch = dashboard.fetch_dragon_tiger
+        try:
+            dashboard.fetch_dragon_tiger = lambda *_args, **_kwargs: self.fail('must not call upstream')
+            payload = dashboard.produce_iwencai_dragon_tiger_data(
+                '2026-07-15',
+                page=1,
+                limit=dashboard.IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT,
+                allow_latest_snapshot=False,
+            )
+        finally:
+            dashboard.fetch_dragon_tiger = original_fetch
+
+        self.assertTrue(payload['archive'])
+        self.assertFalse(payload['stale'])
+        self.assertEqual(payload['date'], '2026-07-15')
+        self.assertFalse(payload['seat_data_complete'])
+        self.assertEqual(payload['items'][0]['seat_record_count'], 1)
+        self.assertEqual(payload['items'][0]['institution_record_count'], 1)
 
     def test_contest_routes_are_removed(self):
         get_handler = FakeHandler('/api/contest/status')

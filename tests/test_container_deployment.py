@@ -14,13 +14,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ContainerDeploymentTests(unittest.TestCase):
-    def test_image_packages_native_frontend_assets(self):
+    def test_runtime_requirements_include_fastapi_test_client_transport(self):
+        requirements = {
+            line.strip()
+            for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertIn("httpx2>=2.0.0", requirements)
+
+    def test_image_builds_vue_assets_and_packages_the_fastapi_runtime(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+        self.assertIn("FROM node:24-bookworm-slim AS web-builder", dockerfile)
+        self.assertIn("pnpm install --frozen-lockfile", dockerfile)
+        self.assertIn("RUN pnpm run build", dockerfile)
         self.assertIn("COPY app/ ./app/", dockerfile)
         self.assertIn("COPY frontend/ ./frontend/", dockerfile)
+        self.assertIn("COPY --from=web-builder /build/web/dist ./web/dist", dockerfile)
         self.assertIn("!frontend/", dockerignore)
         self.assertIn("!frontend/**", dockerignore)
+        self.assertIn("!web/package.json", dockerignore)
+        self.assertIn("!web/pnpm-lock.yaml", dockerignore)
+        self.assertIn("!web/src/**", dockerignore)
+        self.assertIn("ARG NIUONE_VERSION=dev", dockerfile)
+        self.assertIn("NIUONE_VERSION=${NIUONE_VERSION}", dockerfile)
 
     def test_compose_runs_all_long_lived_processes_with_shared_storage(self):
         config = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
@@ -115,6 +132,9 @@ print(json.dumps(result))
         text = path.read_text(encoding="utf-8")
         workflow = yaml.load(text, Loader=yaml.BaseLoader)
         self.assertEqual(workflow["on"]["push"]["tags"], ["v*.*.*"])
+        dispatch_input = workflow["on"]["workflow_dispatch"]["inputs"]["release_tag"]
+        self.assertEqual(dispatch_input["required"], "true")
+        self.assertEqual(dispatch_input["type"], "string")
         self.assertEqual(workflow["permissions"]["contents"], "read")
         uses = [step["uses"] for step in workflow["jobs"]["publish"]["steps"] if "uses" in step]
         for action in uses:
@@ -124,6 +144,34 @@ print(json.dumps(result))
         self.assertIn('DOCKERHUB_USERNAME" != "kunkundi', text)
         self.assertIn("linux/amd64,linux/arm64", text)
         self.assertIn("docker.io/${{ vars.DOCKERHUB_USERNAME }}/niuone", text)
+        self.assertEqual(text.count("NIUONE_VERSION=${{ steps.release.outputs.tag }}"), 2)
+
+    def test_manual_release_checks_out_and_verifies_the_existing_tag(self):
+        path = ROOT / ".github" / "workflows" / "docker-publish.yml"
+        workflow = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        steps = workflow["jobs"]["publish"]["steps"]
+        checkout = next(step for step in steps if step["name"] == "Check out release source")
+        verification = next(
+            step for step in steps if step["name"] == "Verify release tag and commit"
+        )
+        self.assertIn("format('refs/tags/{0}', inputs.release_tag)", checkout["with"]["ref"])
+        self.assertIn(
+            'release_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"',
+            verification["run"],
+        )
+        self.assertIn('checked_out_commit="$(git rev-parse HEAD)"', verification["run"])
+        self.assertIn('echo "tag=$RELEASE_TAG"', verification["run"])
+
+    def test_release_smoke_test_waits_for_public_snapshot(self):
+        path = ROOT / ".github" / "workflows" / "docker-publish.yml"
+        workflow = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        steps = workflow["jobs"]["publish"]["steps"]
+        smoke_test = next(
+            step["run"] for step in steps if step.get("name") == "Smoke test container"
+        )
+        retry_loop = smoke_test.split("for _ in {1..120}; do", 1)[1].split("done", 1)[0]
+        self.assertIn("/healthz", retry_loop)
+        self.assertIn("/api/v2/public/latest", retry_loop)
 
 
 if __name__ == "__main__":

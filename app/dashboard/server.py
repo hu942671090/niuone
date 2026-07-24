@@ -4,37 +4,76 @@
 from __future__ import annotations
 
 import argparse
-import gzip
-import hashlib
-import hmac
 import ipaddress
 import json
 import os
 import re
 import secrets
 import shlex
-import sqlite3
 import time
 import subprocess
 import sys
 import threading
-from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-class ReusableThreadingHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-    request_queue_size = 128
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 import urllib.request
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
+from dashboard_json_cache import read_json_cache, write_json_cache
 from dashboard import practice_payload as practice_payload_impl
+from dashboard import practice_market_summary as practice_market_summary_impl
+from dashboard import response_cache as response_cache_impl
 from dashboard import security as security_impl
+from dashboard import visit_stats as visit_stats_impl
+from dashboard.iwencai_connectivity import (
+    IWENCAI_TEST_FIELD_NAMES,
+    iwencai_test_metadata,
+    test_iwencai_connection,
+)
+from dashboard.model_connectivity import (
+    MODEL_TEST_TARGET_BY_ID,
+    model_test_metadata,
+    model_test_override_names,
+    model_test_setting_names,
+    test_model_connection,
+)
+from dashboard.apis.iwencai_service import (
+    DEFAULT_LIMIT as IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT,
+    dragon_tiger_archive_path,
+    fetch_dragon_tiger,
+    normalize_limit as normalize_iwencai_limit,
+    normalize_page as normalize_iwencai_page,
+    normalize_trade_date as normalize_iwencai_trade_date,
+    read_dragon_tiger_archive,
+    read_dragon_tiger_snapshot,
+    write_dragon_tiger_archive,
+    write_dragon_tiger_snapshot,
+)
+from dashboard.apis.industry_flow import (
+    DEFAULT_PLAYBACK_SPEED as INDUSTRY_FLOW_DEFAULT_PLAYBACK_SPEED,
+    DEFAULT_SAMPLE_INTERVAL_SECONDS as INDUSTRY_FLOW_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+    DEFAULT_SIDE_LIMIT as INDUSTRY_FLOW_DEFAULT_SIDE_LIMIT,
+    SAMPLING_WINDOWS as INDUSTRY_FLOW_DEFAULT_SAMPLING_WINDOWS,
+    append_industry_flow_sample,
+    build_industry_flow_payload,
+    is_industry_flow_session_timestamp,
+    normalize_industry_flow_sampling_windows,
+)
+from dashboard.apis.market_breadth import (
+    DEFAULT_SAMPLE_INTERVAL_SECONDS as MARKET_BREADTH_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+    append_market_breadth_sample,
+    build_market_breadth_payload,
+    compact_market_breadth_sample,
+    is_market_breadth_session_timestamp,
+)
+from market_data.iwencai_client import (
+    DEFAULT_BASE_URL as IWENCAI_DEFAULT_BASE_URL,
+    normalize_base_url as normalize_iwencai_base_url,
+)
+from market_data.tencent_market_breadth import fetch_tencent_market_breadth
 from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
 from screening.stock_universe import (
@@ -79,28 +118,40 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 ENTRYPOINT_DIR = SCRIPT_DIR / "entrypoints"
 COMPAT_DIR = SCRIPT_DIR / "compat"
-FRONTEND_DIR = PROJECT_ROOT / "frontend"
-FRONTEND_ASSETS = {
-    "/static/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
-    "/static/dashboard.js": ("dashboard.js", "application/javascript; charset=utf-8"),
-    "/static/admin.css": ("admin.css", "text/css; charset=utf-8"),
-    "/static/admin.js": ("admin.js", "application/javascript; charset=utf-8"),
-}
-DASHBOARD_PAGE_PATHS = frozenset({
-    "/",
-    "/practice",
-    "/indices",
-    "/market-monitor",
-    "/x-monitor",
-    "/us-ratings",
-})
+VERSION_PATTERN = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+CURRENT_VERSION = str(os.environ.get("NIUONE_VERSION") or "dev").strip() or "dev"
+DOCKER_HUB_REPOSITORY = "kunkundi/niuone"
+DOCKER_HUB_REPOSITORY_URL = f"https://hub.docker.com/r/{DOCKER_HUB_REPOSITORY}"
+DOCKER_HUB_TAGS_API = (
+    "https://hub.docker.com/v2/namespaces/kunkundi/repositories/niuone/tags"
+)
+VERSION_CHECK_TTL_SECONDS = 15 * 60
+VERSION_CHECK_FAILURE_TTL_SECONDS = 5 * 60
+VERSION_CHECK_MAX_PAGES = 20
+VERSION_CHECK_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+VERSION_CHECK_CACHE: dict[str, Any] = {"ts": 0.0, "ttl": 0, "payload": None}
+VERSION_CHECK_LOCK = threading.Lock()
 LOCAL_DATA_DIR = get_local_data_dir(PROJECT_ROOT)
 DASHBOARD_HOME = get_dashboard_home(PROJECT_ROOT)
+PUBLIC_DATA_DIR = Path(
+    os.environ.get("DASHBOARD_PUBLIC_DATA_DIR") or DASHBOARD_HOME / "public-data"
+).expanduser()
+PUBLIC_SNAPSHOT_PUBLISHER: Any = None
 CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG") or str(DASHBOARD_HOME / "config.yaml")).expanduser()
 DASHBOARD_ENV_FILE = get_dashboard_env_file(PROJECT_ROOT)
 CRON_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 CRON_STATE_DIR = DASHBOARD_HOME / "cron" / "state"
+INDICES_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "indices_dashboard_cache.json"
+IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = Path(
+    os.environ.get("IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE")
+    or CRON_OUTPUT_DIR / "iwencai_dragon_tiger_latest.json"
+).expanduser()
 B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
+MONEY_FLOW_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "industry_main_money_flow_cache.json"
+# Main-net samples use a new history file so legacy total-flow observations
+# remain recoverable but can never be replayed under the new metric label.
+INDUSTRY_FLOW_HISTORY_FILE = CRON_OUTPUT_DIR / "industry_main_flow_history.json"
+MARKET_BREADTH_HISTORY_FILE = CRON_OUTPUT_DIR / "market_breadth_history.json"
 STATS_DB = DASHBOARD_HOME / "dashboard_stats.db"
 LEGACY_STATS_DB = DASHBOARD_HOME / "dashboard_users.db"
 LEGACY_STATS_MIGRATION_KEY = "dashboard_users_visit_stats_v1"
@@ -111,6 +162,59 @@ ACTION_HEADER_NAME = "X-NiuOne-Action"
 ACTION_HEADER_VALUES = {"1", "true", "yes", "on"}
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 US_FEATURE_CATEGORIES = {"x_monitor", "us_ratings"}
+INDUSTRY_FLOW_PLAYBACK_SPEED_OPTIONS = (0.5, 0.75, 1.0, 1.5, 2.0)
+INDUSTRY_FLOW_WINDOW_CONFIG_NAMES = (
+    "DASHBOARD_INDUSTRY_FLOW_MORNING_START",
+    "DASHBOARD_INDUSTRY_FLOW_MORNING_END",
+    "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START",
+    "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END",
+)
+
+
+def _bounded_int_value(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _industry_flow_playback_speed_value(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return INDUSTRY_FLOW_DEFAULT_PLAYBACK_SPEED
+    return parsed if parsed in INDUSTRY_FLOW_PLAYBACK_SPEED_OPTIONS else INDUSTRY_FLOW_DEFAULT_PLAYBACK_SPEED
+
+
+def _industry_flow_sampling_windows_value(
+    values: dict[str, Any],
+    *,
+    fallback: tuple[tuple[str, str], tuple[str, str]] = INDUSTRY_FLOW_DEFAULT_SAMPLING_WINDOWS,
+    strict: bool = False,
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    defaults = {
+        INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[0]: fallback[0][0],
+        INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[1]: fallback[0][1],
+        INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[2]: fallback[1][0],
+        INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[3]: fallback[1][1],
+    }
+    resolved = {
+        name: str(values.get(name) or default).strip()
+        for name, default in defaults.items()
+    }
+    windows = (
+        (resolved[INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[0]], resolved[INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[1]]),
+        (resolved[INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[2]], resolved[INDUSTRY_FLOW_WINDOW_CONFIG_NAMES[3]]),
+    )
+    try:
+        return normalize_industry_flow_sampling_windows(windows)
+    except ValueError:
+        if strict:
+            raise
+        return fallback
+
+
 NIUONE_LAUNCHD_LABELS = (
     "ai.niuone.cron-scheduler",
     "ai.niuone.x-watchlist",
@@ -125,14 +229,6 @@ TRUSTED_PROXY_CIDRS = tuple(
     if value.strip()
 )
 MAX_POST_BODY_BYTES = int(os.environ.get("DASHBOARD_MAX_POST_BODY_BYTES", str(256 * 1024)) or str(256 * 1024))
-GZIP_MIN_BYTES = int(os.environ.get("DASHBOARD_GZIP_MIN_BYTES", "1024") or "1024")
-GZIP_CONTENT_TYPE_PREFIXES = (
-    "application/json",
-    "application/javascript",
-    "text/css",
-    "text/html",
-    "text/plain",
-)
 B1_CACHE_MAX_AGE = 720
 B1_SCAN_TIMEOUT_SECONDS = int(os.environ.get("DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "360") or "360")
 B1_SCHEDULE_TIMES = tuple(
@@ -152,7 +248,34 @@ B1_SCHEDULE_LOCK = threading.RLock()
 B1_SCHEDULE_THREAD: threading.Thread | None = None
 PENDING_DECISION_THREAD: threading.Thread | None = None
 PENDING_DECISION_POLL_SECONDS = float(os.environ.get("DASHBOARD_PENDING_DECISION_POLL_SECONDS", "5") or "5")
+PRACTICE_EQUITY_HEARTBEAT_LOCK = threading.Lock()
+PRACTICE_EQUITY_HEARTBEAT_THREAD: threading.Thread | None = None
+PRACTICE_EQUITY_HEARTBEAT_POLL_SECONDS = 5.0
+INDUSTRY_FLOW_HISTORY_LOCK = threading.RLock()
+INDUSTRY_FLOW_SAMPLER_THREAD: threading.Thread | None = None
+MARKET_BREADTH_HISTORY_LOCK = threading.RLock()
+MARKET_BREADTH_REFRESH_LOCK = threading.Lock()
+MARKET_BREADTH_SAMPLER_THREAD: threading.Thread | None = None
+DAILY_MARKET_HISTORY_RESET_THREAD: threading.Thread | None = None
+MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS = MARKET_BREADTH_DEFAULT_SAMPLE_INTERVAL_SECONDS
+INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = _bounded_int_value(
+    os.environ.get("DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS"),
+    INDUSTRY_FLOW_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+    60,
+    600,
+)
+INDUSTRY_FLOW_SIDE_LIMIT = _bounded_int_value(
+    os.environ.get("DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT"),
+    INDUSTRY_FLOW_DEFAULT_SIDE_LIMIT,
+    1,
+    10,
+)
+INDUSTRY_FLOW_PLAYBACK_SPEED = _industry_flow_playback_speed_value(
+    os.environ.get("DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED")
+)
+INDUSTRY_FLOW_SAMPLING_WINDOWS = _industry_flow_sampling_windows_value(os.environ)
 B1_CANDIDATE_REFRESH_LOCK = threading.Lock()
+B1_FULL_SCAN_LOCK = threading.Lock()
 B1_CANDIDATE_REFRESH_MIN_SECONDS = float(os.environ.get("DASHBOARD_B1_CANDIDATE_REFRESH_MIN_SECONDS", "0") or "0")
 B1_CANDIDATE_REFRESH_LAST_TS = 0.0
 MULTI_STRATEGY_CACHE_FILE = CRON_OUTPUT_DIR / "multi_strategy_latest.json"
@@ -167,6 +290,10 @@ TRADER_MODULE_LOCK = threading.Lock()
 PRACTICE_DECISION_KEYS: set[str] = set()
 PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
 PRACTICE_MANUAL_CYCLE_STATE_LOCK = threading.RLock()
+PRACTICE_MANUAL_SCAN_REUSE_SECONDS = max(
+    0,
+    int(os.environ.get("DASHBOARD_MANUAL_SCAN_REUSE_SECONDS", "0") or "0"),
+)
 PRACTICE_MANUAL_CYCLE_STATE: dict[str, Any] = {
     "running": False,
     "stage": "idle",
@@ -174,6 +301,17 @@ PRACTICE_MANUAL_CYCLE_STATE: dict[str, Any] = {
     "finished_at": "",
     "error": "",
 }
+PRACTICE_MANUAL_CYCLE_PUBLIC_FIELDS = (
+    "running",
+    "stage",
+    "stage_label",
+    "started_at",
+    "finished_at",
+    "generated_at",
+    "candidate_count",
+    "manual_scan_reused",
+    "error",
+)
 BENCHMARK_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 BENCHMARK_TTL_SECONDS = 20
 CN_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -188,8 +326,6 @@ API_CACHE_MAX_ENTRIES = int(os.environ.get("DASHBOARD_API_CACHE_MAX_ENTRIES", "2
 API_STALE_WHILE_REFRESH_SECONDS = int(
     os.environ.get("DASHBOARD_API_STALE_WHILE_REFRESH_SECONDS", "300") or "300"
 )
-FRONTEND_FILE_CACHE: dict[str, dict[str, Any]] = {}
-FRONTEND_FILE_CACHE_LOCK = threading.RLock()
 X_MEDIA_CACHE: dict[str, dict[str, Any]] = {}
 X_MEDIA_CACHE_LOCK = threading.RLock()
 X_MEDIA_CACHE_MAX_ENTRIES = int(os.environ.get("DASHBOARD_X_MEDIA_CACHE_MAX_ENTRIES", "96") or "96")
@@ -207,6 +343,16 @@ RATE_LIMIT_API = int(os.environ.get("DASHBOARD_RATE_LIMIT_API", "900") or "900")
 RATE_LIMIT_ADMIN = int(os.environ.get("DASHBOARD_RATE_LIMIT_ADMIN", "90") or "90")
 RATE_LIMIT_ADMIN_LOGIN = int(os.environ.get("DASHBOARD_RATE_LIMIT_ADMIN_LOGIN", "10") or "10")
 RATE_LIMIT_NOTIFICATION_TEST = int(os.environ.get("DASHBOARD_NOTIFICATION_TEST_RATE_LIMIT", "10") or "10")
+RATE_LIMIT_MODEL_TEST = int(os.environ.get("DASHBOARD_MODEL_TEST_RATE_LIMIT", "10") or "10")
+RATE_LIMIT_IWENCAI_TEST = int(os.environ.get("DASHBOARD_IWENCAI_TEST_RATE_LIMIT", "10") or "10")
+MODEL_TEST_TIMEOUT_SECONDS = max(
+    5,
+    min(30, int(os.environ.get("DASHBOARD_MODEL_TEST_TIMEOUT_SECONDS", "20") or "20")),
+)
+MODEL_TEST_MAX_CONCURRENCY = 2
+MODEL_TEST_SEMAPHORE = threading.BoundedSemaphore(MODEL_TEST_MAX_CONCURRENCY)
+IWENCAI_TEST_MAX_CONCURRENCY = 2
+IWENCAI_TEST_SEMAPHORE = threading.BoundedSemaphore(IWENCAI_TEST_MAX_CONCURRENCY)
 RATE_LIMIT_BUCKETS: dict[tuple[str, str], tuple[float, int]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
 ADMIN_TOKEN_LOCK = threading.Lock()
@@ -217,6 +363,8 @@ PRACTICE_CANDIDATES_CACHE_KEY = "practice_candidates"
 PRACTICE_CANDIDATES_API_PATHS = frozenset({"/api/practice_candidates", "/api/b1_screen"})
 PRACTICE_CANDIDATES_REFRESH_API_PATHS = frozenset({"/api/practice_candidates/refresh", "/api/b1_screen/trigger"})
 PRACTICE_MANUAL_CYCLE_API_PATH = "/api/niuniu_practice/manual-cycle"
+PRACTICE_MARKET_SUMMARY_API_PATH = "/api/niuniu_practice/market-summary"
+PRACTICE_MARKET_SUMMARY_FILE = CRON_OUTPUT_DIR / "practice_market_summary_latest.json"
 API_TTLS = {
     "messages": 10,
     "practice_candidates": int(
@@ -227,14 +375,17 @@ API_TTLS = {
     "niuniu_practice": int(os.environ.get("DASHBOARD_PRACTICE_TTL_SECONDS", "15") or "15"),
     "practice_benchmarks": 30,
     "indices": int(os.environ.get("DASHBOARD_INDICES_TTL_SECONDS", "60") or "60"),
+    "market_breadth": MARKET_BREADTH_DEFAULT_SAMPLE_INTERVAL_SECONDS,
     "sectors": 60,
     "us_sectors": int(os.environ.get("DASHBOARD_US_SECTORS_TTL_SECONDS", "300") or "300"),
     "hot_stocks": 60,
     "money_flow": 60,
+    "industry_flow": 30,
     "market_flow": 30,
     "us_quotes": 30,
     "us_profiles": int(os.environ.get("DASHBOARD_US_PROFILES_TTL_SECONDS", "86400") or "86400"),
     "us_market_summary": int(os.environ.get("DASHBOARD_US_MARKET_SUMMARY_TTL_SECONDS", "300") or "300"),
+    "iwencai_dragon_tiger": int(os.environ.get("IWENCAI_CACHE_TTL_SECONDS", "300") or "300"),
 }
 PRACTICE_FAST_CACHE_KEY = "niuniu_practice_fast:v2"
 CALENDAR_HISTORY_SCHEMA_VERSION = 1
@@ -263,6 +414,8 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_CN_STOCK_TOOLS", "label": "A股行情工具脚本", "group": "基础路径", "kind": "path", "default": str(ENTRYPOINT_DIR / "cn_stock_tools.py"), "effect": "restart"},
     {"name": "DASHBOARD_CRON_JOBS", "label": "Cron jobs JSON", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "jobs.json"), "effect": "next_run"},
     {"name": "DASHBOARD_X_WATCHLIST_STATE", "label": "X 监控状态文件", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "cron" / "state" / "x_watchlist_latest.json"), "effect": "next_run"},
+    {"name": "DASHBOARD_PUBLIC_DATA_DIR", "label": "公开快照目录", "group": "基础路径", "kind": "path", "default": str(DASHBOARD_HOME / "public-data"), "effect": "restart"},
+    {"name": "DASHBOARD_PUBLIC_PROJECTION_ENABLED", "label": "公开增量快照", "group": "基础路径", "kind": "bool", "default": "1", "effect": "restart"},
 
     {"name": "DASHBOARD_ADMIN_PASSWORD", "label": "设置页管理员密码", "group": "访问控制", "kind": "secret", "default": "", "effect": "runtime"},
     {"name": "DASHBOARD_EDGE_CACHE_ENABLED", "label": "允许 CDN 缓存 API", "group": "访问控制", "kind": "bool", "default": "0", "effect": "restart"},
@@ -278,6 +431,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_MEDIA_CACHE_MAX_ENTRIES", "label": "X 图片缓存条目上限", "group": "限流与缓存", "kind": "int", "default": "96", "effect": "restart"},
     {"name": "DASHBOARD_X_MEDIA_CACHE_TTL_SECONDS", "label": "X 图片缓存 TTL 秒数", "group": "限流与缓存", "kind": "int", "default": str(7 * 24 * 3600), "effect": "restart"},
     {"name": "DASHBOARD_X_MEDIA_MAX_BYTES", "label": "X 图片代理最大字节", "group": "限流与缓存", "kind": "int", "default": str(8 * 1024 * 1024), "effect": "restart"},
+    {"name": "DASHBOARD_PUBLIC_REFRESH_SECONDS", "label": "公开快照刷新秒数", "group": "行情与资金流设置", "kind": "int", "default": "15", "effect": "restart"},
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时选股", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股与买卖设置", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
@@ -289,6 +443,8 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": ACTIVE_STRATEGY_ENV, "label": "当前独立策略", "group": "选股与交易策略", "kind": "strategy_suite", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},
     {"name": PRESET_STRATEGY_TEXT_ENV, "label": "预设文字策略", "group": "选股与交易策略", "kind": "preset_strategy_text", "default": "", "effect": "runtime"},
     {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "实战选股扫描超时秒数", "group": "任务调度", "kind": "int", "default": "360", "effect": "restart"},
+    {"name": "DASHBOARD_B1_SCAN_WORKERS", "label": "实战选股并发数", "group": "任务调度", "kind": "int", "default": "6", "effect": "restart"},
+    {"name": "DASHBOARD_MANUAL_SCAN_REUSE_SECONDS", "label": "手动选股复用候选秒数", "group": "任务调度", "kind": "int", "default": "0", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "实战选股漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "label": "实战选股运行中陈旧秒数", "group": "任务调度", "kind": "int", "default": "900", "effect": "restart"},
     {"name": "DASHBOARD_CRON_MAX_ATTEMPTS", "label": "Cron 失败最大运行次数", "group": "任务调度", "kind": "int", "default": "2", "effect": "next_run"},
@@ -300,6 +456,16 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_ENABLED", "label": "启用综合决策参考", "group": "综合决策参考", "kind": "bool", "default": "1", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", "label": "决策参考缓存秒数", "group": "综合决策参考", "kind": "int", "default": "75", "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS", "label": "单类参考数据上限", "group": "综合决策参考", "kind": "int", "default": "5", "effect": "next_run"},
+
+    {"name": "IWENCAI_ENABLED", "label": "启用问财数据源", "group": "问财数据源", "kind": "bool", "default": "0", "effect": "runtime"},
+    {"name": "IWENCAI_BASE_URL", "label": "问财 API 地址", "group": "问财数据源", "kind": "text", "default": IWENCAI_DEFAULT_BASE_URL, "effect": "runtime"},
+    {"name": "IWENCAI_API_KEY", "label": "问财 API Key", "group": "问财数据源", "kind": "secret", "default": "", "effect": "runtime"},
+    {"name": "IWENCAI_TIMEOUT_SECONDS", "label": "问财请求超时秒数", "group": "问财数据源", "kind": "int", "default": "20", "effect": "runtime"},
+    {"name": "IWENCAI_MAX_RETRIES", "label": "问财失败重试次数", "group": "问财数据源", "kind": "int", "default": "1", "effect": "runtime"},
+    {"name": "IWENCAI_MAX_CONCURRENCY", "label": "问财最大并发数", "group": "问财数据源", "kind": "int", "default": "2", "effect": "runtime"},
+    {"name": "IWENCAI_CACHE_TTL_SECONDS", "label": "问财龙虎榜缓存秒数", "group": "问财数据源", "kind": "int", "default": "300", "effect": "runtime"},
+    {"name": "IWENCAI_DRAGON_TIGER_CRON", "label": "龙虎榜交易日更新时间", "group": "问财数据源", "kind": "cron_time", "default": "0 18 * * 1-5", "effect": "next_run"},
+
     {"name": "DASHBOARD_MARKET_GUIDANCE_ENABLED", "label": "启用盘面指引控仓", "group": "交易规则与风控", "kind": "bool", "default": "1", "effect": "next_run"},
     {"name": TRADE_DISCIPLINE_TEXT_ENV, "label": "交易纪律 Prompt", "group": "交易规则与风控", "kind": "trade_discipline_text", "default": default_trade_discipline_text(), "effect": "runtime"},
     {"name": "DASHBOARD_MAX_OPEN_POSITIONS", "label": "最大持仓只数", "group": "交易规则与风控", "kind": "int", "default": "6", "effect": "next_run"},
@@ -331,11 +497,13 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "CROSSDESK_BASE_URL", "label": "Crossdesk Base URL", "group": "上游模型覆盖", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "CROSSDESK_API_KEY", "label": "Crossdesk API Key", "group": "上游模型覆盖", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_MODEL", "label": "Grok 模型", "group": "牛牛美股", "kind": "text", "default": "grok-4.20-multi-agent-xhigh", "effect": "next_run"},
+    {"name": "DASHBOARD_GROK_API_MODE", "label": "Grok 搜索工具接口模式", "group": "牛牛美股", "kind": "api_mode", "default": "auto", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_CONTEXT_LENGTH", "label": "Grok 模型上下文长度", "group": "牛牛美股", "kind": "context_length", "default": DEFAULT_MODEL_CONTEXT_LENGTH, "effect": "next_run"},
     {"name": "DASHBOARD_GROK_MAX_TOKENS", "label": "Grok 最大输出长度", "group": "牛牛美股", "kind": "max_tokens", "default": DEFAULT_MODEL_MAX_TOKENS, "effect": "next_run"},
     {"name": "DASHBOARD_GROK_BASE_URL", "label": "Grok API 地址", "group": "牛牛美股", "kind": "text", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_GROK_API_KEY", "label": "Grok API 密钥", "group": "牛牛美股", "kind": "secret", "default": "", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_MODEL", "label": "消息面预检模型", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
+    {"name": "DASHBOARD_NEWS_API_MODE", "label": "消息面搜索工具接口模式", "group": "消息面预检模型", "kind": "api_mode", "default": "auto", "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_CONTEXT_LENGTH", "label": "消息面预检上下文长度", "group": "消息面预检模型", "kind": "context_length", "default": DEFAULT_MODEL_CONTEXT_LENGTH, "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_MAX_TOKENS", "label": "消息面预检最大输出长度", "group": "消息面预检模型", "kind": "max_tokens", "default": DEFAULT_MODEL_MAX_TOKENS, "effect": "next_run"},
     {"name": "DASHBOARD_NEWS_BASE_URL", "label": "消息面预检 API 地址", "group": "消息面预检模型", "kind": "text", "default": "", "effect": "next_run"},
@@ -366,10 +534,18 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_US_RATING_CRON", "label": "美股买入评级时间", "group": "牛牛美股", "kind": "cron_time", "default": "0 11 * * *", "effect": "next_run"},
     {"name": "US_RATING_DEADLINE_SECONDS", "label": "美股评级总超时秒数", "group": "牛牛美股", "kind": "int", "default": "240", "effect": "next_run"},
     {"name": "US_RATING_REQUEST_TIMEOUT_SECONDS", "label": "美股评级单次请求超时秒数", "group": "牛牛美股", "kind": "int", "default": "120", "effect": "next_run"},
-    {"name": "DASHBOARD_INDICES_TTL_SECONDS", "label": "指数行情更新间隔", "group": "指数行情更新周期", "kind": "int", "default": "60", "effect": "runtime"},
+    {"name": "DASHBOARD_INDICES_TTL_SECONDS", "label": "指数行情更新间隔（秒）", "group": "行情与资金流设置", "kind": "int", "default": "60", "effect": "runtime", "min": "1"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED", "label": "资金流默认播放速度", "group": "行情与资金流设置", "kind": "playback_speed", "default": "0.5", "effect": "runtime"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT", "label": "资金流每侧行业数量", "group": "行情与资金流设置", "kind": "int", "default": "10", "effect": "runtime", "min": "1", "max": "10"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS", "label": "资金流采样间隔（秒）", "group": "行情与资金流设置", "kind": "int", "default": "60", "effect": "runtime", "min": "60", "max": "600"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_MORNING_START", "label": "上午采样开始时间", "group": "行情与资金流设置", "kind": "time", "default": "09:25", "effect": "runtime"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_MORNING_END", "label": "上午采样结束时间", "group": "行情与资金流设置", "kind": "time", "default": "11:31", "effect": "runtime"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START", "label": "下午采样开始时间", "group": "行情与资金流设置", "kind": "time", "default": "13:00", "effect": "runtime"},
+    {"name": "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END", "label": "下午采样结束时间", "group": "行情与资金流设置", "kind": "time", "default": "15:01", "effect": "runtime"},
 
     {"name": "X_WATCHLIST_STRICT_CONTEXT_HOLD", "label": "X 上下文缺失时暂缓发送", "group": "X 监控", "kind": "bool", "default": "0", "effect": "next_run"},
     {"name": "X_WATCHLIST_DEADLINE_SECONDS", "label": "X 总截止秒数", "group": "X 监控", "kind": "int", "default": "135", "effect": "next_run"},
+    {"name": "X_WATCHLIST_REQUEST_TIMEOUT_SECONDS", "label": "X 单账号请求超时秒数", "group": "牛牛美股", "kind": "int", "default": "45", "effect": "next_run"},
     {"name": "X_WATCHLIST_SCRIPT_ALARM_SECONDS", "label": "X 脚本 alarm 秒数", "group": "X 监控", "kind": "int", "default": "90", "effect": "next_run"},
     {"name": "X_WATCHLIST_MAX_WORKERS", "label": "X 抓取并发", "group": "X 监控", "kind": "int", "default": "5", "effect": "next_run"},
     {"name": "X_WATCHLIST_MAX_ATTEMPTS", "label": "X 抓取重试次数", "group": "X 监控", "kind": "int", "default": "1", "effect": "next_run"},
@@ -389,20 +565,24 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
 ENV_CONFIG_BY_NAME = {item["name"]: item for item in ENV_CONFIG_SCHEMA}
 ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_ADMIN_PASSWORD",
+    "DASHBOARD_PUBLIC_REFRESH_SECONDS",
     "DASHBOARD_US_FEATURES_ENABLED",
     "DASHBOARD_GROK_MODEL",
+    "DASHBOARD_GROK_API_MODE",
     "DASHBOARD_GROK_CONTEXT_LENGTH",
     "DASHBOARD_GROK_MAX_TOKENS",
     "DASHBOARD_GROK_BASE_URL",
     "DASHBOARD_GROK_API_KEY",
     "X_WATCHLIST_ACCOUNTS",
     "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
+    "X_WATCHLIST_REQUEST_TIMEOUT_SECONDS",
     "DASHBOARD_US_RATING_CRON",
     "US_RATING_CONTEXT_LENGTH",
     "US_RATING_MAX_TOKENS",
     "US_RATING_DEADLINE_SECONDS",
     "US_RATING_REQUEST_TIMEOUT_SECONDS",
     "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_API_MODE",
     "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_MAX_TOKENS",
     "DASHBOARD_NEWS_BASE_URL",
@@ -419,6 +599,14 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_DECISION_INTELLIGENCE_ENABLED",
     "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
     "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
+    "IWENCAI_ENABLED",
+    "IWENCAI_BASE_URL",
+    "IWENCAI_API_KEY",
+    "IWENCAI_TIMEOUT_SECONDS",
+    "IWENCAI_MAX_RETRIES",
+    "IWENCAI_MAX_CONCURRENCY",
+    "IWENCAI_CACHE_TTL_SECONDS",
+    "IWENCAI_DRAGON_TIGER_CRON",
     "DASHBOARD_MARKET_GUIDANCE_ENABLED",
     TRADE_DISCIPLINE_TEXT_ENV,
     "DASHBOARD_MAX_OPEN_POSITIONS",
@@ -465,10 +653,18 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_CRON_MAX_ATTEMPTS",
     "DASHBOARD_CRON_RETRY_DELAY_SECONDS",
     "DASHBOARD_INDICES_TTL_SECONDS",
+    "DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED",
+    "DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT",
+    "DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS",
+    "DASHBOARD_INDUSTRY_FLOW_MORNING_START",
+    "DASHBOARD_INDUSTRY_FLOW_MORNING_END",
+    "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START",
+    "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END",
 ]
 TRADER_RUNTIME_ENV_NAMES = {
     STOCK_UNIVERSE_ENV,
     "DASHBOARD_NEWS_MODEL",
+    "DASHBOARD_NEWS_API_MODE",
     "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_MAX_TOKENS",
     "DASHBOARD_NEWS_BASE_URL",
@@ -511,7 +707,7 @@ ENV_GROUP_ORDER = [
     "综合决策参考",
     "选股与交易策略",
     "盘面监控生产时间点",
-    "指数行情更新周期",
+    "行情与资金流设置",
     "基础路径",
     "访问控制",
     "限流与缓存",
@@ -532,268 +728,91 @@ def hash_token(token: str) -> str:
 
 def get_or_create_admin_token() -> str:
     """Return the local bootstrap credential used to protect admin sessions."""
-    with ADMIN_TOKEN_LOCK:
-        if ADMIN_TOKEN_FILE.is_symlink():
-            raise RuntimeError(f"admin token file must not be a symlink: {ADMIN_TOKEN_FILE}")
-        if ADMIN_TOKEN_FILE.exists():
-            token = ADMIN_TOKEN_FILE.read_text(encoding="utf-8").strip()
-            if token:
-                try:
-                    ADMIN_TOKEN_FILE.chmod(0o600)
-                except OSError:
-                    pass
-                return token
-        ADMIN_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        token = "na_" + secrets.token_urlsafe(36)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(ADMIN_TOKEN_FILE), flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(token + "\n")
-        try:
-            ADMIN_TOKEN_FILE.chmod(0o600)
-        except OSError:
-            pass
-        return token
+    return security_impl.load_or_create_admin_token(ADMIN_TOKEN_FILE, ADMIN_TOKEN_LOCK)
 
 
 def admin_session_signing_key() -> bytes:
-    bootstrap_token = get_or_create_admin_token().encode("utf-8")
-    credential_fingerprint = hashlib.sha256(ADMIN_PASSWORD.encode("utf-8")).digest()
-    return hmac.new(
-        bootstrap_token,
-        b"niuone-admin-session-v1\0" + credential_fingerprint,
-        hashlib.sha256,
-    ).digest()
+    return security_impl.derive_admin_session_signing_key(
+        get_or_create_admin_token(),
+        ADMIN_PASSWORD,
+    )
 
 
 def new_admin_session(now: float | None = None) -> str:
-    issued_at = int(time.time() if now is None else now)
-    payload = f"{issued_at}.{secrets.token_urlsafe(18)}"
-    signature = hmac.new(admin_session_signing_key(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"ad_{payload}.{signature}"
+    return security_impl.create_admin_session(admin_session_signing_key(), now)
 
 
 def validate_admin_session(cookie_value: str, now: float | None = None) -> bool:
-    raw = str(cookie_value or "")
-    if not raw.startswith("ad_"):
-        return False
-    try:
-        issued_text, nonce, signature = raw[3:].split(".", 2)
-        issued_at = int(issued_text)
-    except (TypeError, ValueError):
-        return False
-    if not nonce or not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", nonce):
-        return False
-    if not re.fullmatch(r"[0-9a-f]{64}", signature):
-        return False
-    current = int(time.time() if now is None else now)
-    ttl = max(60, ADMIN_SESSION_TTL_SECONDS)
-    if issued_at > current + 60 or current - issued_at > ttl:
-        return False
-    payload = f"{issued_at}.{nonce}"
-    expected = hmac.new(admin_session_signing_key(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return secrets.compare_digest(signature, expected)
+    return security_impl.validate_admin_session(
+        cookie_value,
+        admin_session_signing_key(),
+        ttl_seconds=ADMIN_SESSION_TTL_SECONDS,
+        now=now,
+    )
 
 
 def verify_admin_credential(value: str) -> bool:
-    expected = ADMIN_PASSWORD or get_or_create_admin_token()
-    supplied = str(value or "")
-    return bool(supplied) and secrets.compare_digest(
-        supplied.encode("utf-8"),
-        expected.encode("utf-8"),
+    return security_impl.verify_admin_credential(
+        value,
+        ADMIN_PASSWORD or get_or_create_admin_token(),
     )
 
 
 def check_rate_limit(scope: str, key: str, limit: int, window: int | None = None) -> tuple[bool, int]:
-    if not RATE_LIMIT_ENABLED or limit <= 0:
-        return True, 0
-    window = window or RATE_LIMIT_WINDOW_SECONDS
-    now = time.time()
-    bucket_key = (scope, key or "unknown")
-    with RATE_LIMIT_LOCK:
-        started_at, count = RATE_LIMIT_BUCKETS.get(bucket_key, (now, 0))
-        if now - started_at >= window:
-            started_at, count = now, 0
-        if count >= limit:
-            return False, max(1, int(window - (now - started_at)))
-        RATE_LIMIT_BUCKETS[bucket_key] = (started_at, count + 1)
-        if len(RATE_LIMIT_BUCKETS) > 10000:
-            cutoff = now - window * 3
-            for old_key, (old_started, _) in list(RATE_LIMIT_BUCKETS.items()):
-                if old_started < cutoff:
-                    RATE_LIMIT_BUCKETS.pop(old_key, None)
-    return True, 0
+    return security_impl.consume_rate_limit(
+        scope,
+        key,
+        limit,
+        enabled=RATE_LIMIT_ENABLED,
+        default_window=RATE_LIMIT_WINDOW_SECONDS,
+        buckets=RATE_LIMIT_BUCKETS,
+        lock=RATE_LIMIT_LOCK,
+        window=window,
+    )
 
 
 def visit_stats_init_signature() -> tuple[Any, ...]:
-    try:
-        stats_stat = STATS_DB.stat()
-        stats_marker: tuple[int, int] | None = (stats_stat.st_dev, stats_stat.st_ino)
-    except OSError:
-        stats_marker = None
-    try:
-        legacy_stat = LEGACY_STATS_DB.stat()
-        legacy_marker: tuple[int, int, int, int] | None = (
-            legacy_stat.st_dev,
-            legacy_stat.st_ino,
-            legacy_stat.st_mtime_ns,
-            legacy_stat.st_size,
-        )
-    except OSError:
-        legacy_marker = None
-    return (str(STATS_DB.resolve()), stats_marker, str(LEGACY_STATS_DB.resolve()), legacy_marker)
+    return visit_stats_impl.database_signature(STATS_DB, LEGACY_STATS_DB)
 
 
 def ensure_stats_db() -> None:
     global VISIT_STATS_INIT_SIGNATURE
-    STATS_DB.parent.mkdir(parents=True, exist_ok=True)
-    signature = visit_stats_init_signature()
-    if VISIT_STATS_INIT_SIGNATURE == signature and STATS_DB.exists():
-        return
-    with VISIT_STATS_LOCK:
-        signature = visit_stats_init_signature()
-        if VISIT_STATS_INIT_SIGNATURE == signature and STATS_DB.exists():
-            return
-        with closing(sqlite3.connect(STATS_DB, timeout=5.0)) as con:
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA synchronous=NORMAL")
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS visit_stats (
-                    key TEXT PRIMARY KEY,
-                    value INTEGER NOT NULL DEFAULT 0,
-                    updated_at REAL NOT NULL
-                )
-            """)
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS unique_visitors (
-                    visitor_hash TEXT PRIMARY KEY,
-                    first_seen_at REAL NOT NULL,
-                    last_seen_at REAL NOT NULL
-                )
-            """)
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS stats_migrations (
-                    key TEXT PRIMARY KEY,
-                    completed_at REAL NOT NULL
-                )
-            """)
-            migration_ready = migrate_legacy_visit_stats(con)
-            now = _now_ts()
-            unique_count = int(con.execute("SELECT COUNT(*) FROM unique_visitors").fetchone()[0] or 0)
-            con.execute(
-                "INSERT INTO visit_stats(key,value,updated_at) VALUES('home_unique',?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (unique_count, now),
-            )
-            con.commit()
-        VISIT_STATS_INIT_SIGNATURE = visit_stats_init_signature() if migration_ready else None
+    VISIT_STATS_INIT_SIGNATURE = visit_stats_impl.ensure_database(
+        stats_db=STATS_DB,
+        legacy_stats_db=LEGACY_STATS_DB,
+        initialized_signature=VISIT_STATS_INIT_SIGNATURE,
+        lock=VISIT_STATS_LOCK,
+        migrate_legacy=migrate_legacy_visit_stats,
+        now=_now_ts,
+    )
 
 
-def sqlite_table_exists(con: sqlite3.Connection, table: str) -> bool:
-    return con.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (table,),
-    ).fetchone() is not None
+def sqlite_table_exists(con: Any, table: str) -> bool:
+    return visit_stats_impl.sqlite_table_exists(con, table)
 
 
-def migrate_legacy_visit_stats(con: sqlite3.Connection) -> bool:
+def migrate_legacy_visit_stats(con: Any) -> bool:
     """Move visit counters out of the retired dashboard user database once."""
-    if LEGACY_STATS_DB == STATS_DB or not LEGACY_STATS_DB.exists():
-        return True
-    if con.execute(
-        "SELECT 1 FROM stats_migrations WHERE key=?",
-        (LEGACY_STATS_MIGRATION_KEY,),
-    ).fetchone():
-        return True
-
-    try:
-        with closing(sqlite3.connect(LEGACY_STATS_DB)) as legacy:
-            has_visit_stats = sqlite_table_exists(legacy, "visit_stats")
-            has_unique_visitors = sqlite_table_exists(legacy, "unique_visitors")
-            if not has_visit_stats and not has_unique_visitors:
-                return True
-
-            legacy_views = 0
-            legacy_updated_at = 0.0
-            if has_visit_stats:
-                visit_row = legacy.execute(
-                    "SELECT value, updated_at FROM visit_stats WHERE key='home_views'"
-                ).fetchone()
-                if visit_row:
-                    legacy_views = int(visit_row[0] or 0)
-                    legacy_updated_at = float(visit_row[1] or 0.0)
-
-            legacy_visitors = []
-            if has_unique_visitors:
-                legacy_visitors = legacy.execute(
-                    "SELECT visitor_hash, first_seen_at, last_seen_at FROM unique_visitors"
-                ).fetchall()
-    except sqlite3.Error as exc:
-        print(f"访问统计迁移跳过：无法读取旧统计库 {LEGACY_STATS_DB}: {exc}", file=sys.stderr)
-        return False
-
-    current_row = con.execute(
-        "SELECT value, updated_at FROM visit_stats WHERE key='home_views'"
-    ).fetchone()
-    current_views = int(current_row[0] or 0) if current_row else 0
-    current_updated_at = float(current_row[1] or 0.0) if current_row else 0.0
-    if legacy_views > current_views:
-        migrated_views = legacy_views + current_views
-    else:
-        migrated_views = current_views
-    if migrated_views or current_row:
-        con.execute(
-            "INSERT INTO visit_stats(key,value,updated_at) VALUES('home_views',?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            (migrated_views, max(legacy_updated_at, current_updated_at, _now_ts())),
-        )
-
-    con.executemany(
-        "INSERT INTO unique_visitors(visitor_hash,first_seen_at,last_seen_at) VALUES(?,?,?) "
-        "ON CONFLICT(visitor_hash) DO UPDATE SET "
-        "first_seen_at=MIN(unique_visitors.first_seen_at,excluded.first_seen_at), "
-        "last_seen_at=MAX(unique_visitors.last_seen_at,excluded.last_seen_at)",
-        legacy_visitors,
+    return visit_stats_impl.migrate_legacy_database(
+        con,
+        stats_db=STATS_DB,
+        legacy_stats_db=LEGACY_STATS_DB,
+        migration_key=LEGACY_STATS_MIGRATION_KEY,
+        now=_now_ts,
+        warn=lambda message: print(message, file=sys.stderr),
     )
-    con.execute(
-        "INSERT OR REPLACE INTO stats_migrations(key,completed_at) VALUES(?,?)",
-        (LEGACY_STATS_MIGRATION_KEY, _now_ts()),
-    )
-    return True
 
 
 def increment_visit_count(visitor_id: str) -> dict[str, int]:
     """Count page views for the main dashboard only; API polling is excluded."""
-    ensure_stats_db()
-    now = _now_ts()
-    visitor_hash = hash_token(visitor_id)
-    with VISIT_STATS_LOCK:
-        with closing(sqlite3.connect(STATS_DB, timeout=5.0)) as con:
-            con.execute("PRAGMA synchronous=NORMAL")
-            con.execute("INSERT OR IGNORE INTO visit_stats(key,value,updated_at) VALUES('home_views',0,?)", (now,))
-            con.execute("UPDATE visit_stats SET value=value+1, updated_at=? WHERE key='home_views'", (now,))
-            inserted = con.execute(
-                "INSERT OR IGNORE INTO unique_visitors(visitor_hash,first_seen_at,last_seen_at) VALUES(?,?,?)",
-                (visitor_hash, now, now),
-            ).rowcount
-            if not inserted:
-                con.execute(
-                    "UPDATE unique_visitors SET last_seen_at=? WHERE visitor_hash=?",
-                    (now, visitor_hash),
-                )
-            con.execute(
-                "INSERT OR IGNORE INTO visit_stats(key,value,updated_at) VALUES('home_unique',0,?)",
-                (now,),
-            )
-            if inserted:
-                con.execute(
-                    "UPDATE visit_stats SET value=value+1, updated_at=? WHERE key='home_unique'",
-                    (now,),
-                )
-            visit_row = con.execute("SELECT value FROM visit_stats WHERE key='home_views'").fetchone()
-            unique_row = con.execute("SELECT value FROM visit_stats WHERE key='home_unique'").fetchone()
-            con.commit()
-    return {"visits": int(visit_row[0] if visit_row else 0), "unique": int(unique_row[0] if unique_row else 0)}
+    return visit_stats_impl.increment_visit_count(
+        visitor_id,
+        stats_db=STATS_DB,
+        lock=VISIT_STATS_LOCK,
+        ensure_initialized=ensure_stats_db,
+        hash_visitor=hash_token,
+        now=_now_ts,
+    )
 
 
 def parse_request_cookies(header: str | None) -> dict[str, str]:
@@ -871,7 +890,12 @@ def get_trader_module():
                     TRADER_SELL_SIGNALS_MTIME = support_mtime
     return TRADER_MODULE
 
-def run_dashboard_helper(script_name: str, fallback: dict[str, Any], timeout: int = 90) -> dict[str, Any]:
+def run_dashboard_helper(
+    script_name: str,
+    fallback: dict[str, Any],
+    timeout: int = 90,
+    args: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Run dashboard helper API scripts out-of-process.
 
     Some akshare paths load native JavaScript runtimes that can abort the whole
@@ -880,7 +904,12 @@ def run_dashboard_helper(script_name: str, fallback: dict[str, Any], timeout: in
     """
     script = COMPAT_DIR / script_name
     try:
-        raw = subprocess.check_output([sys.executable, str(script)], text=True, timeout=timeout, stderr=subprocess.DEVNULL)
+        raw = subprocess.check_output(
+            [sys.executable, str(script), *args],
+            text=True,
+            timeout=timeout,
+            stderr=subprocess.DEVNULL,
+        )
         return json.loads(raw)
     except Exception as exc:
         return {**fallback, "error": str(exc)}
@@ -932,6 +961,24 @@ def annotate_practice_snapshot(payload: dict[str, Any], *, mode: str, history_sc
     return payload
 
 
+def persist_indices_snapshot(payload: dict[str, Any]) -> bool:
+    """Keep the last complete index response for fast startup fallback."""
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or not items or payload.get("error"):
+        return False
+    snapshot = dict(payload)
+    snapshot.pop("stale_cache", None)
+    try:
+        write_json_cache(INDICES_SNAPSHOT_FILE, snapshot)
+    except (OSError, TypeError, ValueError) as exc:
+        print(
+            f"dashboard indices snapshot write failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def produce_indices_data() -> dict[str, Any]:
     try:
         import importlib.util
@@ -943,7 +990,9 @@ def produce_indices_data() -> dict[str, Any]:
             indices_mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(indices_mod)
             raw_result = indices_mod.fetch_indices_data()
-            return raw_result if isinstance(raw_result, dict) else {"items": raw_result}
+            result = raw_result if isinstance(raw_result, dict) else {"items": raw_result}
+            persist_indices_snapshot(result)
+            return result
         return {"items": []}
     except Exception as exc:
         return {"items": [], "error": str(exc)}
@@ -964,20 +1013,60 @@ def apply_hot_stocks_sort(data: dict[str, Any], sort_by: str) -> dict[str, Any]:
 
 
 def get_practice_payload() -> dict[str, Any]:
+    """Return the retained local portfolio history without request-side I/O.
+
+    Quote refresh, equity heartbeats, trading checks, and state persistence are
+    owned by the dedicated background workers.  Keeping this read path local is
+    important because a stale-cache refresh runs in the Dashboard process and a
+    network-backed payload rebuild can otherwise starve every HTTP request.
+    """
     try:
+        now = current_cn_datetime()
         trader = get_trader_module()
-        # 盘面时间内按 dashboard 刷新节奏补记账户权益点；与是否交易/是否有B1候选无关。
-        if hasattr(trader, "maybe_record_session_equity_heartbeat"):
-            trader.maybe_record_session_equity_heartbeat()
-        payload = trader.get_dashboard_payload()
-        payload["trade_markers"] = compact_trade_markers(payload.get("trade_log") or [])
+        state = trader.load_state()
+        payload = trader.enrich_portfolio(state)
+        equity_history = state.get("equity_history", []) or []
+        daily_equity_history = state.get("daily_equity_history", []) or []
+        payload["equity_history"] = filter_future_equity_points(
+            equity_history,
+            now=now,
+        )
+        payload["daily_equity_history"] = compact_daily_equity_history(
+            [*equity_history, *daily_equity_history],
+            now=now,
+        )
+        payload["source_updated_at"] = str(
+            state.get("updated_at") or payload.get("source_updated_at") or ""
+        )
+        payload["source_last_equity_time"] = latest_valid_equity_time(
+            payload["equity_history"]
+        )
+        payload["calendar_history"] = build_compact_calendar_history(
+            equity_history,
+            source_updated_at=payload["source_updated_at"],
+            now=now,
+        )
+        payload["trade_markers"] = compact_trade_markers(state.get("trade_log") or [])
+        payload["trading_calendar"] = dashboard_trading_day_status(now)
+        payload["trading_paused"] = state.get("trading_paused", False)
+        payload["pause_reason"] = state.get("pause_reason", "")
+        payload["pause_since"] = state.get("pause_since", "")
+        strategy_performance = (
+            trader.track_strategy_performance(state)
+            if hasattr(trader, "track_strategy_performance")
+            else {}
+        )
+        payload["strategy_performance"] = compact_strategy_performance(
+            strategy_performance
+        )
+        if hasattr(trader, "build_trade_rule_note"):
+            payload["trade_rule_note"] = trader.build_trade_rule_note()
+        payload["decision_model"] = str(getattr(trader, "MODEL", "") or "")
+        payload["decision_provider"] = str(
+            getattr(trader, "PROVIDER_DISPLAY_NAME", "") or ""
+        )
         annotate_practice_snapshot(payload, mode="full", history_scope="retained_history")
-        annotate_practice_payload_clock(payload)
-        try:
-            refresh_b1_candidate_cache_from_current_pool()
-        except Exception as refresh_exc:
-            print(f"[WARN] 实战候选池复核失败: {type(refresh_exc).__name__}: {refresh_exc}", flush=True)
-        return payload
+        return annotate_practice_payload_clock(payload, now=now)
     except Exception as exc:
         print(f"[WARN] practice payload error: {type(exc).__name__}: {exc}", flush=True)
         payload = {"positions": [], "cash": 0, "total_equity": 0, "initial_cash": 0,
@@ -985,6 +1074,27 @@ def get_practice_payload() -> dict[str, Any]:
                    "equity_history": [], "trade_markers": [], "last_error": str(exc), "decision_model": "", "decision_provider": ""}
         annotate_practice_snapshot(payload, mode="full", history_scope="unavailable")
         return annotate_practice_payload_clock(payload)
+
+
+def record_practice_equity_heartbeat(trader: Any | None = None) -> bool:
+    """Record one due equity heartbeat without overlapping another producer."""
+
+    if not PRACTICE_EQUITY_HEARTBEAT_LOCK.acquire(blocking=False):
+        return False
+    try:
+        trader = trader or get_trader_module()
+        recorder = getattr(trader, "maybe_record_session_equity_heartbeat", None)
+        if recorder is None:
+            return False
+        recorded = bool(recorder())
+        if recorded:
+            invalidate_api_cache("niuniu_practice", PRACTICE_FAST_CACHE_KEY)
+        return recorded
+    except Exception as exc:
+        print(f"[WARN] 模拟账户权益心跳失败: {type(exc).__name__}: {exc}", flush=True)
+        return False
+    finally:
+        PRACTICE_EQUITY_HEARTBEAT_LOCK.release()
 
 def downsample_sequence(items: list[Any], max_points: int) -> list[Any]:
     return practice_payload_impl.downsample_sequence(items, max_points)
@@ -1172,6 +1282,8 @@ def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any
     payload = {"items": items, "generated_at": b1_payload.get("generated_at", "")}
     if isinstance(b1_payload.get("market_snapshot"), dict):
         payload["market_snapshot"] = b1_payload.get("market_snapshot")
+    if isinstance(b1_payload.get("sector_tide_context"), dict):
+        payload["sector_tide_context"] = b1_payload.get("sector_tide_context")
     for key in ("schedule_slot", "schedule_run_kind", "schedule_triggered_at"):
         if b1_payload.get(key):
             payload[key] = b1_payload.get(key)
@@ -1190,7 +1302,7 @@ def b1_cache_has_newer_generation(base_payload: dict[str, Any]) -> bool:
     try:
         if not B1_CACHE_FILE.exists():
             return False
-        latest = json.loads(B1_CACHE_FILE.read_text())
+        latest = json.loads(B1_CACHE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return False
     latest_generated = str(latest.get("generated_at") or "")[:19]
@@ -1215,7 +1327,7 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
         if not B1_CACHE_FILE.exists():
             return {"skipped": True, "reason": "missing_cache"}
         try:
-            parsed = json.loads(B1_CACHE_FILE.read_text())
+            parsed = json.loads(B1_CACHE_FILE.read_text(encoding="utf-8"))
         except Exception as exc:
             return {"skipped": True, "reason": f"bad_cache:{type(exc).__name__}"}
         items = parsed.get("items") or parsed.get("candidates") or []
@@ -1228,15 +1340,31 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             parsed["candidates"] = []
             parsed["count"] = 0
             parsed["refreshed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            B1_CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False))
-            MULTI_STRATEGY_CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False, indent=2))
+            B1_CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
+            MULTI_STRATEGY_CACHE_FILE.write_text(
+                json.dumps(parsed, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             B1_CANDIDATE_REFRESH_LAST_TS = time.time()
             return {"updated": 0, "count": 0}
 
         import multi_strategy_screen as scanner
 
+        active_scorers = scanner.active_strategy_scorers()
+        zettaranc_refresh = bool(
+            set(active_scorers).intersection(getattr(scanner, "ZETTARANC_STRATEGY_IDS", ()))
+        )
+        if zettaranc_refresh:
+            scanner.annotate_candidate_industries(base_items, max_workers=8)
         keys_by_code = {str(item.get("code") or ""): _tencent_key_for_code(str(item.get("code") or "")) for item in base_items}
         quote_map = scanner.tencent_batch_quote(list(keys_by_code.values()))
+        scoring_context = (
+            dict(parsed.get("sector_tide_context") or {})
+            if isinstance(parsed.get("sector_tide_context"), dict)
+            else {}
+        )
+        if zettaranc_refresh:
+            scoring_context["industry_money_flow"] = scanner.fetch_sector_tide_money_flow()
         refreshed: list[dict[str, Any]] = []
         previous_by_code = {str(item.get("code") or ""): item for item in base_items}
         for code, tencent_key in keys_by_code.items():
@@ -1251,7 +1379,15 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 continue
             if float(amount or 0) < 8e8:
                 continue
-            multi = scanner.analyze_all_strategies(code, tencent_key)
+            multi = scanner.analyze_all_strategies(
+                code,
+                tencent_key,
+                quote=quote,
+                name=name,
+                industry=str(old.get("industry") or old.get("sector") or ""),
+                context=scoring_context or None,
+                scorers=active_scorers,
+            )
             if not multi:
                 continue
             best = multi["strategies"].get(multi["best_strategy"], {})
@@ -1287,6 +1423,43 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "time_stop": best.get("time_stop"),
                 "actionable": best.get("actionable"),
                 "hard_blockers": best.get("hard_blockers", []),
+                "industry": best.get("industry") or old.get("industry") or old.get("sector") or "",
+                "sector": best.get("industry") or old.get("sector") or old.get("industry") or "",
+                "market_regime": best.get("market_regime"),
+                "market_score": best.get("market_score"),
+                "market_hard_stop": best.get("market_hard_stop"),
+                "market_allows_buys": best.get("market_allows_buys"),
+                "sector_status": best.get("sector_status"),
+                "sector_score": best.get("sector_score"),
+                "stock_sector_rank": best.get("stock_sector_rank"),
+                "stock_market_rank": best.get("stock_market_rank"),
+                "score_before_industry_flow": best.get("score_before_industry_flow"),
+                "industry_flow_available": best.get("industry_flow_available"),
+                "industry_flow_matched": best.get("industry_flow_matched"),
+                "industry_flow_rank": best.get("industry_flow_rank"),
+                "industry_flow_rank_total": best.get("industry_flow_rank_total"),
+                "industry_flow_net_yi": best.get("industry_flow_net_yi"),
+                "industry_flow_adjustment": best.get("industry_flow_adjustment"),
+                "industry_flow_source": best.get("industry_flow_source"),
+                "industry_flow_generated_at": best.get("industry_flow_generated_at"),
+                "ema20": best.get("ema20"),
+                "ema50": best.get("ema50"),
+                "atr20": best.get("atr20"),
+                "stop_price": best.get("stop_price"),
+                "stop_source": best.get("stop_source"),
+                "stop_distance_pct": best.get("stop_distance_pct"),
+                "stop_atr": best.get("stop_atr"),
+                "gap_buffer_pct": best.get("gap_buffer_pct"),
+                "execution_buffer_pct": best.get("execution_buffer_pct"),
+                "effective_loss_distance_pct": best.get("effective_loss_distance_pct"),
+                "per_trade_risk_budget_pct": best.get("per_trade_risk_budget_pct"),
+                "max_open_risk_pct": best.get("max_open_risk_pct"),
+                "max_sector_risk_pct": best.get("max_sector_risk_pct"),
+                "max_total_position_pct": best.get("max_total_position_pct"),
+                "max_sector_position_pct": best.get("max_sector_position_pct"),
+                "absolute_position_cap_pct": best.get("absolute_position_cap_pct"),
+                "max_position_pct_by_risk": best.get("max_position_pct_by_risk"),
+                "risk_ok": best.get("risk_ok"),
                 "trade_ready": scanner.candidate_is_trade_ready(best),
                 "strategies": multi["strategies"],
                 "consensus_count": multi.get("consensus_count", 0),
@@ -1332,8 +1505,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             "refreshed_at": refreshed_at,
         }
         json_text = json.dumps(output, ensure_ascii=False, indent=2)
-        B1_CACHE_FILE.write_text(json_text + "\n")
-        MULTI_STRATEGY_CACHE_FILE.write_text(json_text + "\n")
+        B1_CACHE_FILE.write_text(json_text + "\n", encoding="utf-8")
+        MULTI_STRATEGY_CACHE_FILE.write_text(json_text + "\n", encoding="utf-8")
         with API_RESPONSE_LOCK:
             API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
         B1_CANDIDATE_REFRESH_LAST_TS = time.time()
@@ -1404,12 +1577,10 @@ def run_practice_decision_logged(b1_payload: dict[str, Any], *, record_start: bo
     if not item_count:
         record_practice_decision_event(
             payload,
-            f"选股完成{slot_note}但没有候选股，本轮不执行买卖。",
-            f"选股完成{slot_note}：0只候选",
-            mark_b1_done=True,
+            f"选股完成{slot_note}但没有候选股，继续检查已有持仓的原策略退出规则。",
+            f"选股完成{slot_note}：0只候选，开始持仓退出检查",
         )
-        return {"skipped": True, "reason": "no_candidates"}
-    if record_start:
+    elif record_start:
         record_practice_decision_event(
             payload,
             f"选股完成{slot_note}：{item_count}只候选，开始生成买卖决策。",
@@ -1468,7 +1639,22 @@ def load_practice_candidates_cache() -> dict[str, Any]:
         return {"error": "; ".join(errors), "items": [], "count": 0, "generated_at": ""}
     return {"items": [], "count": 0, "generated_at": ""}
 
-def trigger_b1_scan(
+
+def summarize_b1_scan_failure(stderr: str, stdout: str, limit: int = 900) -> str:
+    """Keep the scanner stage and final exception without leaking a full traceback."""
+    raw = (stderr or stdout or "").strip()
+    if not raw:
+        return "扫描进程未返回错误详情"
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    stage = next((line for line in reversed(lines) if line.startswith("Step ")), "")
+    final_line = lines[-1]
+    detail = f"{stage}；{final_line}" if stage and stage != final_line else final_line
+    if len(detail) > limit:
+        detail = detail[: max(0, limit - 3)] + "..."
+    return detail
+
+
+def _trigger_b1_scan_unlocked(
     force: bool = False,
     decision_mode: str = "async",
     *,
@@ -1501,22 +1687,55 @@ def trigger_b1_scan(
                      "running": False, "error": "", "cooldown_remaining_seconds": 0,
                      **schedule_meta}
             with B1_CANDIDATE_REFRESH_LOCK:
-                B1_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False))
+                B1_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
             if decision_mode == "sync":
                 cache["decision_result"] = run_practice_decision_logged(cache, record_start=True)
             elif decision_mode == "async":
                 maybe_run_practice_decision_async(cache)
             return cache
-        return {"error": (result.stderr or result.stdout)[-500:], "items": [], "count": 0, "generated_at": "", "running": False}
+        error_detail = summarize_b1_scan_failure(result.stderr, result.stdout)
+        print(f"[WARN] B1 scan failed: {error_detail}", file=sys.stderr, flush=True)
+        return {"error": error_detail, "items": [], "count": 0, "generated_at": "", "running": False}
     except subprocess.TimeoutExpired:
         return {"error": f"扫描超时（{B1_SCAN_TIMEOUT_SECONDS}s）", "items": [], "count": 0, "generated_at": "", "running": False}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}", "items": [], "count": 0, "generated_at": "", "running": False}
 
 
+def trigger_b1_scan(
+    force: bool = False,
+    decision_mode: str = "async",
+    *,
+    schedule_slot: str = "",
+    schedule_run_kind: str = "",
+) -> dict[str, Any]:
+    if not B1_FULL_SCAN_LOCK.acquire(blocking=False):
+        return {
+            "error": "已有选股扫描正在运行，请等待当前扫描完成",
+            "items": [],
+            "count": 0,
+            "generated_at": "",
+            "running": True,
+            "busy": True,
+        }
+    try:
+        return _trigger_b1_scan_unlocked(
+            force,
+            decision_mode,
+            schedule_slot=schedule_slot,
+            schedule_run_kind=schedule_run_kind,
+        )
+    finally:
+        B1_FULL_SCAN_LOCK.release()
+
+
 def practice_manual_cycle_status() -> dict[str, Any]:
     with PRACTICE_MANUAL_CYCLE_STATE_LOCK:
-        return dict(PRACTICE_MANUAL_CYCLE_STATE)
+        return {
+            field: PRACTICE_MANUAL_CYCLE_STATE[field]
+            for field in PRACTICE_MANUAL_CYCLE_PUBLIC_FIELDS
+            if field in PRACTICE_MANUAL_CYCLE_STATE
+        }
 
 
 def _set_practice_manual_cycle_state(**updates: Any) -> dict[str, Any]:
@@ -1525,10 +1744,33 @@ def _set_practice_manual_cycle_state(**updates: Any) -> dict[str, Any]:
         return dict(PRACTICE_MANUAL_CYCLE_STATE)
 
 
+def recent_practice_candidates_for_manual_cycle() -> dict[str, Any] | None:
+    if PRACTICE_MANUAL_SCAN_REUSE_SECONDS <= 0:
+        return None
+    cache = load_practice_candidates_cache()
+    if cache.get("error"):
+        return None
+    generated_at = str(cache.get("generated_at") or "")[:19]
+    try:
+        generated_dt = datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    age_seconds = (datetime.now() - generated_dt).total_seconds()
+    if age_seconds < -60 or age_seconds > PRACTICE_MANUAL_SCAN_REUSE_SECONDS:
+        return None
+    return {
+        **cache,
+        "manual_scan_reused": True,
+        "manual_scan_age_seconds": round(max(0.0, age_seconds), 1),
+    }
+
+
 def _run_practice_manual_cycle() -> None:
     try:
-        _set_practice_manual_cycle_state(stage="screening", stage_label="正在选股并生成盘面评价")
-        cache = trigger_b1_scan(force=True, decision_mode="none")
+        _set_practice_manual_cycle_state(stage="screening", stage_label="正在检查候选并生成盘面评价")
+        cache = recent_practice_candidates_for_manual_cycle()
+        if cache is None:
+            cache = trigger_b1_scan(force=True, decision_mode="none")
         if cache.get("error"):
             raise RuntimeError(str(cache.get("error")))
 
@@ -1537,6 +1779,7 @@ def _run_practice_manual_cycle() -> None:
             stage_label="正在执行买卖策略",
             candidate_count=int(cache.get("count") or 0),
             generated_at=str(cache.get("generated_at") or ""),
+            manual_scan_reused=bool(cache.get("manual_scan_reused")),
         )
         decision_result = run_practice_decision_logged(cache, record_start=True)
         _set_practice_manual_cycle_state(
@@ -1572,6 +1815,7 @@ def start_practice_manual_cycle() -> dict[str, Any]:
         finished_at="",
         generated_at="",
         candidate_count=0,
+        manual_scan_reused=False,
         decision_result=None,
         error="",
     )
@@ -1587,7 +1831,9 @@ def b1_cache_generated_for_slot(slot_key: str) -> bool:
     try:
         if not B1_CACHE_FILE.exists():
             return False
-        generated_at = (json.loads(B1_CACHE_FILE.read_text()).get("generated_at") or "")[:16]
+        generated_at = (
+            json.loads(B1_CACHE_FILE.read_text(encoding="utf-8")).get("generated_at") or ""
+        )[:16]
         return generated_at == slot_key
     except Exception:
         return False
@@ -1599,7 +1845,7 @@ def _b1_schedule_now_text() -> str:
 
 def _load_b1_schedule_state_unlocked() -> dict[str, Any]:
     try:
-        state = json.loads(B1_SCHEDULE_STATE_FILE.read_text())
+        state = json.loads(B1_SCHEDULE_STATE_FILE.read_text(encoding="utf-8"))
         if not isinstance(state, dict):
             state = {}
     except Exception:
@@ -1613,7 +1859,7 @@ def _load_b1_schedule_state_unlocked() -> dict[str, Any]:
 def _save_b1_schedule_state_unlocked(state: dict[str, Any]) -> None:
     B1_SCHEDULE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = B1_SCHEDULE_STATE_FILE.with_suffix(B1_SCHEDULE_STATE_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(B1_SCHEDULE_STATE_FILE)
 
 
@@ -1800,6 +2046,519 @@ def pending_decision_loop() -> None:
         time.sleep(max(1.0, PENDING_DECISION_POLL_SECONDS))
 
 
+def practice_equity_heartbeat_loop(
+    *,
+    stop_event: threading.Event | None = None,
+    poll_seconds: float = PRACTICE_EQUITY_HEARTBEAT_POLL_SECONDS,
+) -> None:
+    """Keep minute equity snapshots flowing even when no dashboard is open."""
+
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
+        record_practice_equity_heartbeat()
+        if stop_event.wait(max(1.0, float(poll_seconds))):
+            return
+
+
+def start_practice_equity_heartbeat() -> None:
+    global PRACTICE_EQUITY_HEARTBEAT_THREAD
+    if PRACTICE_EQUITY_HEARTBEAT_THREAD and PRACTICE_EQUITY_HEARTBEAT_THREAD.is_alive():
+        return
+    PRACTICE_EQUITY_HEARTBEAT_THREAD = threading.Thread(
+        target=practice_equity_heartbeat_loop,
+        name="practice-equity-heartbeat",
+        daemon=True,
+    )
+    PRACTICE_EQUITY_HEARTBEAT_THREAD.start()
+    print("Practice equity heartbeat enabled: 60s", flush=True)
+
+
+def is_market_breadth_sampling_window(now: datetime | None = None) -> bool:
+    """Return whether Beijing time is inside an A-share quote session."""
+
+    current = now or current_cn_datetime()
+    return (
+        is_a_share_trading_day_for_dashboard(current)
+        and is_market_breadth_session_timestamp(current)
+    )
+
+
+def _daily_payload_date_keys(payload: dict[str, Any]) -> set[str]:
+    keys = {
+        str(payload.get(field) or "")[:10]
+        for field in ("date", "retention_date", "generated_at")
+        if str(payload.get(field) or "")[:10]
+    }
+    for raw in payload.get("samples") or []:
+        if not isinstance(raw, dict):
+            continue
+        value = str(raw.get("generated_at") or "")[:10]
+        if value:
+            keys.add(value)
+    return keys
+
+
+def _empty_market_breadth_history(day: str) -> dict[str, Any]:
+    return {
+        "schema_version": 3,
+        "date": day,
+        "interval_seconds": MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
+        "samples": [],
+    }
+
+
+def _empty_industry_flow_history(day: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "date": day,
+        "interval_seconds": INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
+        "samples": [],
+    }
+
+
+def _empty_money_flow_snapshot(day: str) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "metric": "industry_main_net_flow",
+        "metric_label": "今日主力净额",
+        "retention_date": day,
+        "inflow": [],
+        "outflow": [],
+    }
+
+
+def reset_daily_market_histories(now: datetime | None = None) -> bool:
+    """Atomically clear market-flow and breadth data from prior Beijing dates."""
+
+    day = current_cn_date_key(now)
+    changed = False
+    with MARKET_BREADTH_HISTORY_LOCK:
+        history = read_json_cache(MARKET_BREADTH_HISTORY_FILE, None)
+        if history is not None and _daily_payload_date_keys(history) != {day}:
+            write_json_cache(MARKET_BREADTH_HISTORY_FILE, _empty_market_breadth_history(day))
+            changed = True
+    with INDUSTRY_FLOW_HISTORY_LOCK:
+        history = read_json_cache(INDUSTRY_FLOW_HISTORY_FILE, None)
+        if history is not None and _daily_payload_date_keys(history) != {day}:
+            write_json_cache(INDUSTRY_FLOW_HISTORY_FILE, _empty_industry_flow_history(day))
+            changed = True
+        snapshot = read_json_cache(MONEY_FLOW_SNAPSHOT_FILE, None)
+        if snapshot is not None and _daily_payload_date_keys(snapshot) != {day}:
+            write_json_cache(MONEY_FLOW_SNAPSHOT_FILE, _empty_money_flow_snapshot(day))
+            changed = True
+    if changed:
+        invalidate_api_cache("market_breadth", "money_flow")
+        invalidate_api_cache_prefix("industry_flow")
+    return changed
+
+
+def seconds_until_next_cn_midnight(now: datetime | None = None) -> float:
+    current = now or current_cn_datetime()
+    next_midnight = datetime.combine(
+        current.date() + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=current.tzinfo,
+    )
+    return max(0.1, (next_midnight - current).total_seconds())
+
+
+def daily_market_history_reset_loop(
+    *,
+    stop_event: threading.Event | None = None,
+) -> None:
+    """Clear both daily chart histories at each Beijing midnight."""
+
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
+        if stop_event.wait(seconds_until_next_cn_midnight()):
+            return
+        reset_daily_market_histories(current_cn_datetime())
+
+
+def start_daily_market_history_reset() -> None:
+    global DAILY_MARKET_HISTORY_RESET_THREAD
+    reset_daily_market_histories(current_cn_datetime())
+    if (
+        DAILY_MARKET_HISTORY_RESET_THREAD
+        and DAILY_MARKET_HISTORY_RESET_THREAD.is_alive()
+    ):
+        return
+    DAILY_MARKET_HISTORY_RESET_THREAD = threading.Thread(
+        target=daily_market_history_reset_loop,
+        name="daily-market-history-reset",
+        daemon=True,
+    )
+    DAILY_MARKET_HISTORY_RESET_THREAD.start()
+    print("Daily market history reset enabled: 00:00 Asia/Shanghai", flush=True)
+
+
+def load_market_breadth_samples(
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    resolved_now = now or current_cn_datetime()
+    current_day = current_cn_date_key(resolved_now)
+    reset_daily_market_histories(resolved_now)
+    with MARKET_BREADTH_HISTORY_LOCK:
+        history = read_json_cache(MARKET_BREADTH_HISTORY_FILE, None) or {}
+        samples: list[dict[str, Any]] = []
+        for raw in history.get("samples") or []:
+            compact = compact_market_breadth_sample(raw if isinstance(raw, dict) else None)
+            if (
+                compact is not None
+                and compact["generated_at"][:10] == current_day
+                and is_market_breadth_session_timestamp(compact["generated_at"])
+            ):
+                samples.append(compact)
+        return samples
+
+
+def record_market_breadth_sample(
+    snapshot: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Persist one complete market snapshot without inventing missing values."""
+
+    resolved_now = now or current_cn_datetime()
+    reset_daily_market_histories(resolved_now)
+    compact = compact_market_breadth_sample(snapshot)
+    if (
+        compact is None
+        or compact["generated_at"][:10] != current_cn_date_key(resolved_now)
+        or not is_market_breadth_session_timestamp(compact["generated_at"])
+    ):
+        return load_market_breadth_samples(now=resolved_now)
+    with MARKET_BREADTH_HISTORY_LOCK:
+        history = read_json_cache(MARKET_BREADTH_HISTORY_FILE, None) or {}
+        updated = append_market_breadth_sample(
+            history,
+            snapshot,
+            interval_seconds=MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
+        )
+        if updated != history and updated.get("samples"):
+            write_json_cache(MARKET_BREADTH_HISTORY_FILE, updated)
+        return [
+            sample
+            for sample in (updated.get("samples") or [])
+            if isinstance(sample, dict)
+        ]
+
+
+def _market_breadth_failure_payload(
+    error: Exception,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    samples = load_market_breadth_samples(now=now)
+    if not samples:
+        return build_market_breadth_payload({
+            "error": f"{type(error).__name__}: {error}",
+        })
+    fallback = dict(samples[-1])
+    fallback.update({
+        "stale_cache": True,
+        "error": f"{type(error).__name__}: {error}",
+    })
+    return build_market_breadth_payload(
+        fallback,
+        history_samples=samples,
+        interval_seconds=MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
+    )
+
+
+def _cached_market_breadth_payload(now: datetime) -> dict[str, Any] | None:
+    """Reuse a fresh sample, or the last close while the market is not sampling."""
+
+    samples = load_market_breadth_samples(now=now)
+    if not samples:
+        return None
+    latest = samples[-1]
+    try:
+        latest_time = datetime.strptime(
+            str(latest.get("generated_at") or ""),
+            "%Y-%m-%d %H:%M:%S",
+        )
+    except ValueError:
+        return None
+    same_day = latest_time.date() == now.date()
+    age_seconds = (now - latest_time).total_seconds()
+    fresh = (
+        same_day
+        and -120 <= age_seconds < max(5, MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS - 5)
+    )
+    if is_market_breadth_sampling_window(now) and not fresh:
+        return None
+    return build_market_breadth_payload(
+        latest,
+        history_samples=samples,
+        interval_seconds=MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
+    )
+
+
+def produce_market_breadth_data() -> dict[str, Any]:
+    """Fetch, validate, persist, and project one market-breadth observation."""
+
+    with MARKET_BREADTH_REFRESH_LOCK:
+        current = current_cn_datetime()
+        reset_daily_market_histories(current)
+        cached = _cached_market_breadth_payload(current)
+        if cached is not None:
+            return cached
+        if not is_market_breadth_sampling_window(current):
+            return build_market_breadth_payload(
+                {},
+                history_samples=[],
+                interval_seconds=MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
+            )
+        try:
+            snapshot = fetch_tencent_market_breadth()
+            samples = record_market_breadth_sample(snapshot, now=current)
+            compact = compact_market_breadth_sample(snapshot)
+            if (
+                compact is None
+                or compact["generated_at"][:10] != current_cn_date_key(current)
+            ):
+                return build_market_breadth_payload(
+                    {},
+                    history_samples=samples,
+                    interval_seconds=MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
+                )
+            return build_market_breadth_payload(
+                snapshot,
+                history_samples=samples,
+                interval_seconds=MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
+            )
+        except Exception as exc:
+            return _market_breadth_failure_payload(exc, now=current)
+
+
+def refresh_market_breadth_sample() -> bool:
+    payload = produce_market_breadth_data()
+    latest = payload.get("latest") if isinstance(payload.get("latest"), dict) else {}
+    recorded = bool(latest and not payload.get("error"))
+    if recorded:
+        invalidate_api_cache("market_breadth")
+    return recorded
+
+
+def market_breadth_sampling_loop(
+    *,
+    stop_event: threading.Event | None = None,
+    poll_seconds: float | None = None,
+) -> None:
+    """Collect current-day breadth curves even when the index page is closed."""
+
+    stop_event = stop_event or threading.Event()
+    next_due = time.monotonic()
+    while not stop_event.is_set():
+        interval = max(
+            60.0,
+            float(
+                MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS
+                if poll_seconds is None
+                else poll_seconds
+            ),
+        )
+        if is_market_breadth_sampling_window():
+            try:
+                refresh_market_breadth_sample()
+            except Exception as exc:
+                print(f"[WARN] 市场宽度采样失败: {type(exc).__name__}: {exc}", flush=True)
+        next_due += interval
+        now = time.monotonic()
+        if next_due <= now:
+            skipped_intervals = int((now - next_due) // interval) + 1
+            next_due += skipped_intervals * interval
+        if stop_event.wait(max(0.1, next_due - now)):
+            return
+
+
+def start_market_breadth_sampler() -> None:
+    global MARKET_BREADTH_SAMPLER_THREAD
+    if MARKET_BREADTH_SAMPLER_THREAD and MARKET_BREADTH_SAMPLER_THREAD.is_alive():
+        return
+    MARKET_BREADTH_SAMPLER_THREAD = threading.Thread(
+        target=market_breadth_sampling_loop,
+        name="market-breadth-sampler",
+        daemon=True,
+    )
+    MARKET_BREADTH_SAMPLER_THREAD.start()
+    print(
+        f"Market breadth sampler enabled: {MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS}s",
+        flush=True,
+    )
+
+
+def is_industry_flow_sampling_window(now: datetime | None = None) -> bool:
+    """Return whether Beijing time is inside either fixed sampling session."""
+
+    current = now or current_cn_datetime()
+    if not is_a_share_trading_day_for_dashboard(current):
+        return False
+    return is_industry_flow_session_timestamp(
+        current,
+        sampling_windows=INDUSTRY_FLOW_SAMPLING_WINDOWS,
+    )
+
+
+def _filter_industry_flow_session_samples(
+    samples: list[Any],
+    *,
+    retention_day: str = "",
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for item in samples:
+        if not isinstance(item, dict):
+            continue
+        generated_at = str(item.get("generated_at") or "")
+        try:
+            sample_time = datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if retention_day and generated_at[:10] != retention_day:
+            continue
+        if is_industry_flow_sampling_window(sample_time):
+            filtered.append(item)
+    return filtered
+
+
+def load_industry_flow_samples(
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    resolved_now = now or current_cn_datetime()
+    current_day = current_cn_date_key(resolved_now)
+    reset_daily_market_histories(resolved_now)
+    with INDUSTRY_FLOW_HISTORY_LOCK:
+        history = read_json_cache(INDUSTRY_FLOW_HISTORY_FILE, None) or {}
+        return _filter_industry_flow_session_samples(
+            history.get("samples") or [],
+            retention_day=current_day,
+        )
+
+
+def record_industry_flow_sample(
+    money_flow: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Persist one valid sample without replacing earlier same-day observations."""
+
+    resolved_now = now or current_cn_datetime()
+    current_day = current_cn_date_key(resolved_now)
+    reset_daily_market_histories(resolved_now)
+    generated_at = str(money_flow.get("generated_at") or "")
+    try:
+        sample_time = datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return load_industry_flow_samples(now=resolved_now)
+    if generated_at[:10] != current_day or not is_industry_flow_sampling_window(sample_time):
+        return load_industry_flow_samples(now=resolved_now)
+
+    with INDUSTRY_FLOW_HISTORY_LOCK:
+        history = read_json_cache(INDUSTRY_FLOW_HISTORY_FILE, None) or {}
+        existing_samples = _filter_industry_flow_session_samples(
+            history.get("samples") or [],
+            retention_day=current_day,
+        )
+        same_day_samples = [
+            item for item in existing_samples
+            if str(item.get("generated_at") or "")[:10] == generated_at[:10]
+        ]
+        if same_day_samples:
+            latest_time = datetime.strptime(
+                str(same_day_samples[-1].get("generated_at") or ""),
+                "%Y-%m-%d %H:%M:%S",
+            )
+            elapsed_seconds = (sample_time - latest_time).total_seconds()
+            if 0 < elapsed_seconds < INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS:
+                return existing_samples
+        updated = append_industry_flow_sample(
+            history,
+            money_flow,
+            interval_seconds=INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
+        )
+        if updated != history and updated.get("samples"):
+            write_json_cache(INDUSTRY_FLOW_HISTORY_FILE, updated)
+        return _filter_industry_flow_session_samples(
+            updated.get("samples") or [],
+            retention_day=current_day,
+        )
+
+
+def fetch_and_record_money_flow(
+    *,
+    force_refresh: bool = False,
+    timeout: int = 120,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Fetch one money-flow snapshot and immediately preserve valid history."""
+
+    money_flow = run_dashboard_helper(
+        "money_flow_dashboard_api.py",
+        {"inflow": [], "outflow": []},
+        timeout=timeout,
+        args=("--force-refresh",) if force_refresh else (),
+    )
+    return money_flow, record_industry_flow_sample(money_flow, now=now)
+
+
+def refresh_industry_flow_sample() -> bool:
+    money_flow, samples = fetch_and_record_money_flow(
+        force_refresh=True,
+        # Leave enough time in the minute for the next wall-clock sample even
+        # when the upstream request stalls.
+        timeout=50,
+    )
+    generated_at = str(money_flow.get("generated_at") or "")
+    recorded = bool(samples and str(samples[-1].get("generated_at") or "") == generated_at)
+    if recorded:
+        invalidate_api_cache("money_flow", "industry_flow")
+    return recorded
+
+
+def industry_flow_sampling_loop(
+    *,
+    stop_event: threading.Event | None = None,
+    poll_seconds: float | None = None,
+) -> None:
+    """Collect periodic industry-flow snapshots even when the page is closed."""
+
+    stop_event = stop_event or threading.Event()
+    next_due = time.monotonic()
+    while not stop_event.is_set():
+        interval = max(
+            60.0,
+            float(INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS if poll_seconds is None else poll_seconds),
+        )
+        if is_industry_flow_sampling_window():
+            try:
+                refresh_industry_flow_sample()
+            except Exception as exc:
+                print(f"[WARN] 行业资金流采样失败: {type(exc).__name__}: {exc}", flush=True)
+        next_due += interval
+        now = time.monotonic()
+        if next_due <= now:
+            skipped_intervals = int((now - next_due) // interval) + 1
+            next_due += skipped_intervals * interval
+        if stop_event.wait(max(0.1, next_due - now)):
+            return
+
+
+def start_industry_flow_sampler() -> None:
+    global INDUSTRY_FLOW_SAMPLER_THREAD
+    if INDUSTRY_FLOW_SAMPLER_THREAD and INDUSTRY_FLOW_SAMPLER_THREAD.is_alive():
+        return
+    INDUSTRY_FLOW_SAMPLER_THREAD = threading.Thread(
+        target=industry_flow_sampling_loop,
+        name="industry-flow-sampler",
+        daemon=True,
+    )
+    INDUSTRY_FLOW_SAMPLER_THREAD.start()
+    print(f"Industry flow sampler enabled: {INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS}s", flush=True)
+
+
 def start_pending_decision_executor() -> None:
     global PENDING_DECISION_THREAD
     if PENDING_DECISION_THREAD and PENDING_DECISION_THREAD.is_alive():
@@ -1896,105 +2655,117 @@ def merge_records_from_db(limit: int | None = None, category: str | None = None,
             "chats": data["chats"], "categories": categories, "records": records}
 
 
+def _practice_market_summary_records() -> list[dict[str, Any]]:
+    data = push_history.query_messages(category="market_monitor", limit=100)
+    return [record for record in (data.get("records") or []) if isinstance(record, dict)]
+
+
+def get_practice_market_summary_status() -> dict[str, Any]:
+    return practice_market_summary_impl.summary_status(
+        _practice_market_summary_records(),
+        PRACTICE_MARKET_SUMMARY_FILE,
+        current_cn_datetime(),
+    )
+
+
+def fetch_practice_realtime_market_snapshot(now: datetime) -> dict[str, Any]:
+    """Force-refresh current A-share channels in isolated helper processes."""
+    jobs = {
+        "indices": ("indices_dashboard_api.py", {"items": []}),
+        "sectors": (
+            "sectors_dashboard_api.py",
+            {
+                "gain_top": [],
+                "loss_top": [],
+                "industry_gain_top": [],
+                "industry_loss_top": [],
+                "concept_gain_top": [],
+                "concept_loss_top": [],
+                "items": [],
+            },
+        ),
+        "money_flow": ("money_flow_dashboard_api.py", {"inflow": [], "outflow": []}),
+    }
+    payloads: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = {}
+        for key, (script_name, fallback) in jobs.items():
+            if key == "money_flow":
+                futures[key] = pool.submit(
+                    fetch_and_record_money_flow,
+                    force_refresh=True,
+                    timeout=120,
+                    now=now,
+                )
+                continue
+            futures[key] = pool.submit(
+                run_dashboard_helper,
+                script_name,
+                fallback,
+                120,
+                ("--force-refresh",),
+            )
+        for key, future in futures.items():
+            try:
+                result = future.result()
+                payloads[key] = result[0] if key == "money_flow" else result
+            except Exception as exc:
+                payloads[key] = {**jobs[key][1], "error": f"{type(exc).__name__}: {exc}"}
+    return practice_market_summary_impl.build_realtime_market_snapshot(
+        payloads.get("indices") or {},
+        payloads.get("sectors") or {},
+        payloads.get("money_flow") or {},
+        now,
+    )
+
+
+def generate_practice_market_summary() -> dict[str, Any]:
+    return practice_market_summary_impl.generate_and_store_summary(
+        _practice_market_summary_records(),
+        PRACTICE_MARKET_SUMMARY_FILE,
+        current_cn_datetime(),
+        realtime_snapshot_provider=fetch_practice_realtime_market_snapshot,
+        require_realtime=True,
+    )
+
+
 def _store_api_cache_payload(cache_key: str, payload: bytes, generation: int) -> bool:
-    with API_RESPONSE_LOCK:
-        # A producer can still be running when a settings update invalidates
-        # its key. Do not let that obsolete result repopulate the cache.
-        if API_CACHE_KEY_GENERATIONS.get(cache_key, 0) != generation:
-            return False
-        API_RESPONSE_CACHE[cache_key] = {"ts": time.time(), "payload": payload}
-        if len(API_RESPONSE_CACHE) > API_CACHE_MAX_ENTRIES:
-            oldest = sorted(API_RESPONSE_CACHE.items(), key=lambda item: float(item[1].get("ts") or 0))
-            for old_key, _ in oldest[:max(1, len(API_RESPONSE_CACHE) - API_CACHE_MAX_ENTRIES)]:
-                API_RESPONSE_CACHE.pop(old_key, None)
-                old_lock = API_CACHE_KEY_LOCKS.get(old_key)
-                if old_lock is None or not old_lock.locked():
-                    API_CACHE_KEY_LOCKS.pop(old_key, None)
-        return True
+    return response_cache_impl.store_payload(
+        cache_key,
+        payload,
+        generation,
+        entries=API_RESPONSE_CACHE,
+        entries_lock=API_RESPONSE_LOCK,
+        key_locks=API_CACHE_KEY_LOCKS,
+        generations=API_CACHE_KEY_GENERATIONS,
+        max_entries=API_CACHE_MAX_ENTRIES,
+    )
 
 
 def _refresh_api_cache(cache_key: str, producer, generation: int, key_lock: threading.Lock) -> None:
-    try:
-        result = producer()
-        payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
-        _store_api_cache_payload(cache_key, payload, generation)
-    except Exception as exc:
-        print(f"dashboard cache refresh failed for {cache_key}: {type(exc).__name__}: {exc}", file=sys.stderr)
-    finally:
-        key_lock.release()
+    response_cache_impl.refresh_payload(
+        cache_key,
+        producer,
+        generation,
+        key_lock,
+        store=_store_api_cache_payload,
+        warn=lambda message: print(message, file=sys.stderr),
+    )
 
 
 def cache_get_json(cache_key: str, ttl: int, producer) -> tuple[bytes, bool]:
-    now = time.time()
-    with API_RESPONSE_LOCK:
-        cached = API_RESPONSE_CACHE.get(cache_key)
-        cache_age = now - float(cached.get("ts") or 0) if cached else None
-        if cached and cache_age is not None and cache_age < ttl:
-            return cached["payload"], True
-        key_lock = API_CACHE_KEY_LOCKS.setdefault(cache_key, threading.Lock())
-        generation = API_CACHE_KEY_GENERATIONS.get(cache_key, 0)
-
-    # Once a key has produced a usable response, serve the slightly stale value
-    # immediately and refresh it once in the background. Slow quote providers no
-    # longer hold every viewer on the TTL boundary.
-    if cached and cache_age is not None and cache_age < ttl + API_STALE_WHILE_REFRESH_SECONDS:
-        if key_lock.acquire(blocking=False):
-            try:
-                threading.Thread(
-                    target=_refresh_api_cache,
-                    args=(cache_key, producer, generation, key_lock),
-                    name=f"dashboard-cache-{cache_key[:32]}",
-                    daemon=True,
-                ).start()
-            except Exception:
-                key_lock.release()
-                raise
-        return cached["payload"], True
-
-    with key_lock:
-        now = time.time()
-        with API_RESPONSE_LOCK:
-            cached = API_RESPONSE_CACHE.get(cache_key)
-            if cached and now - float(cached.get("ts") or 0) < ttl:
-                return cached["payload"], True
-            generation = API_CACHE_KEY_GENERATIONS.get(cache_key, 0)
-        result = producer()
-        payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
-        _store_api_cache_payload(cache_key, payload, generation)
-        return payload, False
-
-
-def frontend_file_cache_entry(filename: str) -> dict[str, Any]:
-    path = FRONTEND_DIR / filename
-    stat_before = path.stat()
-    signature = (stat_before.st_mtime_ns, stat_before.st_size)
-    with FRONTEND_FILE_CACHE_LOCK:
-        cached = FRONTEND_FILE_CACHE.get(filename)
-        if cached and cached.get("signature") == signature:
-            return cached
-
-    payload = path.read_bytes()
-    stat_after = path.stat()
-    signature_after = (stat_after.st_mtime_ns, stat_after.st_size)
-    # If the asset was replaced while it was being read, read the new version
-    # once more and cache only that result.
-    if signature_after != signature:
-        payload = path.read_bytes()
-        stat_after = path.stat()
-        signature_after = (stat_after.st_mtime_ns, stat_after.st_size)
-    signature = signature_after
-    compressed = gzip.compress(payload, compresslevel=5) if len(payload) >= GZIP_MIN_BYTES else None
-    if compressed is not None and len(compressed) >= len(payload):
-        compressed = None
-    entry = {
-        "signature": signature,
-        "payload": payload,
-        "gzip_payload": compressed,
-        "etag": '"' + hashlib.sha256(payload).hexdigest()[:20] + '"',
-    }
-    with FRONTEND_FILE_CACHE_LOCK:
-        FRONTEND_FILE_CACHE[filename] = entry
-    return entry
+    return response_cache_impl.get_json(
+        cache_key,
+        ttl,
+        producer,
+        entries=API_RESPONSE_CACHE,
+        entries_lock=API_RESPONSE_LOCK,
+        key_locks=API_CACHE_KEY_LOCKS,
+        generations=API_CACHE_KEY_GENERATIONS,
+        stale_while_refresh_seconds=API_STALE_WHILE_REFRESH_SECONDS,
+        store=_store_api_cache_payload,
+        refresh=_refresh_api_cache,
+    )
 
 
 def seed_api_cache_from_json_file(cache_key: str, path: Path, ttl: int, transform=None) -> bool:
@@ -2004,47 +2775,109 @@ def seed_api_cache_from_json_file(cache_key: str, path: Path, ttl: int, transfor
     useful data immediately while ``cache_get_json`` refreshes it in the
     background through the normal producer.
     """
-    with API_RESPONSE_LOCK:
-        if cache_key in API_RESPONSE_CACHE:
-            return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return False
-        data = dict(data)
-        if transform is not None:
-            data = transform(data)
-        if not isinstance(data, dict):
-            return False
-        data["stale_cache"] = True
-        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
-    except (OSError, ValueError, TypeError):
-        return False
-
-    with API_RESPONSE_LOCK:
-        if cache_key in API_RESPONSE_CACHE:
-            return False
-        API_RESPONSE_CACHE[cache_key] = {
-            "ts": time.time() - max(0, ttl) - 0.001,
-            "payload": payload,
-        }
-    return True
+    return response_cache_impl.seed_from_json_file(
+        cache_key,
+        path,
+        ttl,
+        entries=API_RESPONSE_CACHE,
+        entries_lock=API_RESPONSE_LOCK,
+        transform=transform,
+    )
 
 
 def invalidate_api_cache(*cache_keys: str) -> None:
-    with API_RESPONSE_LOCK:
-        for cache_key in cache_keys:
-            API_RESPONSE_CACHE.pop(cache_key, None)
-            API_CACHE_KEY_GENERATIONS[cache_key] = API_CACHE_KEY_GENERATIONS.get(cache_key, 0) + 1
+    response_cache_impl.invalidate(
+        cache_keys,
+        entries=API_RESPONSE_CACHE,
+        entries_lock=API_RESPONSE_LOCK,
+        generations=API_CACHE_KEY_GENERATIONS,
+    )
+
+
+def invalidate_api_cache_prefix(prefix: str) -> None:
+    """Invalidate every in-process cache entry under one bounded API family."""
+    response_cache_impl.invalidate_prefix(
+        prefix,
+        entries=API_RESPONSE_CACHE,
+        entries_lock=API_RESPONSE_LOCK,
+        generations=API_CACHE_KEY_GENERATIONS,
+    )
 
 
 def cached_json_data(cache_key: str, ttl: int, producer, fallback: dict[str, Any]) -> dict[str, Any]:
     payload, _ = cache_get_json(cache_key, ttl, producer)
-    try:
-        data = json.loads(payload.decode("utf-8", "ignore"))
-        return data if isinstance(data, dict) else dict(fallback)
-    except Exception as exc:
-        return {**fallback, "error": str(exc)}
+    return response_cache_impl.decode_json_data(payload, fallback)
+
+
+def iwencai_dragon_tiger_archive_dir() -> Path:
+    return IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE.parent / "iwencai_dragon_tiger"
+
+
+def iwencai_dragon_tiger_snapshot_version(
+    trade_date: str,
+    *,
+    include_latest: bool,
+) -> int:
+    paths = [dragon_tiger_archive_path(iwencai_dragon_tiger_archive_dir(), trade_date)]
+    if include_latest:
+        paths.append(IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE)
+    versions = []
+    for path in paths:
+        try:
+            versions.append(path.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return max(versions, default=0)
+
+
+def produce_iwencai_dragon_tiger_data(
+    trade_date: str,
+    *,
+    page: int,
+    limit: int,
+    allow_latest_snapshot: bool,
+) -> dict[str, Any]:
+    use_snapshot = page == 1 and limit == IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT
+    if use_snapshot:
+        exact_latest = read_dragon_tiger_snapshot(
+            IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE,
+            trade_date=trade_date,
+        )
+        if allow_latest_snapshot and exact_latest:
+            exact_latest["stale"] = False
+            exact_latest["scheduled_refresh_time"] = "18:00"
+            return exact_latest
+        archived = read_dragon_tiger_archive(
+            iwencai_dragon_tiger_archive_dir(),
+            trade_date=trade_date,
+        )
+        if archived:
+            archived["stale"] = False
+            archived["scheduled_refresh_time"] = "18:00"
+            return archived
+        if exact_latest:
+            exact_latest["stale"] = False
+            exact_latest["scheduled_refresh_time"] = "18:00"
+            return exact_latest
+        if allow_latest_snapshot:
+            latest = read_dragon_tiger_snapshot(IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE)
+            if latest:
+                latest["stale"] = str(latest.get("date") or "") != trade_date
+                latest["requested_date"] = trade_date
+                latest["scheduled_refresh_time"] = "18:00"
+                return latest
+
+    payload = fetch_dragon_tiger(trade_date, page=page, limit=limit)
+    payload["scheduled_refresh_time"] = "18:00"
+    if use_snapshot:
+        if write_dragon_tiger_archive(iwencai_dragon_tiger_archive_dir(), payload):
+            payload["archive_saved"] = True
+        if allow_latest_snapshot and write_dragon_tiger_snapshot(
+            IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE,
+            payload,
+        ):
+            payload["snapshot_saved"] = True
+    return payload
 
 
 def produce_us_market_summary_data() -> dict[str, Any]:
@@ -2069,6 +2902,40 @@ def produce_us_sector_data() -> dict[str, Any]:
         return fetch_us_sector_snapshot()
     except Exception as exc:
         return {"items": [], "error": f"{type(exc).__name__}: {exc}"}
+
+
+def produce_money_flow_data() -> dict[str, Any]:
+    money_flow, _samples = fetch_and_record_money_flow(timeout=120)
+    return money_flow
+
+
+def produce_industry_flow_data() -> dict[str, Any]:
+    current = current_cn_datetime()
+    current_day = current_cn_date_key(current)
+    reset_daily_market_histories(current)
+    money_flow = cached_json_data(
+        "money_flow",
+        API_TTLS["money_flow"],
+        produce_money_flow_data,
+        {"inflow": [], "outflow": []},
+    )
+    history_samples = record_industry_flow_sample(money_flow, now=current)
+    if str(money_flow.get("generated_at") or "")[:10] != current_day:
+        money_flow = {
+            "schema_version": 2,
+            "metric": "industry_main_net_flow",
+            "metric_label": "今日主力净额",
+            "inflow": [],
+            "outflow": [],
+        }
+    return build_industry_flow_payload(
+        money_flow,
+        side_limit=INDUSTRY_FLOW_SIDE_LIMIT,
+        history_samples=history_samples,
+        sample_interval_seconds=INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
+        playback_speed=INDUSTRY_FLOW_PLAYBACK_SPEED,
+        sampling_windows=INDUSTRY_FLOW_SAMPLING_WINDOWS,
+    )
 
 
 def is_allowed_x_media_url(url: str) -> bool:
@@ -2123,10 +2990,6 @@ def sanitize_symbols(raw_symbols: str) -> list[str]:
         if len(symbols) >= 80:
             break
     return symbols
-
-
-class RequestTooLarge(ValueError):
-    pass
 
 
 def is_truthy_header(value: str | None) -> bool:
@@ -2249,8 +3112,31 @@ def normalize_env_update(name: str, value: str, kind: str) -> str:
         return "1" if value.lower() in {"1", "true", "yes", "on"} else "0"
     if kind == "int" and value:
         int(value)
+    if kind == "playback_speed":
+        speed = _industry_flow_playback_speed_value(value)
+        try:
+            requested = float(value)
+        except (TypeError, ValueError):
+            requested = -1
+        if requested not in INDUSTRY_FLOW_PLAYBACK_SPEED_OPTIONS:
+            allowed = "、".join(f"{item:g}x" for item in INDUSTRY_FLOW_PLAYBACK_SPEED_OPTIONS)
+            raise ValueError(f"资金流播放速度必须是 {allowed} 之一")
+        return f"{speed:g}"
     if kind in {"max_tokens", "context_length"}:
         return normalize_context_length_update(value)
+    if kind == "api_mode":
+        normalized = value.lower().replace("-", "_") or "auto"
+        aliases = {
+            "auto": "auto",
+            "responses": "responses",
+            "response": "responses",
+            "chat": "chat",
+            "chat_completions": "chat",
+            "chat_completion": "chat",
+        }
+        if normalized not in aliases:
+            raise ValueError("API 接口模式必须是 auto、responses 或 chat")
+        return aliases[normalized]
     if kind == "time":
         normalized = normalize_hhmm(value)
         if value and not normalized:
@@ -2462,6 +3348,7 @@ def write_yaml_config(raw_text: str) -> dict[str, Any]:
 
 
 CRON_CONFIG_NAMES = {
+    "IWENCAI_DRAGON_TIGER_CRON",
     "DASHBOARD_US_MARKET_SUMMARY_CRON",
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
@@ -2469,6 +3356,7 @@ CRON_CONFIG_NAMES = {
     "DASHBOARD_US_RATING_CRON",
 }
 CRON_TIME_CONFIGS = {
+    "IWENCAI_DRAGON_TIGER_CRON": {"day_label": "A股交易日"},
     "DASHBOARD_US_MARKET_SUMMARY_CRON": {"day_label": "A股交易日"},
     "DASHBOARD_MARKET_AUCTION_CRON": {"day_label": "周一至周五"},
     "DASHBOARD_MARKET_MIDDAY_CRON": {"day_label": "周一至周五"},
@@ -2477,15 +3365,15 @@ CRON_TIME_CONFIGS = {
 }
 ADMIN_GROUP_NOTES = {
     "牛牛美股": "集中管理 X/推文监控、美股买入评级和隔夜美股盘面总结使用的 Grok 配置。长度默认：上下文 128000 tokens，最大输出 4096 tokens；关闭时隐藏 X/评级相关设置，隔夜美股总结仍会读取已配置的 Grok 参数。",
-    "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；需兼容 /chat/completions，且模型或网关应具备实时搜索能力。长度默认：上下文 128000 tokens，最大输出 4096 tokens。模型和密钥留空则跳过。",
+    "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；auto 会为 Grok 4.5 和 GPT-5 系列搜索模型选择 Responses API，也可显式选择 responses 或 chat。长度默认：上下文 128000 tokens，最大输出 4096 tokens。模型和密钥留空则跳过。",
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "交易规则与风控": "约束买卖决策必须遵守的交易纪律、持仓数量、仓位比例、现金缓冲与盘面控仓规则。交易纪律 Prompt 会直接写入决策模型的必须遵守段。",
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
     "选股与买卖设置": "配置主板、创业板、科创板和 ST 选股范围、候选数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
     "综合决策参考": "为买卖决策汇总指数、板块、资金流向、热门股票等参考数据。缓存秒数控制数据复用周期，单类参考数据上限可设置为 1～8。",
-    "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
+    "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
-    "指数行情更新周期": "单位为秒，保存后立即用于后续行情请求。",
+    "行情与资金流设置": "统一管理公开快照、指数刷新和行业资金流动画。播放速度、每侧行业数量、采样间隔及上午/下午采样窗口均支持运行时保存后生效；时间使用北京时间 HH:MM，默认 09:25～11:31、13:00～15:01。",
 }
 ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
     {
@@ -2531,6 +3419,12 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
         "icon": "参考",
     },
     {
+        "slug": "iwencai",
+        "name": "问财数据源",
+        "summary": "配置问财网关、密钥、超时、重试、并发与缓存。",
+        "icon": "问财",
+    },
+    {
         "slug": "stock-strategy",
         "name": "选股与交易策略",
         "summary": "选择内置策略或维护自定义预设文字策略。",
@@ -2556,8 +3450,8 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
     },
     {
         "slug": "indices-refresh",
-        "name": "指数行情更新周期",
-        "summary": "调整指数行情数据的刷新频率。",
+        "name": "行情与资金流设置",
+        "summary": "调整指数刷新、资金流展示数量、播放速度、采样频率和时间窗口。",
         "icon": "行情",
     },
 )
@@ -2633,6 +3527,7 @@ US_FEATURE_GATED_NAMES = {
     "US_RATING_CONTEXT_LENGTH",
     "US_RATING_MAX_TOKENS",
     "DASHBOARD_GROK_MODEL",
+    "DASHBOARD_GROK_API_MODE",
     "DASHBOARD_GROK_CONTEXT_LENGTH",
     "DASHBOARD_GROK_MAX_TOKENS",
     "DASHBOARD_GROK_BASE_URL",
@@ -2640,6 +3535,7 @@ US_FEATURE_GATED_NAMES = {
     "X_WATCHLIST_ACCOUNTS",
     "X_WATCHLIST_MAX_TOKENS",
     "X_WATCHLIST_DAEMON_INTERVAL_SECONDS",
+    "X_WATCHLIST_REQUEST_TIMEOUT_SECONDS",
     "DASHBOARD_US_RATING_CRON",
     "US_RATING_DEADLINE_SECONDS",
     "US_RATING_REQUEST_TIMEOUT_SECONDS",
@@ -2816,6 +3712,8 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
     for name in list(normalized):
         if name in CRON_CONFIG_NAMES:
             normalized[name] = normalize_cron_update(name, normalized[name])
+        elif name == "IWENCAI_BASE_URL":
+            normalized[name] = normalize_iwencai_base_url(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "time_list":
             normalized[name] = normalize_time_list_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "time":
@@ -2834,6 +3732,10 @@ def normalize_business_updates(updates: dict[str, str]) -> dict[str, str]:
             normalized[name] = normalize_preset_strategy_text_update(normalized[name])
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "trade_discipline_text":
             normalized[name] = normalize_trade_discipline_text_update(normalized[name])
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "api_mode":
+            normalized[name] = normalize_env_update(name, normalized[name], "api_mode")
+        elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") == "playback_speed":
+            normalized[name] = normalize_env_update(name, normalized[name], "playback_speed")
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"max_tokens", "context_length"}:
             normalized[name] = normalize_context_length_update(normalized[name])
     return normalized
@@ -2863,9 +3765,31 @@ def validate_business_updates(updates: dict[str, str]) -> None:
     for name, value in updates.items():
         if name in CRON_CONFIG_NAMES:
             validate_cron_expr(normalize_cron_update(name, value))
+        elif name == "IWENCAI_BASE_URL":
+            normalize_iwencai_base_url(value)
+        elif name in {
+            "IWENCAI_TIMEOUT_SECONDS",
+            "IWENCAI_MAX_RETRIES",
+            "IWENCAI_MAX_CONCURRENCY",
+            "IWENCAI_CACHE_TTL_SECONDS",
+        } and str(value or "").strip():
+            number = int(value)
+            minimum, maximum = {
+                "IWENCAI_TIMEOUT_SECONDS": (2, 60),
+                "IWENCAI_MAX_RETRIES": (0, 2),
+                "IWENCAI_MAX_CONCURRENCY": (1, 4),
+                "IWENCAI_CACHE_TTL_SECONDS": (15, 3600),
+            }[name]
+            if number < minimum or number > maximum:
+                raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
         elif name == "DASHBOARD_B1_SCHEDULE_TIMES":
             normalize_time_list_update(value)
-        elif name in {"DASHBOARD_B3_EXIT_TIME", "DASHBOARD_TIME_EXIT_TIME", "DASHBOARD_TIME_STOP_EXIT_TIME"}:
+        elif name in {
+            "DASHBOARD_B3_EXIT_TIME",
+            "DASHBOARD_TIME_EXIT_TIME",
+            "DASHBOARD_TIME_STOP_EXIT_TIME",
+            *INDUSTRY_FLOW_WINDOW_CONFIG_NAMES,
+        }:
             normalize_env_update(name, value, "time")
         elif name == "X_WATCHLIST_ACCOUNTS":
             normalize_handle_list_update(value)
@@ -2893,6 +3817,16 @@ def validate_business_updates(updates: dict[str, str]) -> None:
         } and str(value or "").strip():
             if int(value) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
+        elif name == "DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED":
+            normalize_env_update(name, value, "playback_speed")
+        elif name == "DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT" and str(value or "").strip():
+            number = int(value)
+            if number < 1 or number > 10:
+                raise ValueError("资金流每侧行业数量必须在 1 到 10 之间")
+        elif name == "DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS" and str(value or "").strip():
+            number = int(value)
+            if number < 60 or number > 600:
+                raise ValueError("资金流采样间隔必须在 60 到 600 秒之间")
         elif name == "DASHBOARD_MAX_NEW_BUYS_PER_DECISION" and str(value or "").strip():
             if int(value) < 0:
                 raise ValueError(f"{name} 必须大于等于 0")
@@ -2900,6 +3834,10 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             timeout = int(value)
             if timeout < 1 or timeout > 30:
                 raise ValueError(f"{name} 必须在 1 到 30 之间")
+        elif name == "X_WATCHLIST_REQUEST_TIMEOUT_SECONDS" and str(value or "").strip():
+            timeout = int(value)
+            if timeout < 8 or timeout > 120:
+                raise ValueError(f"{name} 必须在 8 到 120 之间")
         elif name in {
             "DASHBOARD_MAX_SINGLE_POSITION_PCT",
             "DASHBOARD_MAX_TOTAL_POSITION_PCT",
@@ -2918,6 +3856,12 @@ def validate_business_updates(updates: dict[str, str]) -> None:
                 raise ValueError(f"{name} 必须大于 0")
         elif ENV_CONFIG_BY_NAME.get(name, {}).get("kind") in {"max_tokens", "context_length"}:
             normalize_context_length_update(value)
+    if set(updates) & set(INDUSTRY_FLOW_WINDOW_CONFIG_NAMES):
+        _industry_flow_sampling_windows_value(
+            updates,
+            fallback=INDUSTRY_FLOW_SAMPLING_WINDOWS,
+            strict=True,
+        )
 
 
 def sync_business_runtime_settings(
@@ -2926,6 +3870,8 @@ def sync_business_runtime_settings(
     sync_names: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     global ADMIN_PASSWORD, B1_CANDIDATE_REFRESH_LAST_TS, B1_SCHEDULE_TIMES
+    global INDUSTRY_FLOW_PLAYBACK_SPEED, INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS, INDUSTRY_FLOW_SIDE_LIMIT
+    global INDUSTRY_FLOW_SAMPLING_WINDOWS
     global TRADER_MODULE, TRADER_MODULE_MTIME, TRADER_SELL_SIGNALS_MTIME
     if isinstance(changed, dict):
         changed_names = set(changed.keys())
@@ -2959,6 +3905,53 @@ def sync_business_runtime_settings(
             applied.append("indices_ttl")
         except (TypeError, ValueError):
             pass
+
+    industry_flow_names = {
+        "DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED",
+        "DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT",
+        "DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS",
+        *INDUSTRY_FLOW_WINDOW_CONFIG_NAMES,
+    }
+    if changed_names & industry_flow_names:
+        INDUSTRY_FLOW_PLAYBACK_SPEED = _industry_flow_playback_speed_value(
+            env_values.get("DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED")
+            or ENV_CONFIG_BY_NAME["DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED"]["default"]
+        )
+        INDUSTRY_FLOW_SIDE_LIMIT = _bounded_int_value(
+            env_values.get("DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT"),
+            INDUSTRY_FLOW_DEFAULT_SIDE_LIMIT,
+            1,
+            10,
+        )
+        INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = _bounded_int_value(
+            env_values.get("DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS"),
+            INDUSTRY_FLOW_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+            60,
+            600,
+        )
+        INDUSTRY_FLOW_SAMPLING_WINDOWS = _industry_flow_sampling_windows_value(env_values)
+        invalidate_api_cache("industry_flow")
+        applied.append("industry_flow")
+
+    iwencai_names = {
+        "IWENCAI_ENABLED",
+        "IWENCAI_BASE_URL",
+        "IWENCAI_API_KEY",
+        "IWENCAI_TIMEOUT_SECONDS",
+        "IWENCAI_MAX_RETRIES",
+        "IWENCAI_MAX_CONCURRENCY",
+        "IWENCAI_CACHE_TTL_SECONDS",
+    }
+    if changed_names & iwencai_names:
+        try:
+            API_TTLS["iwencai_dragon_tiger"] = int(
+                env_values.get("IWENCAI_CACHE_TTL_SECONDS")
+                or ENV_CONFIG_BY_NAME["IWENCAI_CACHE_TTL_SECONDS"]["default"]
+            )
+        except (TypeError, ValueError):
+            pass
+        invalidate_api_cache_prefix("iwencai_dragon_tiger:")
+        applied.append("iwencai")
 
     if changed_names & {
         STRATEGY_SOURCE_ENV,
@@ -3025,6 +4018,156 @@ def crossdesk_provider_values() -> dict[str, str]:
                 "model": str(provider.get("model") or ""),
             }
     return {}
+
+
+def model_test_provider_fallbacks() -> dict[str, dict[str, str]]:
+    """Load complete YAML provider fallbacks without exposing their secrets."""
+
+    try:
+        cfg = load_yaml_config()
+    except Exception:
+        cfg = {}
+
+    providers = cfg.get("custom_providers", []) if isinstance(cfg, dict) else []
+    providers = providers if isinstance(providers, list) else []
+    crossdesk: dict[str, str] = {}
+    grok: dict[str, str] = {}
+    for raw_provider in providers:
+        if not isinstance(raw_provider, dict):
+            continue
+        provider = {
+            "base_url": str(raw_provider.get("base_url") or "").strip(),
+            "api_key": str(raw_provider.get("api_key") or "").strip(),
+        }
+        if not all(provider.values()):
+            continue
+        identity = " ".join(
+            (
+                str(raw_provider.get("name") or ""),
+                provider["base_url"],
+            )
+        ).lower()
+        if not crossdesk and "crossdesk" in identity:
+            crossdesk = provider
+        if not grok and (
+            "grok" in str(raw_provider.get("name") or "").lower()
+            or "crossdesk.ccwu.cc" in provider["base_url"].lower()
+        ):
+            grok = provider
+
+    raw_model = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    model_provider = {
+        "base_url": str(raw_model.get("base_url") or "").strip(),
+        "api_key": str(raw_model.get("api_key") or "").strip(),
+    } if isinstance(raw_model, dict) else {}
+    if not all(model_provider.values()):
+        model_provider = {}
+
+    return {
+        "decision-model": crossdesk,
+        "grok-model": crossdesk,
+        "us-rating-model": crossdesk or model_provider,
+        "a-share-summary-model": grok or crossdesk or model_provider,
+    }
+
+
+def model_test_settings_snapshot(
+    target_id: str,
+    overrides: dict[str, str] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Resolve saved settings plus unsaved form values for one model test."""
+
+    allowed_names = model_test_override_names(target_id)
+    settings: dict[str, str] = {}
+    for name in model_test_setting_names():
+        default = str(ENV_CONFIG_BY_NAME.get(name, {}).get("default") or "").strip()
+        if default:
+            settings[name] = default
+
+    file_values = parse_env_file()
+    for name in model_test_setting_names():
+        if name in file_values:
+            settings[name] = str(file_values[name])
+        if name in os.environ:
+            settings[name] = str(os.environ[name])
+
+    for name, raw_value in (overrides or {}).items():
+        if name not in allowed_names:
+            continue
+        value = str(raw_value or "").strip()
+        if is_secret_config_key(name) and not value:
+            continue
+        settings[name] = value
+
+    fallback = model_test_provider_fallbacks().get(target_id, {})
+    return settings, fallback
+
+
+def send_model_connection_test(
+    target_id: str,
+    overrides: dict[str, str] | None = None,
+    *,
+    opener=None,
+) -> dict[str, Any]:
+    """Run one rate-limited caller's test under a small process-wide cap."""
+
+    if target_id not in MODEL_TEST_TARGET_BY_ID:
+        return {"ok": False, "target": "", "error": "不支持的模型测试目标"}
+    if not MODEL_TEST_SEMAPHORE.acquire(blocking=False):
+        return {
+            "ok": False,
+            "target": target_id,
+            "error": "当前模型测试较多，请稍后重试",
+            "error_code": "busy",
+        }
+    try:
+        settings, fallback = model_test_settings_snapshot(target_id, overrides)
+        kwargs: dict[str, Any] = {
+            "provider_fallback": fallback,
+            "timeout": MODEL_TEST_TIMEOUT_SECONDS,
+        }
+        if opener is not None:
+            kwargs["opener"] = opener
+        return test_model_connection(target_id, settings, **kwargs)
+    finally:
+        MODEL_TEST_SEMAPHORE.release()
+
+
+def iwencai_test_settings_snapshot(
+    overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve saved iWencai settings plus unsaved form values."""
+
+    settings = {
+        name: str(ENV_CONFIG_BY_NAME.get(name, {}).get("default") or "")
+        for name in IWENCAI_TEST_FIELD_NAMES
+    }
+    file_values = parse_env_file()
+    for name in IWENCAI_TEST_FIELD_NAMES:
+        if name in file_values:
+            settings[name] = str(file_values[name])
+        if name in os.environ:
+            settings[name] = str(os.environ[name])
+    for name, raw_value in (overrides or {}).items():
+        if name not in IWENCAI_TEST_FIELD_NAMES:
+            continue
+        value = str(raw_value or "").strip()
+        if is_secret_config_key(name) and not value:
+            continue
+        settings[name] = value
+    return settings
+
+
+def send_iwencai_connection_test(
+    overrides: dict[str, str] | None = None,
+    *,
+    opener=None,
+) -> dict[str, Any]:
+    settings = iwencai_test_settings_snapshot(overrides)
+    kwargs: dict[str, Any] = {"semaphore": IWENCAI_TEST_SEMAPHORE}
+    if opener is not None:
+        kwargs["opener"] = opener
+    return test_iwencai_connection(settings, **kwargs)
 
 
 def business_config_fallback_value(
@@ -3207,6 +4350,8 @@ def build_admin_config_payload() -> dict[str, Any]:
             for channel in NOTIFICATION_CHANNEL_SETTINGS
         ],
         "notification_general_names": list(NOTIFICATION_GENERAL_CONFIG_NAMES),
+        "model_tests": model_test_metadata(),
+        "iwencai_test": iwencai_test_metadata(),
         "ui": {
             "us_feature_toggle_name": "DASHBOARD_US_FEATURES_ENABLED",
             "us_feature_gated_names": sorted(US_FEATURE_GATED_NAMES),
@@ -3305,6 +4450,98 @@ def send_notification_test(
 
 # Frontend documents and UI behavior live in frontend/.
 
+def release_version_tuple(value: str) -> tuple[int, int, int] | None:
+    match = VERSION_PATTERN.fullmatch(str(value or "").strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def fetch_latest_docker_version() -> str:
+    versions: list[tuple[tuple[int, int, int], str]] = []
+    page_count = 1
+    for page in range(1, VERSION_CHECK_MAX_PAGES + 1):
+        url = f"{DOCKER_HUB_TAGS_API}?page={page}&page_size=100"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": f"NiuOne/{CURRENT_VERSION}",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=6) as response:
+            body = response.read(VERSION_CHECK_MAX_RESPONSE_BYTES + 1)
+        if len(body) > VERSION_CHECK_MAX_RESPONSE_BYTES:
+            raise ValueError("Docker Hub response is too large")
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("Docker Hub returned an invalid tag list")
+        for item in payload["results"]:
+            name = str(item.get("name") or "") if isinstance(item, dict) else ""
+            parsed = release_version_tuple(name)
+            if parsed is not None:
+                versions.append((parsed, name))
+        if page == 1:
+            try:
+                total = max(0, int(payload.get("count") or 0))
+            except (TypeError, ValueError):
+                total = len(payload["results"])
+            page_count = max(1, min(VERSION_CHECK_MAX_PAGES, (total + 99) // 100))
+        if page >= page_count:
+            break
+    if not versions:
+        raise ValueError("Docker Hub has no strict release tags")
+    return max(versions, key=lambda item: item[0])[1]
+
+
+def build_version_status() -> dict[str, Any]:
+    checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result: dict[str, Any] = {
+        "current_version": CURRENT_VERSION,
+        "latest_version": None,
+        "update_available": None,
+        "check_ok": False,
+        "checked_at": checked_at,
+        "repository": DOCKER_HUB_REPOSITORY,
+        "repository_url": DOCKER_HUB_REPOSITORY_URL,
+    }
+    try:
+        latest_version = fetch_latest_docker_version()
+        current = release_version_tuple(CURRENT_VERSION)
+        latest = release_version_tuple(latest_version)
+        result["latest_version"] = latest_version
+        result["update_available"] = current < latest if current is not None and latest is not None else None
+        result["check_ok"] = True
+    except Exception as exc:
+        print(f"Docker Hub 版本检查失败：{type(exc).__name__}", file=sys.stderr)
+    return result
+
+
+def get_version_status() -> dict[str, Any]:
+    now = time.time()
+    with VERSION_CHECK_LOCK:
+        cached = VERSION_CHECK_CACHE.get("payload")
+        cached_at = float(VERSION_CHECK_CACHE.get("ts") or 0)
+        cached_ttl = int(VERSION_CHECK_CACHE.get("ttl") or 0)
+        if isinstance(cached, dict) and now - cached_at < cached_ttl:
+            return dict(cached)
+        payload = build_version_status()
+        ttl = VERSION_CHECK_TTL_SECONDS if payload["check_ok"] else VERSION_CHECK_FAILURE_TTL_SECONDS
+        VERSION_CHECK_CACHE.update({"ts": now, "ttl": ttl, "payload": payload})
+        return dict(payload)
+
+
+def get_self_optimize_status() -> dict[str, Any]:
+    from self_optimizer import get_status
+
+    return get_status()
+
+def apply_self_optimization() -> dict[str, Any]:
+    from self_optimizer import apply_optimization
+
+    return apply_optimization()
+
+
 def admin_setting_group_env_names(group_slug: str) -> set[str]:
     group = ADMIN_SETTING_GROUP_BY_SLUG.get(str(group_slug or ""))
     if not group:
@@ -3317,714 +4554,13 @@ def admin_setting_group_env_names(group_slug: str) -> set[str]:
     }
 
 
-class Handler(BaseHTTPRequestHandler):
-    server_version = "NiuOneDashboard"
-    sys_version = ""
+def public_snapshot_publisher() -> Any:
+    global PUBLIC_SNAPSHOT_PUBLISHER
+    if PUBLIC_SNAPSHOT_PUBLISHER is None:
+        from app.dashboard.public_snapshots import SnapshotPublisher
 
-    def remote_ip(self) -> str:
-        return self.client_address[0] if self.client_address else ""
-
-    def request_from_trusted_proxy(self) -> bool:
-        return is_trusted_proxy_ip(self.remote_ip())
-
-    def client_ip(self) -> str:
-        if self.request_from_trusted_proxy():
-            forwarded = first_forwarded_ip(self.headers.get("CF-Connecting-IP"), self.headers.get("X-Forwarded-For"))
-            if forwarded:
-                return forwarded
-        return self.remote_ip()
-
-    def is_secure_request(self) -> bool:
-        if not self.request_from_trusted_proxy():
-            return False
-        if is_truthy_header(self.headers.get("X-Forwarded-Proto")):
-            return True
-        cf_visitor = self.headers.get("CF-Visitor") or ""
-        return '"scheme":"https"' in cf_visitor.replace(" ", "").lower()
-
-    def request_visitor_id(self) -> tuple[str, bool]:
-        visitor_id = parse_request_cookies(self.headers.get("Cookie")).get(VISITOR_COOKIE_NAME, "").strip()
-        if re.fullmatch(r"nvst_[A-Za-z0-9_-]{20,80}", visitor_id or ""):
-            return visitor_id, False
-        return "nvst_" + secrets.token_urlsafe(24), True
-
-    def admin_session_valid(self) -> bool:
-        cookie_value = parse_request_cookies(self.headers.get("Cookie")).get(ADMIN_SESSION_COOKIE_NAME, "")
-        return validate_admin_session(cookie_value)
-
-    def current_user(self) -> dict[str, Any] | None:
-        if not self.admin_session_valid():
-            return None
-        return {"role": "admin", "nickname": "local"}
-
-    def send_security_headers(self) -> None:
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'")
-        if self.is_secure_request():
-            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-
-    def end_headers(self) -> None:
-        self.send_security_headers()
-        try:
-            super().end_headers()
-        except (BrokenPipeError, ConnectionResetError):
-            return
-
-    def write_response(self, payload: bytes) -> None:
-        try:
-            self.wfile.write(payload)
-        except (BrokenPipeError, ConnectionResetError):
-            return
-
-    def accepts_gzip(self) -> bool:
-        accepted = str(self.headers.get("Accept-Encoding") or "")
-        return any(part.strip().split(";", 1)[0].lower() == "gzip" for part in accepted.split(","))
-
-    def maybe_gzip_payload(self, payload: bytes, content_type: str) -> tuple[bytes, bool]:
-        if len(payload) < GZIP_MIN_BYTES or not self.accepts_gzip():
-            return payload, False
-        normalized_type = content_type.split(";", 1)[0].strip().lower()
-        if normalized_type not in GZIP_CONTENT_TYPE_PREFIXES:
-            return payload, False
-        compressed = gzip.compress(payload, compresslevel=5)
-        if len(compressed) >= len(payload):
-            return payload, False
-        return compressed, True
-
-    def send_compression_headers(self, gzipped: bool, payload_len: int) -> None:
-        if gzipped:
-            self.send_header("Content-Encoding", "gzip")
-            self.send_header("Vary", "Accept-Encoding")
-        self.send_header("Content-Length", str(payload_len))
-
-    def send_json_error(self, status: int, error: str, *, allow: str | None = None) -> None:
-        self.send_response(status)
-        if allow:
-            self.send_header("Allow", allow)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.write_response(json.dumps({"error": error}, ensure_ascii=False).encode("utf-8"))
-
-    def send_method_not_allowed(self, allow: str = "POST") -> None:
-        self.send_json_error(405, "method_not_allowed", allow=allow)
-
-    def require_action_request(self) -> bool:
-        header_value = str(self.headers.get(ACTION_HEADER_NAME) or "").strip().lower()
-        if header_value not in ACTION_HEADER_VALUES:
-            self.send_json_error(403, "action_header_required")
-            return False
-        return True
-
-    def send_rate_limited(self, retry_after: int) -> None:
-        parsed = urlparse(self.path)
-        self.send_response(429)
-        self.send_header("Retry-After", str(retry_after))
-        self.send_header("Cache-Control", "no-store")
-        if parsed.path.startswith("/api/"):
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.write_response(json.dumps({"error": "rate_limited", "retry_after": retry_after}, ensure_ascii=False).encode("utf-8"))
-        else:
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.write_response(b"rate limited")
-
-    def enforce_rate_limit(self, scope: str, key: str, limit: int) -> bool:
-        ok, retry_after = check_rate_limit(scope, key, limit)
-        if not ok:
-            self.send_rate_limited(retry_after)
-            return False
-        return True
-
-    def visitor_cookie_flags(self) -> str:
-        secure = "; Secure" if self.is_secure_request() else ""
-        return f"Path=/; Max-Age=31536000; SameSite=Lax{secure}"
-
-    def admin_session_cookie_flags(self) -> str:
-        secure = "; Secure" if self.is_secure_request() else ""
-        max_age = max(60, ADMIN_SESSION_TTL_SECONDS)
-        return f"Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
-
-    def send_frontend_file(
-        self,
-        filename: str,
-        content_type: str,
-        *,
-        cache_control: str,
-        head_only: bool = False,
-        status: int = 200,
-    ) -> None:
-        try:
-            entry = frontend_file_cache_entry(filename)
-        except OSError:
-            self.send_response(500)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            if not head_only:
-                self.write_response(b"frontend asset unavailable")
-            return
-
-        payload = entry["payload"]
-        etag = entry["etag"]
-        if self.headers.get("If-None-Match") == etag:
-            self.send_response(304)
-            self.send_header("Cache-Control", cache_control)
-            self.send_header("ETag", etag)
-            self.end_headers()
-            return
-
-        normalized_type = content_type.split(";", 1)[0].strip().lower()
-        gzip_payload = entry.get("gzip_payload")
-        gzipped = bool(
-            gzip_payload is not None
-            and self.accepts_gzip()
-            and normalized_type in GZIP_CONTENT_TYPE_PREFIXES
-        )
-        body = gzip_payload if gzipped else payload
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", cache_control)
-        self.send_header("ETag", etag)
-        self.send_compression_headers(gzipped, len(body))
-        self.end_headers()
-        if not head_only:
-            self.write_response(body)
-
-    def send_static_asset(self, path: str, *, head_only: bool = False) -> bool:
-        asset = FRONTEND_ASSETS.get(path)
-        if asset is None:
-            return False
-        self.send_frontend_file(
-            asset[0],
-            asset[1],
-            cache_control="public, max-age=31536000, immutable",
-            head_only=head_only,
-        )
-        return True
-
-    def send_frontend_page(self, filename: str, *, head_only: bool = False, status: int = 200) -> None:
-        self.send_frontend_file(
-            filename,
-            "text/html; charset=utf-8",
-            cache_control="no-store",
-            head_only=head_only,
-            status=status,
-        )
-
-    def send_admin_password_required(self) -> bool:
-        self.send_json_error(403, "admin_password_required")
-        return False
-
-    def require_admin(self) -> dict[str, Any] | None:
-        user = self.current_user()
-        if not user:
-            self.send_admin_password_required()
-            return None
-        return user
-
-    def read_form(self) -> dict[str, str]:
-        try:
-            length = int(self.headers.get("Content-Length", "0") or 0)
-        except ValueError:
-            length = 0
-        if length > MAX_POST_BODY_BYTES:
-            raise RequestTooLarge(f"request body too large: {length}")
-        raw = self.rfile.read(length).decode("utf-8", "ignore")
-        parsed = parse_qs(raw, keep_blank_values=True)
-        result: dict[str, str] = {}
-        for key, values in parsed.items():
-            env_name = key[len("env__"):] if key.startswith("env__") else ""
-            schema = ENV_CONFIG_BY_NAME.get(env_name, {})
-            if schema.get("kind") in {"time_list", "handle_list", "stock_universe", "strategy_multi", "strategy_single"}:
-                result[key] = ",".join(v.strip() for v in values if v.strip())
-            else:
-                result[key] = values[-1] if values else ""
-        return result
-
-    def send_payload(self, payload: bytes, *, content_type: str = "application/json; charset=utf-8",
-                     edge_ttl: int = 10, browser_ttl: int = 3, cache_hit: bool | None = None) -> None:
-        body, gzipped = self.maybe_gzip_payload(payload, content_type)
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        if edge_ttl > 0:
-            if EDGE_CACHE_ENABLED:
-                self.send_header("Cache-Control", f"public, max-age={browser_ttl}, s-maxage={edge_ttl}, stale-while-revalidate={edge_ttl * 2}")
-                self.send_header("CDN-Cache-Control", f"public, max-age={edge_ttl}, stale-while-revalidate={edge_ttl * 2}")
-            else:
-                self.send_header("Cache-Control", f"private, max-age={browser_ttl}, stale-while-revalidate={max(browser_ttl, edge_ttl)}")
-                self.send_header("CDN-Cache-Control", "no-store")
-        else:
-            self.send_header("Cache-Control", "no-store")
-        if cache_hit is not None:
-            self.send_header("X-Dashboard-Cache", "HIT" if cache_hit else "MISS")
-        self.send_compression_headers(gzipped, len(body))
-        self.end_headers()
-        self.write_response(body)
-
-    def send_json_cached(self, key: str, ttl: int, producer, *, edge_ttl: int | None = None, browser_ttl: int = 3) -> None:
-        payload, hit = cache_get_json(key, ttl, producer)
-        self.send_payload(payload, edge_ttl=edge_ttl if edge_ttl is not None else ttl, browser_ttl=min(browser_ttl, ttl), cache_hit=hit)
-
-    def send_json_uncached(self, result: dict[str, Any], *, no_store: bool = True) -> None:
-        payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
-        self.send_payload(payload, edge_ttl=0 if no_store else 1)
-
-    def do_HEAD(self) -> None:
-        parsed = urlparse(self.path)
-        if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
-            return
-        if self.send_static_asset(parsed.path, head_only=True):
-            return
-        admin_group_match = re.fullmatch(r"/admin/settings/([a-z0-9-]+)", parsed.path)
-        if admin_group_match:
-            if admin_group_match.group(1) not in ADMIN_SETTING_GROUP_BY_SLUG:
-                self.send_response(404)
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                return
-            self.send_frontend_page("admin.html", head_only=True)
-            return
-        if parsed.path == "/admin":
-            self.send_frontend_page("admin.html", head_only=True)
-            return
-        if parsed.path == "/api/admin/config":
-            authenticated = self.admin_session_valid()
-            self.send_response(200 if authenticated else 403)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
-        if parsed.path == "/api/admin/notifications/test":
-            self.send_method_not_allowed("POST")
-            return
-        if parsed.path == "/api/admin/session":
-            self.send_method_not_allowed("POST")
-            return
-        if parsed.path == "/api/dashboard/bootstrap":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
-        if parsed.path.startswith("/api/admin/"):
-            self.send_response(404)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
-        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS | {PRACTICE_MANUAL_CYCLE_API_PATH, "/api/niuniu_practice/resume", "/api/self_optimize/apply"}:
-            self.send_response(405)
-            self.send_header("Allow", "POST")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
-        if parsed.path in DASHBOARD_PAGE_PATHS:
-            self.send_frontend_page("index.html", head_only=True)
-            return
-        if parsed.path.startswith("/api/"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
-        self.send_response(404)
-        self.end_headers()
-
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
-            return
-        if self.send_static_asset(parsed.path):
-            return
-        admin_group_match = re.fullmatch(r"/admin/settings/([a-z0-9-]+)", parsed.path)
-        if admin_group_match:
-            status = 200 if admin_group_match.group(1) in ADMIN_SETTING_GROUP_BY_SLUG else 404
-            self.send_frontend_page("admin.html", status=status)
-            return
-        if parsed.path == "/admin":
-            self.send_frontend_page("admin.html")
-            return
-        if parsed.path == "/api/admin/config":
-            if not self.require_admin():
-                return
-            self.send_json_uncached(build_admin_config_payload())
-            return
-        if parsed.path == "/api/admin/notifications/test":
-            self.send_method_not_allowed("POST")
-            return
-        if parsed.path in DASHBOARD_PAGE_PATHS:
-            self.send_frontend_page("index.html")
-            return
-        if parsed.path.startswith("/api/"):
-            if not self.enforce_rate_limit("api", self.client_ip(), RATE_LIMIT_API):
-                return
-        if parsed.path == "/api/dashboard/bootstrap":
-            visitor_id, new_visitor = self.request_visitor_id()
-            visit_stats = increment_visit_count(visitor_id)
-            payload = json.dumps(
-                {
-                    "visits": visit_stats["visits"],
-                    "unique": visit_stats["unique"],
-                    "us_features_enabled": us_features_enabled(),
-                },
-                ensure_ascii=False,
-            ).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            if new_visitor:
-                self.send_header("Set-Cookie", f"{VISITOR_COOKIE_NAME}={visitor_id}; {self.visitor_cookie_flags()}")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.write_response(payload)
-            return
-        if parsed.path == "/api/x_media":
-            params = parse_qs(parsed.query)
-            media_url = params.get("url", [""])[0].strip()
-            try:
-                body, content_type = fetch_x_media(media_url)
-            except Exception:
-                self.send_response(404)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.write_response(b"media unavailable")
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "public, max-age=604800, immutable")
-            self.end_headers()
-            self.write_response(body)
-            return
-        if parsed.path == "/api/messages":
-            params = parse_qs(parsed.query)
-            limit = clamp_limit(params.get("limit", [""])[0])
-            offset = clamp_offset(params.get("offset", [""])[0])
-            category = params.get("category", [""])[0].strip() or None
-            cache_key = f"messages:v4:{category or 'all'}:{limit}:{offset}"
-            def produce_messages():
-                return merge_records_from_db(limit=limit, category=category, offset=offset)
-            self.send_json_cached(cache_key, API_TTLS["messages"], produce_messages, edge_ttl=API_TTLS["messages"], browser_ttl=5)
-            return
-        if parsed.path in PRACTICE_CANDIDATES_API_PATHS:
-            params = parse_qs(parsed.query)
-            if params.get("force", ["0"])[0].lower() in {"1", "true", "yes"}:
-                self.send_method_not_allowed("POST")
-            else:
-                ttl = API_TTLS["practice_candidates"]
-                self.send_json_cached(PRACTICE_CANDIDATES_CACHE_KEY, ttl, load_practice_candidates_cache, edge_ttl=ttl, browser_ttl=10)
-            return
-        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS:
-            self.send_method_not_allowed("POST")
-            return
-        if parsed.path == PRACTICE_MANUAL_CYCLE_API_PATH:
-            self.send_json_uncached(practice_manual_cycle_status())
-            return
-        if parsed.path == "/api/niuniu_practice":
-            params = parse_qs(parsed.query)
-            fast = params.get("fast", ["0"])[0].lower() in {"1", "true", "yes"}
-            if fast:
-                self.send_json_cached(PRACTICE_FAST_CACHE_KEY, API_TTLS["niuniu_practice"], get_practice_payload_fast, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=10)
-            else:
-                self.send_json_cached("niuniu_practice", API_TTLS["niuniu_practice"], get_practice_payload, edge_ttl=API_TTLS["niuniu_practice"], browser_ttl=10)
-            return
-        if parsed.path == "/api/niuniu_practice/resume":
-            self.send_method_not_allowed("POST")
-            return
-        if parsed.path == "/api/self_optimize/status":
-            from self_optimizer import get_status
-            payload = json.dumps(get_status(), ensure_ascii=False).encode("utf-8")
-            self.send_payload(payload, edge_ttl=0)
-            return
-        if parsed.path == "/api/self_optimize/apply":
-            self.send_method_not_allowed("POST")
-            return
-        if parsed.path == "/api/daily_evolution":
-            report_file = CRON_OUTPUT_DIR / "daily_evolution_report.json"
-            if report_file.exists():
-                payload = report_file.read_bytes()
-            else:
-                payload = json.dumps({"error":"尚无进化报告，等待首次盘后运行"}, ensure_ascii=False).encode("utf-8")
-            self.send_payload(payload, edge_ttl=10, browser_ttl=5)
-            return
-        if parsed.path == "/api/practice_benchmarks":
-            self.send_json_cached("practice_benchmarks", API_TTLS["practice_benchmarks"], get_practice_benchmarks, edge_ttl=API_TTLS["practice_benchmarks"], browser_ttl=10)
-            return
-        if parsed.path == "/api/indices":
-            self.send_json_cached("indices", API_TTLS["indices"], produce_indices_data, edge_ttl=API_TTLS["indices"], browser_ttl=15)
-            return
-        if parsed.path == "/api/sectors":
-            seed_api_cache_from_json_file(
-                "sectors",
-                CRON_OUTPUT_DIR / "sectors_dashboard_cache.json",
-                API_TTLS["sectors"],
-            )
-            self.send_json_cached("sectors", API_TTLS["sectors"], lambda: run_dashboard_helper("sectors_dashboard_api.py", {"sectors": [], "items": [], "gain_top": [], "loss_top": []}, timeout=120), edge_ttl=API_TTLS["sectors"], browser_ttl=15)
-            return
-        if parsed.path == "/api/hot_stocks":
-            params = parse_qs(parsed.query)
-            sort_by = (params.get("sort_by", ["amount"])[0] or "amount").strip().lower()
-            if sort_by not in {"amount", "amount_top", "turnover", "turnover_top", "volume", "volume_top", "gain", "hot"}:
-                sort_by = "amount"
-
-            def produce_hot_stocks():
-                data = run_dashboard_helper(
-                    "hot_stocks_dashboard_api.py",
-                    {"items": [], "amount_top": [], "turnover_top": [], "volume_top": [], "gain_top": []},
-                    timeout=120,
-                )
-                return apply_hot_stocks_sort(data, sort_by)
-
-            hot_stocks_cache_key = f"hot_stocks:{sort_by}"
-            seed_api_cache_from_json_file(
-                hot_stocks_cache_key,
-                CRON_OUTPUT_DIR / "hot_stocks_dashboard_cache.json",
-                API_TTLS["hot_stocks"],
-                lambda data: apply_hot_stocks_sort(data, sort_by),
-            )
-            self.send_json_cached(hot_stocks_cache_key, API_TTLS["hot_stocks"], produce_hot_stocks, edge_ttl=API_TTLS["hot_stocks"], browser_ttl=15)
-            return
-        if parsed.path == "/api/us_quotes":
-            params = parse_qs(parsed.query)
-            symbols = sanitize_symbols(params.get("symbols", [""])[0])
-            cache_key = "us_quotes:" + ",".join(symbols)
-            self.send_json_cached(cache_key, API_TTLS["us_quotes"], lambda: fetch_us_quotes(symbols), edge_ttl=API_TTLS["us_quotes"], browser_ttl=10)
-            return
-        if parsed.path == "/api/us_profiles":
-            params = parse_qs(parsed.query)
-            symbols = sanitize_symbols(params.get("symbols", [""])[0])
-            cache_key = "us_profiles:" + ",".join(symbols)
-            ttl = API_TTLS["us_profiles"]
-            self.send_json_cached(
-                cache_key,
-                ttl,
-                lambda: fetch_us_profiles(symbols),
-                edge_ttl=ttl,
-                browser_ttl=3600,
-            )
-            return
-        if parsed.path == "/api/us_market_summary":
-            self.send_json_cached("us_market_summary", API_TTLS["us_market_summary"], produce_us_market_summary_data, edge_ttl=API_TTLS["us_market_summary"], browser_ttl=30)
-            return
-        if parsed.path == "/api/us_sectors":
-            self.send_json_cached("us_sectors", API_TTLS["us_sectors"], produce_us_sector_data, edge_ttl=API_TTLS["us_sectors"], browser_ttl=30)
-            return
-        if parsed.path == "/api/money_flow":
-            seed_api_cache_from_json_file(
-                "money_flow",
-                CRON_OUTPUT_DIR / "money_flow_dashboard_cache.json",
-                API_TTLS["money_flow"],
-            )
-            self.send_json_cached("money_flow", API_TTLS["money_flow"], lambda: run_dashboard_helper("money_flow_dashboard_api.py", {"inflow": [], "outflow": []}, timeout=120), edge_ttl=API_TTLS["money_flow"], browser_ttl=15)
-            return
-        if parsed.path == "/api/market_flow":
-            self.send_json_cached("market_flow", API_TTLS["market_flow"], lambda: run_dashboard_helper("market_flow_dashboard_api.py", {"total_inflow_yi": None}, timeout=30), edge_ttl=API_TTLS["market_flow"], browser_ttl=10)
-            return
-        self.send_response(404)
-        self.end_headers()
-        self.write_response(b"not found")
-
-    def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        if not self.enforce_rate_limit("ip", self.client_ip(), RATE_LIMIT_ANON):
-            return
-        if parsed.path == "/api/admin/session":
-            peer_ip = self.remote_ip()
-            client_ip = self.client_ip()
-            if not self.enforce_rate_limit("admin-login-peer", peer_ip, RATE_LIMIT_ADMIN_LOGIN):
-                return
-            if client_ip != peer_ip and not self.enforce_rate_limit("admin-login-client", client_ip, RATE_LIMIT_ADMIN_LOGIN):
-                return
-            try:
-                form = self.read_form()
-            except RequestTooLarge:
-                self.send_json_error(413, "请求过大，请重新提交")
-                return
-            authenticated = verify_admin_credential(form.get("admin_password", ""))
-            result = {"ok": authenticated}
-            if not authenticated:
-                result["error"] = "管理员凭据错误"
-            payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
-            self.send_response(200 if authenticated else 403)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            if authenticated:
-                self.send_header(
-                    "Set-Cookie",
-                    f"{ADMIN_SESSION_COOKIE_NAME}={new_admin_session()}; {self.admin_session_cookie_flags()}",
-                )
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.write_response(payload)
-            return
-        legacy_force_path = parsed.path == "/api/b1_screen"
-        if parsed.path == PRACTICE_MANUAL_CYCLE_API_PATH:
-            if not self.require_admin():
-                return
-            if not self.require_action_request():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            self.send_json_uncached(start_practice_manual_cycle())
-            return
-        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS or legacy_force_path:
-            params = parse_qs(parsed.query)
-            if legacy_force_path and params.get("force", ["0"])[0].lower() not in {"1", "true", "yes"}:
-                self.send_response(404)
-                self.end_headers()
-                self.write_response(b"not found")
-                return
-            if not self.require_admin():
-                return
-            if not self.require_action_request():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            cache_data = trigger_b1_scan(force=True)
-            with API_RESPONSE_LOCK:
-                API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
-            self.send_json_uncached(cache_data)
-            return
-        if parsed.path == "/api/niuniu_practice/resume":
-            if not self.require_admin():
-                return
-            if not self.require_action_request():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            result = get_trader_module().resume_trading()
-            API_RESPONSE_CACHE.pop("niuniu_practice", None)
-            API_RESPONSE_CACHE.pop(PRACTICE_FAST_CACHE_KEY, None)
-            self.send_json_uncached(result)
-            return
-        if parsed.path == "/api/self_optimize/apply":
-            if not self.require_admin():
-                return
-            if not self.require_action_request():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            from self_optimizer import apply_optimization
-            payload = json.dumps(apply_optimization(), ensure_ascii=False).encode("utf-8")
-            self.send_payload(payload, edge_ttl=0)
-            return
-        if parsed.path == "/api/admin/notifications/test":
-            if not self.require_admin():
-                return
-            if not self.require_action_request():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            if not self.enforce_rate_limit(
-                "notification-test",
-                self.client_ip(),
-                RATE_LIMIT_NOTIFICATION_TEST,
-            ):
-                return
-            try:
-                form = self.read_form()
-            except RequestTooLarge:
-                self.send_json_error(413, "request_too_large")
-                return
-
-            channel_id = str(form.get("channel") or "").strip().lower()
-            channel = NOTIFICATION_CHANNEL_BY_ID.get(channel_id)
-            allowed_names = {"DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS"}
-            if channel is not None:
-                allowed_names.update(str(name) for name in channel.get("field_names", ()))
-            overrides = {
-                key[len("env__"):]: value
-                for key, value in form.items()
-                if key.startswith("env__") and key[len("env__"):] in allowed_names
-            }
-            self.send_json_uncached(send_notification_test(channel_id, overrides))
-            return
-        env_config_match = re.fullmatch(
-            r"/api/admin/config/env(?:/([a-z0-9-]+))?",
-            parsed.path,
-        )
-        if env_config_match:
-            if not self.require_admin():
-                return
-            if not self.require_action_request():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            group_slug = env_config_match.group(1) or ""
-            group = ADMIN_SETTING_GROUP_BY_SLUG.get(group_slug) if group_slug else None
-            if group_slug and group is None:
-                self.send_json_error(404, "unknown_settings_group")
-                return
-            try:
-                form = self.read_form()
-                visible_names = (
-                    admin_setting_group_env_names(group_slug)
-                    if group_slug
-                    else set(admin_visible_env_names())
-                )
-                updates = {
-                    key[len("env__"):]: value
-                    for key, value in form.items()
-                    if key.startswith("env__") and key[len("env__"):] in visible_names
-                }
-                removed_notification_channels = {
-                    key[len("notification_remove__"):]
-                    for key, value in form.items()
-                    if key.startswith("notification_remove__")
-                    and str(value or "").strip().lower() in TRUTHY_VALUES
-                } if not group_slug or group_slug == "notifications" else set()
-                updates = normalize_business_updates(updates)
-                validate_business_updates(updates)
-                result = persist_and_sync_business_updates(
-                    updates,
-                    clear_names=removed_notification_config_names(removed_notification_channels),
-                )
-                result["reauth_required"] = "DASHBOARD_ADMIN_PASSWORD" in set(result.get("changed_names") or [])
-                if result.get("changed"):
-                    result["restart"] = {"ok": False, "skipped": "hot_applied"}
-                else:
-                    result["restart"] = {"ok": False, "skipped": "unchanged"}
-                if group is not None:
-                    result["group"] = {
-                        "slug": group_slug,
-                        "name": str(group["name"]),
-                    }
-                result["config"] = build_admin_config_payload()
-            except Exception as exc:
-                self.send_json_uncached({"ok": False, "error": str(exc)})
-                return
-            self.send_json_uncached(result)
-            return
-        if parsed.path == "/api/admin/config/yaml":
-            if not self.require_admin():
-                return
-            if not self.require_action_request():
-                return
-            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
-                return
-            try:
-                form = self.read_form()
-                result = write_yaml_config(form.get("config_yaml", ""))
-            except Exception as exc:
-                self.send_json_uncached({"ok": False, "error": str(exc)})
-                return
-            self.send_json_uncached(result)
-            return
-        self.send_response(404)
-        self.end_headers()
-        self.write_response(b"not found")
-
-    def log_message(self, fmt: str, *args: Any) -> None:
-        sanitized_args = list(args)
-        if sanitized_args and isinstance(sanitized_args[0], str):
-            sanitized_args[0] = re.sub(r"([?&]token=)[^&\s]+", r"\1[redacted]", sanitized_args[0])
-        print(f"{self.address_string()} - {fmt % tuple(sanitized_args)}")
+        PUBLIC_SNAPSHOT_PUBLISHER = SnapshotPublisher(PUBLIC_DATA_DIR)
+    return PUBLIC_SNAPSHOT_PUBLISHER
 
 
 SINA_US_QUOTE_URL = "https://hq.sinajs.cn/list="
@@ -4166,20 +4702,12 @@ def _safe_float(v: str) -> float | None:
 
 
 def main() -> None:
-    ensure_stats_db()
-    # Complete message schema/index setup before accepting browser requests so
-    # the first uncached X page never waits on migration work while a writer is
-    # active.
-    with closing(push_history.connect()):
-        pass
-    get_or_create_admin_token()
     parser = argparse.ArgumentParser(description="NiuOne dashboard")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     args = parser.parse_args()
-    server = ReusableThreadingHTTPServer((args.host, args.port), Handler)
-    start_b1_scheduler()
-    start_pending_decision_executor()
+    from app.dashboard.fastapi_app import run
+
     print(f"牛牛1号：http://{args.host}:{args.port}")
     if ADMIN_PASSWORD:
         print("设置页：/admin（管理员密码保护已启用）")
@@ -4187,10 +4715,7 @@ def main() -> None:
         print(f"设置页：/admin（管理员密钥：{ADMIN_TOKEN_FILE}）")
     print(f"访问统计：{STATS_DB}")
     print(f"消息历史：{push_history.DB_PATH}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    run(host=args.host, port=args.port, legacy_module=sys.modules[__name__])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
 """Zettaranc (Z哥) strategy scorers."""
+import math
+import re
 import statistics
 from typing import Any
 
@@ -14,6 +16,178 @@ from .common import (
     safe_round,
     with_strategy_profile,
 )
+
+
+ZETTARANC_STRATEGY_IDS = frozenset({
+    "shaofu_b1",
+    "b2_confirm",
+    "b3_accelerate",
+    "super_b1",
+})
+ZETTARANC_INDUSTRY_FLOW_MAX_BONUS = 1.50
+ZETTARANC_INDUSTRY_FLOW_RANK_STEP = 0.15
+_ZETTARANC_VERDICT_LABELS = {
+    "shaofu_b1": "少妇B1",
+    "b2_confirm": "B2确认",
+    "b3_accelerate": "B3中继",
+    "super_b1": "超级B1",
+}
+
+
+def _industry_name(value: Any) -> str:
+    text = re.sub(r"\s+", "", str(value or "")).strip()
+    text = re.sub(r"[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+$", "", text).strip()
+    for suffix in ("行业", "板块", "概念", "指数"):
+        if text.endswith(suffix) and len(text) > len(suffix) + 1:
+            text = text[: -len(suffix)]
+    return text
+
+
+def _flow_number(value: Any) -> float | None:
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def zettaranc_industry_flow_signal(
+    rows: list[dict[str, Any]],
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Map the shared industry main-flow inflow ranking to one Z哥 candidate."""
+    latest = rows[-1] if rows else {}
+    industry = _industry_name(latest.get("industry"))
+    source_context = context if isinstance(context, dict) else {}
+    flow_payload = source_context.get("industry_money_flow")
+    if not isinstance(flow_payload, dict):
+        flow_payload = {}
+
+    metadata = {
+        "industry": industry,
+        "industry_flow_available": False,
+        "industry_flow_matched": False,
+        "industry_flow_direction": "neutral",
+        "industry_flow_rank": None,
+        "industry_flow_rank_total": 0,
+        "industry_flow_net_yi": None,
+        "industry_outflow_matched": False,
+        "industry_outflow_rank": None,
+        "industry_outflow_rank_total": 0,
+        "industry_outflow_net_yi": None,
+        "industry_flow_adjustment": 0.0,
+        "industry_flow_source": str(flow_payload.get("source") or ""),
+        "industry_flow_generated_at": str(flow_payload.get("generated_at") or ""),
+    }
+    if (
+        not industry
+        or flow_payload.get("stale_cache")
+        or flow_payload.get("error")
+        or str(flow_payload.get("metric") or "") != "industry_main_net_flow"
+    ):
+        return metadata
+
+    def ranked_rows(key: str, *, positive: bool) -> list[tuple[str, float]]:
+        ranked: list[tuple[str, float]] = []
+        for row in flow_payload.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            name = _industry_name(row.get("name") or row.get("industry"))
+            value = _flow_number(
+                row.get("net_flow_yi")
+                if row.get("net_flow_yi") is not None
+                else row.get("main_net_flow_yi")
+            )
+            if name and value is not None and ((positive and value > 0) or (not positive and value < 0)):
+                ranked.append((name, value))
+        ranked.sort(key=(lambda item: (-item[1], item[0])) if positive else (lambda item: (item[1], item[0])))
+        return ranked
+
+    def unique_match(ranked: list[tuple[str, float]]) -> int | None:
+        exact = [index for index, (name, _value) in enumerate(ranked) if name == industry]
+        partial = [
+            index
+            for index, (name, _value) in enumerate(ranked)
+            if industry in name or name in industry
+        ]
+        matches = exact or partial
+        # Ambiguous partial names (for example, 汽车 vs 汽车整车/汽车零部件)
+        # must stay neutral rather than receiving a possibly incorrect signal.
+        return matches[0] if len(matches) == 1 else None
+
+    ranked = ranked_rows("inflow", positive=True)
+    ranked_outflow = ranked_rows("outflow", positive=False)
+    if not ranked and not ranked_outflow:
+        return metadata
+
+    metadata["industry_flow_available"] = True
+    metadata["industry_flow_rank_total"] = len(ranked)
+    metadata["industry_outflow_rank_total"] = len(ranked_outflow)
+
+    matched_index = unique_match(ranked)
+    if matched_index is not None:
+        matched_name, net_flow_yi = ranked[matched_index]
+        rank = matched_index + 1
+        adjustment = max(
+            0.0,
+            ZETTARANC_INDUSTRY_FLOW_MAX_BONUS
+            - (rank - 1) * ZETTARANC_INDUSTRY_FLOW_RANK_STEP,
+        )
+        metadata.update({
+            "industry_flow_matched": True,
+            "industry_flow_direction": "inflow",
+            "industry_flow_industry": matched_name,
+            "industry_flow_rank": rank,
+            "industry_flow_net_yi": round(net_flow_yi, 4),
+            "industry_flow_adjustment": round(adjustment, 2),
+        })
+        return metadata
+
+    outflow_index = unique_match(ranked_outflow)
+    if outflow_index is None:
+        return metadata
+    matched_name, net_flow_yi = ranked_outflow[outflow_index]
+    metadata.update({
+        "industry_flow_direction": "outflow",
+        "industry_outflow_matched": True,
+        "industry_flow_industry": matched_name,
+        "industry_outflow_rank": outflow_index + 1,
+        "industry_outflow_net_yi": round(net_flow_yi, 4),
+    })
+    return metadata
+
+
+def _with_zettaranc_profile(
+    strategy_name: str,
+    rows: list[dict[str, Any]],
+    context: dict[str, Any] | None,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply the bounded industry-flow preference before final profile gates."""
+    technical_score = max(0.0, min(10.0, float(payload.get("score") or 0.0)))
+    flow_signal = zettaranc_industry_flow_signal(rows, context)
+    adjustment = float(flow_signal.get("industry_flow_adjustment") or 0.0)
+    adjusted_score = technical_score + adjustment
+    displayed_score = min(10.0, adjusted_score)
+    label = _ZETTARANC_VERDICT_LABELS[strategy_name]
+    payload.update(flow_signal)
+    payload["score_before_industry_flow"] = round(technical_score, 1)
+    payload["score"] = displayed_score
+    payload["verdict"] = (
+        f"高匹配{label}" if displayed_score >= 8 else
+        f"中等匹配{label}" if displayed_score >= 6 else
+        f"弱匹配{label}" if displayed_score >= 4 else "不匹配"
+    )
+    profiled = with_strategy_profile(strategy_name, payload)
+    # Keep the ranking bonus effective even when the visible 10-point score is
+    # capped, while retaining the existing score_total contract.
+    priority = int(profiled.get("strategy_priority") or 0)
+    blocker_penalty = len(profiled.get("hard_blockers") or []) * 1.5
+    profiled["decision_score"] = round(
+        adjusted_score + priority / 100 - blocker_penalty,
+        2,
+    )
+    return profiled
 
 
 def recent_b1_indices(rows, lookback=15, end_offset=1):
@@ -33,7 +207,10 @@ def recent_b1_indices(rows, lookback=15, end_offset=1):
     return out
 
 
-def score_shaofu_b1(rows) -> dict[str, Any] | None:
+def score_shaofu_b1(
+    rows,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Z哥少妇B1：J≤12(最好负值) + N型上移 + 缩量回调 + 牛绳/BBI约束。"""
     if len(rows) < 30:
         return None
@@ -111,11 +288,8 @@ def score_shaofu_b1(rows) -> dict[str, Any] | None:
     if pressure_space < 5:
         risk_flags.append("上方空间不足")
 
-    verdict = ("高匹配少妇B1" if score >= 8 else
-               "中等匹配少妇B1" if score >= 6 else
-               "弱匹配少妇B1" if score >= 4 else "不匹配")
-    return with_strategy_profile("shaofu_b1", {
-        "score": score, "score_total": 10, "verdict": verdict,
+    return _with_zettaranc_profile("shaofu_b1", rows, context, {
+        "score": score, "score_total": 10,
         "bbi": safe_round(bbi_r, 2), "distance_pct": safe_round(dist_bbi, 2),
         "above_bbi": close >= bbi_r, "bbi_upward": bool(len(rows) >= 2 and rows[-2].get("bbi") and bbi_r >= rows[-2]["bbi"]),
         "current_j": safe_round(j, 2), "min_j_10d": safe_round(min(r.get("j") for r in rows[-10:] if r.get("j") is not None), 2),
@@ -133,7 +307,10 @@ def score_shaofu_b1(rows) -> dict[str, Any] | None:
     })
 
 
-def score_b2_confirm(rows) -> dict[str, Any] | None:
+def score_b2_confirm(
+    rows,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Z哥B2确认：B1后3日内放量中/大阳，J未过热，趋势确认。"""
     if len(rows) < 35:
         return None
@@ -202,11 +379,8 @@ def score_b2_confirm(rows) -> dict[str, Any] | None:
     if dist_bbi > 6.5:
         risk_flags.append("距BBI偏远")
 
-    verdict = ("高匹配B2确认" if score >= 8 else
-               "中等匹配B2确认" if score >= 6 else
-               "弱匹配B2确认" if score >= 4 else "不匹配")
-    return with_strategy_profile("b2_confirm", {
-        "score": score, "score_total": 10, "verdict": verdict,
+    return _with_zettaranc_profile("b2_confirm", rows, context, {
+        "score": score, "score_total": 10,
         "bbi": safe_round(bbi_r, 2), "distance_pct": safe_round(dist_bbi, 2),
         "above_bbi": above_bbi, "bbi_upward": bool(len(rows) >= 2 and rows[-2].get("bbi") and bbi_r >= rows[-2]["bbi"]),
         "current_j": safe_round(j, 2), "j_recovering": True, "j_oversold": False,
@@ -217,7 +391,10 @@ def score_b2_confirm(rows) -> dict[str, Any] | None:
     })
 
 
-def score_b3_accelerate(rows) -> dict[str, Any] | None:
+def score_b3_accelerate(
+    rows,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Z哥B3：B2后小阳/十字星，振幅小，分歧转一致。"""
     if len(rows) < 40:
         return None
@@ -290,11 +467,8 @@ def score_b3_accelerate(rows) -> dict[str, Any] | None:
     if dist_bbi > 6.5:
         risk_flags.append("距BBI偏远")
 
-    verdict = ("高匹配B3中继" if score >= 8 else
-               "中等匹配B3中继" if score >= 6 else
-               "弱匹配B3中继" if score >= 4 else "不匹配")
-    return with_strategy_profile("b3_accelerate", {
-        "score": score, "score_total": 10, "verdict": verdict,
+    return _with_zettaranc_profile("b3_accelerate", rows, context, {
+        "score": score, "score_total": 10,
         "bbi": safe_round(bbi_r, 2), "distance_pct": safe_round(dist_bbi, 2),
         "above_bbi": close >= bbi_r, "bbi_upward": bool(len(rows) >= 2 and rows[-2].get("bbi") and bbi_r >= rows[-2]["bbi"]),
         "current_j": safe_round(j, 2), "j_recovering": True, "j_oversold": False,
@@ -306,7 +480,10 @@ def score_b3_accelerate(rows) -> dict[str, Any] | None:
     })
 
 
-def score_super_b1(rows) -> dict[str, Any] | None:
+def score_super_b1(
+    rows,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Z哥超级B1：放量破位洗盘后缩量企稳，J值仍在负值/低位。"""
     if len(rows) < 35:
         return None
@@ -379,11 +556,8 @@ def score_super_b1(rows) -> dict[str, Any] | None:
     if wash_days_ago > 3:
         risk_flags.append("洗盘信号不够新")
 
-    verdict = ("高匹配超级B1" if score >= 8 else
-               "中等匹配超级B1" if score >= 6 else
-               "弱匹配超级B1" if score >= 4 else "不匹配")
-    return with_strategy_profile("super_b1", {
-        "score": score, "score_total": 10, "verdict": verdict,
+    return _with_zettaranc_profile("super_b1", rows, context, {
+        "score": score, "score_total": 10,
         "bbi": safe_round(bbi_r, 2), "distance_pct": safe_round(dist_bbi, 2),
         "above_bbi": close >= bbi_r, "bbi_upward": bool(len(rows) >= 2 and rows[-2].get("bbi") and bbi_r >= rows[-2]["bbi"]),
         "current_j": safe_round(j, 2), "min_j_10d": safe_round(min(r.get("j") for r in rows[-10:] if r.get("j") is not None), 2),
@@ -395,3 +569,9 @@ def score_super_b1(rows) -> dict[str, Any] | None:
         "recent_close": safe_round(close, 2),
         "change_pct": safe_round(recent.get("change_pct"), 2),
     })
+
+
+score_shaofu_b1.requires_context = True  # type: ignore[attr-defined]
+score_b2_confirm.requires_context = True  # type: ignore[attr-defined]
+score_b3_accelerate.requires_context = True  # type: ignore[attr-defined]
+score_super_b1.requires_context = True  # type: ignore[attr-defined]

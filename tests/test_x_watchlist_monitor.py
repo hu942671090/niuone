@@ -6,6 +6,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,23 @@ ENTRYPOINTS = SRC / 'entrypoints'
 
 
 class XWatchlistMonitorTests(unittest.TestCase):
+    def test_x_watchlist_request_timeout_can_be_overridden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env['X_WATCHLIST_REQUEST_TIMEOUT_SECONDS'] = '50'
+            code = f"""
+import importlib.util, json, sys
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+print(json.dumps({{'timeout': m.REQUEST_TIMEOUT_SECONDS}}))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            self.assertEqual(json.loads(out)['timeout'], 50)
+
     def test_context_length_does_not_set_x_watchlist_max_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
@@ -29,7 +47,7 @@ spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', 
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 captured = {{}}
-def fake_openai_chat_json(base_url, api_key, prompt, max_tokens, timeout=m.REQUEST_TIMEOUT_SECONDS):
+def fake_openai_chat_json(base_url, api_key, prompt, max_tokens, timeout=m.REQUEST_TIMEOUT_SECONDS, x_handles=None):
     captured['max_tokens'] = max_tokens
     return {{'accounts': []}}
 m.openai_chat_json = fake_openai_chat_json
@@ -61,7 +79,7 @@ spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', 
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 captured = {{}}
-def fake_openai_chat_json(base_url, api_key, prompt, max_tokens, timeout=m.REQUEST_TIMEOUT_SECONDS):
+def fake_openai_chat_json(base_url, api_key, prompt, max_tokens, timeout=m.REQUEST_TIMEOUT_SECONDS, x_handles=None):
     captured['max_tokens'] = max_tokens
     return {{'accounts': []}}
 m.openai_chat_json = fake_openai_chat_json
@@ -83,6 +101,8 @@ print(json.dumps({{
             env = os.environ.copy()
             env['DASHBOARD_HOME'] = tmp
             env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env['DASHBOARD_GROK_MODEL'] = 'grok-4.20-multi-agent-xhigh'
+            env['DASHBOARD_GROK_API_MODE'] = 'auto'
             code = f"""
 import importlib.util, json, sys
 sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
@@ -112,6 +132,203 @@ print(json.dumps(captured, ensure_ascii=False))
             self.assertNotIn('temperature', payload)
             self.assertEqual(captured['headers']['User-agent'], 'NiuOne/1.0')
             self.assertEqual(captured['headers']['Accept'], 'application/json')
+
+    def test_gpt_x_search_stays_on_chat_in_auto_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env['DASHBOARD_GROK_MODEL'] = 'gpt-5.6-sol'
+            env['DASHBOARD_GROK_API_MODE'] = 'auto'
+            code = f"""
+import importlib.util, json, sys
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+captured = {{}}
+class Resp:
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+    def read(self):
+        return b'{{"choices":[{{"message":{{"content":"{{\\\\\\"accounts\\\\\":[]}}"}}}}]}}'
+def fake_urlopen(req, timeout=0):
+    captured['url'] = req.full_url
+    captured['payload'] = json.loads(req.data.decode('utf-8'))
+    return Resp()
+m.urllib.request.urlopen = fake_urlopen
+result = m.openai_chat_json('https://x.example/v1', 'secret', 'return JSON', 321, timeout=3, x_handles=['@Foo'])
+print(json.dumps({{'captured': captured, 'result': result}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            payload = data['captured']['payload']
+            self.assertEqual(data['captured']['url'], 'https://x.example/v1/chat/completions')
+            self.assertEqual(payload['max_tokens'], 321)
+            self.assertNotIn('tools', payload)
+            self.assertEqual(data['result'], {'accounts': []})
+
+    def test_empty_and_non_json_model_responses_are_temporary_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env['DASHBOARD_GROK_MODEL'] = 'gpt-5.6-sol'
+            env['DASHBOARD_GROK_API_MODE'] = 'auto'
+            code = f"""
+import importlib.util, json, sys
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+class Resp:
+    def __init__(self, body):
+        self.body = body
+        self.headers = {{'Content-Type': 'text/plain'}}
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+    def read(self):
+        return self.body
+results = []
+for body in (b'', b'<html>gateway error</html>'):
+    m.urllib.request.urlopen = lambda req, timeout=0, body=body: Resp(body)
+    try:
+        m.openai_chat_json('https://x.example/v1', 'secret', 'return JSON', 321, timeout=3)
+    except Exception as exc:
+        results.append({{'type': type(exc).__name__, 'temporary': m.is_temporary_error(exc)}})
+print(json.dumps(results))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            self.assertEqual(
+                data,
+                [
+                    {'type': 'ModelResponseParseError', 'temporary': True},
+                    {'type': 'ModelResponseParseError', 'temporary': True},
+                ],
+            )
+
+    def test_grok_45_uses_responses_x_search_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env['DASHBOARD_GROK_MODEL'] = 'grok-4.5'
+            env['DASHBOARD_GROK_API_MODE'] = 'auto'
+            code = f"""
+import importlib.util, json, sys
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+captured = {{}}
+class Resp:
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+    def read(self):
+        return b'{{"output":[{{"content":[{{"type":"output_text","text":"{{\\\\\\"accounts\\\\\\":[]}}"}}]}}]}}'
+def fake_urlopen(req, timeout=0):
+    captured['url'] = req.full_url
+    captured['payload'] = json.loads(req.data.decode('utf-8'))
+    return Resp()
+m.urllib.request.urlopen = fake_urlopen
+result = m.openai_chat_json('https://x.example/v1', 'secret', 'return JSON', 321, timeout=3, x_handles=['@Foo'])
+print(json.dumps({{'captured': captured, 'result': result}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            payload = data['captured']['payload']
+            self.assertEqual(data['captured']['url'], 'https://x.example/v1/responses')
+            self.assertEqual(payload['max_output_tokens'], 321)
+            self.assertEqual(payload['tools'], [{'type': 'x_search', 'allowed_x_handles': ['foo']}])
+            self.assertEqual(payload['reasoning'], {'effort': 'low'})
+            self.assertEqual(data['result'], {'accounts': []})
+
+    def test_api_mode_can_force_responses_for_gateway_model_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env['DASHBOARD_GROK_MODEL'] = 'gateway-grok-latest'
+            env['DASHBOARD_GROK_API_MODE'] = 'responses'
+            code = f"""
+import importlib.util, json, sys
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+captured = {{}}
+class Resp:
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+    def read(self):
+        return b'{{"output":[{{"content":[{{"type":"output_text","text":"{{\\\\\\\"accounts\\\\\\\":[]}}"}}]}}]}}'
+def fake_urlopen(req, timeout=0):
+    captured['url'] = req.full_url
+    captured['payload'] = json.loads(req.data.decode('utf-8'))
+    return Resp()
+m.urllib.request.urlopen = fake_urlopen
+result = m.openai_chat_json('https://x.example/v1', 'secret', 'return JSON', 222, timeout=3, x_handles=['@Foo'])
+print(json.dumps({{'captured': captured, 'result': result}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            payload = data['captured']['payload']
+            self.assertEqual(data['captured']['url'], 'https://x.example/v1/responses')
+            self.assertEqual(payload['max_output_tokens'], 222)
+            self.assertEqual(payload['tools'], [{'type': 'x_search', 'allowed_x_handles': ['foo']}])
+            self.assertEqual(data['result'], {'accounts': []})
+
+    def test_context_lookup_does_not_restrict_x_search_to_monitored_handles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            code = f"""
+import importlib.util, json, sys
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+captured_handles = []
+def fake_openai_chat_json(base_url, api_key, prompt, max_tokens, timeout=m.REQUEST_TIMEOUT_SECONDS, x_handles=None):
+    captured_handles.append(x_handles)
+    return {{'posts': []}}
+m.openai_chat_json = fake_openai_chat_json
+post = {{
+    'time': '2026-07-16 10:00:00',
+    'chinese_text': '回复内容',
+    'conversation_type': 'reply',
+}}
+m.hydrate_posts(
+    'https://x.example/v1',
+    'secret',
+    [('监控账号', post, '123456789', 'monitored')],
+    timeout=3,
+)
+m.repair_context_from_x_html = lambda *args, **kwargs: dict(post)
+m.has_recovered_context = lambda _post: False
+m.repair_one_context(
+    'https://x.example/v1',
+    'secret',
+    '监控账号',
+    post,
+    '123456789',
+    'monitored',
+    timeout=3,
+)
+print(json.dumps({{'captured_handles': captured_handles}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            self.assertEqual(json.loads(out)['captured_handles'], [None, None])
 
     def test_paths_are_dashboard_home_scoped_and_telegram_helpers_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -273,6 +490,115 @@ print(json.dumps({{
             self.assertEqual(data['metadata_post_id'], 'unit-post-1')
             self.assertEqual(data['delivery_mode'], 'dashboard_database_only')
             self.assertEqual(data['markdown_count'], 0)
+
+    def test_database_time_uses_numeric_post_id_instead_of_model_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
+            code = f"""
+import importlib.util, json, sys
+from datetime import datetime, timezone
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+actual_utc = datetime(2026, 7, 16, 15, 21, tzinfo=timezone.utc)
+post_id = str((int(actual_utc.timestamp() * 1000) - 1288834974657) << 22)
+post = {{
+  'post_id': post_id,
+  'time': '2026-07-17 07:21:00',
+  'chinese_text': '时间应由推文 ID 校准',
+  'conversation_type': 'original',
+  'media': [],
+}}
+count = m.write_direct_x_alerts_to_db([('测试账号', post, post_id, 'tester')])
+con = m.push_history.connect()
+try:
+    row = con.execute(
+        "SELECT timestamp, time_text, content, metadata_json FROM dashboard_messages WHERE external_id = ?",
+        (post_id,),
+    ).fetchone()
+finally:
+    con.close()
+metadata = json.loads(row['metadata_json'])
+print(json.dumps({{
+  'count': count,
+  'timestamp': row['timestamp'],
+  'time_text': row['time_text'],
+  'content': row['content'],
+  'metadata_time': metadata['post']['time'],
+  'state_changes': m.normalize_monitor_state_times({{
+      'latest': {{'tester': {{'post_id': post_id, 'time': '2026-07-17 07:21:00'}}}},
+  }}),
+}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            expected_timestamp = datetime(2026, 7, 16, 15, 21, tzinfo=timezone.utc).timestamp()
+            self.assertEqual(data['count'], 1)
+            self.assertEqual(data['timestamp'], expected_timestamp)
+            self.assertEqual(data['time_text'], '2026-07-16 23:21:00')
+            self.assertIn('2026-07-16 23:21:00', data['content'])
+            self.assertNotIn('2026-07-17 07:21:00', data['content'])
+            self.assertEqual(data['metadata_time'], '2026-07-16 23:21:00')
+            self.assertEqual(data['state_changes'], 1)
+
+    def test_future_numeric_post_id_is_not_stored_and_is_removed_from_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env['DASHBOARD_HOME'] = tmp
+            env['DASHBOARD_ENV_FILE'] = str(Path(tmp) / 'dashboard.env')
+            env.pop('DASHBOARD_X_WATCHLIST_STATE', None)
+            code = f"""
+import importlib.util, json, sys
+from datetime import datetime, timedelta, timezone
+sys.path[:0] = [{str(COMPAT)!r}, {str(SRC)!r}]
+spec = importlib.util.spec_from_file_location('x_watchlist_monitor_under_test', {str(COMPAT / 'x_watchlist_monitor.py')!r})
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+future_utc = datetime.now(timezone.utc) + timedelta(days=365)
+post_id = str((int(future_utc.timestamp() * 1000) - 1288834974657) << 22)
+post = {{
+  'post_id': post_id,
+  'time': datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S'),
+  'chinese_text': '不应入库的未来推文 ID',
+  'conversation_type': 'original',
+  'media': [],
+}}
+count = m.write_direct_x_alerts_to_db([('测试账号', post, post_id, 'tester')])
+state = {{
+  'latest': {{'tester': {{'post_id': post_id, 'time': post['time']}}}},
+  'pending_delivery': {{'latest': {{'tester': {{'post_id': post_id, 'time': post['time']}}}}}},
+  'sent_missing_context': [{{'post_id': post_id, 'time': post['time'], 'post': post}}],
+  'held_for_context': [{{'post_id': post_id, 'time': post['time'], 'post': post}}],
+}}
+changes = m.normalize_monitor_state_times(state)
+con = m.push_history.connect()
+try:
+    row_count = con.execute('SELECT COUNT(*) FROM dashboard_messages').fetchone()[0]
+finally:
+    con.close()
+print(json.dumps({{
+  'count': count,
+  'row_count': row_count,
+  'changes': changes,
+  'latest': state['latest'],
+  'pending_latest': state['pending_delivery']['latest'],
+  'sent_missing_context': state['sent_missing_context'],
+  'held_for_context': state['held_for_context'],
+}}, ensure_ascii=False))
+"""
+            out = subprocess.check_output([sys.executable, '-c', textwrap.dedent(code)], env=env, text=True)
+            data = json.loads(out)
+            self.assertEqual(data['count'], 0)
+            self.assertEqual(data['row_count'], 0)
+            self.assertEqual(data['changes'], 4)
+            self.assertEqual(data['latest'], {})
+            self.assertEqual(data['pending_latest'], {})
+            self.assertEqual(data['sent_missing_context'], [])
+            self.assertEqual(data['held_for_context'], [])
 
     def test_database_failure_does_not_advance_seen_or_latest(self):
         with tempfile.TemporaryDirectory() as tmp:
